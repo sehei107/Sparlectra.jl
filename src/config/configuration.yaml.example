@@ -56,14 +56,17 @@ power_flow:
   apslf_start:
     enabled: false
     order: 40
-  # Flat start (true = every bus at 1.0 pu and 0 degrees, PV and slack at
-  # their setpoints). It sets only the start profile: the start machines
-  # (start_mode.start_projection, start_mode.dc_seed_unconditional,
-  # start_current_iteration, apslf_start) follow their own keys and run from
-  # the flat profile; only start_mode.angle_mode and voltage_mode are treated
-  # as classic while it is on.
+  # Flat start (true = every bus at 1.0 pu and the slack angle, PV and slack
+  # at their setpoints; voltages stored in the case file are ignored;
+  # start_mode.rotate_behind_pst turns buses behind phase shifters). While it
+  # is on, the run switches start_mode.start_projection,
+  # start_mode.dc_seed_unconditional, the two start modes and
+  # start_mode.ratio_profile off, the last one also for the rescue and auto
+  # stages of the run. Kept: auxiliary buses (star points) start at the
+  # ratio of their stiffest winding.
+  # start_current_iteration and apslf_start follow their own keys.
   # Default false: imported start voltages (MATPOWER VM/VA, CGMES SvVoltage) reach the
-  # solver — a flat start silently discarded the CGMES SV state (RealGrid divergence,
+  # solver: a flat start silently discarded the CGMES SV state (RealGrid divergence,
   # case) while MATPOWER runs only masked it via the projected start modes.
   flatstart: false
   # Positive solver tolerance and iteration cap.
@@ -214,12 +217,19 @@ power_flow:
   # impedance z = Un²/Sk'', so the former slack bus reacts to loading.
   external_grid:
     enabled: false
-    # Allowed values: auto, config — auto prefers the Sk''/R-X values a CGMES
+    # Allowed values: auto, config. Auto prefers the Sk''/R-X values a CGMES
     # delivery declares on the slack bus's ExternalNetworkInjection and falls
     # back to the numbers below; config always uses the numbers below.
     source: auto
     sk_MVA: 2000.0
     rx: 0.1
+
+  # Plausibility check of a converged AC solution. A converged run with an
+  # energized bus below vmin_warn (pu, every voltage level) gets a warning
+  # naming the lowest bus and its voltage; the run status stays unchanged.
+  # 0 switches the check off.
+  plausibility:
+    vmin_warn: 0.7
 
   # Start projection and warmstart controls.
   start_mode:
@@ -251,14 +261,26 @@ power_flow:
     # seed_ac_start=true behavior. Mutually exclusive with
     # power_flow.apslf_start.enabled and power_flow.solver in (apslf, dc).
     dc_seed_unconditional: false
-    # Flat starts only: the start projection also measures the ratio profile,
-    # the flat profile with every PQ bus magnitude scaled by the product of
-    # the off-nominal transformer ratios on its path from the reference (PV
-    # and slack keep their setpoints, angles stay 0). Like the DC and blend
-    # candidates it replaces the flat profile only when its mismatch 2-norm
-    # is at least 10 percent lower. Inert unless start_projection is on and
-    # power_flow.flatstart is true.
+    # A start projection candidate on a flat seed: the flat profile with
+    # every PQ bus magnitude scaled by the product of the off-nominal
+    # transformer ratios on its path from the reference (PV and slack keep
+    # their setpoints, angles stay 0), taken under the same rule as the DC
+    # and blend candidates; a requested DC start angle keeps precedence.
+    # When it acts it scales every PQ bus, not only star points.
+    # power_flow.flatstart: true switches it off for the whole run. Without
+    # the flat start the projection meets a flat seed in the rescue ladder's
+    # alternate start and dc_seed (power_flow.rescue; dc_seed requests DC
+    # angles, so the candidate never wins there) and in mode: auto.
+    # No effect on a start from stored voltages.
     ratio_profile: true
+    # Flat start behind phase shifters: a bus the reference reaches only
+    # across phase-shifting transformers starts at the slack angle plus the
+    # shift sum of a path with the fewest shifters; a bus a path without
+    # shifter reaches keeps the slack angle (in a mesh the parallel path
+    # fixes its angle). Also turns a stored start that holds no angle.
+    # Default false: every bus starts at the slack angle, and a shifter
+    # starts with its whole shift across its series impedance.
+    rotate_behind_pst: false
     # Reuse imported MATPOWER reference values during start generation.
     reuse_import_data: true
     # Candidate blend factors used when try_blend_scan=true.
@@ -332,10 +354,6 @@ power_flow:
     #   then switch all Q-limit violations after successful convergence
     # - classic_one_at_a_time: classical outer loop; solve the base PF first,
     #   then switch the largest Q-limit violation per outer-loop pass
-    #
-    # Legacy aliases still accepted for old YAML files:
-    # - matpower_simultaneous  -> classic_simultaneous
-    # - matpower_one_at_a_time -> classic_one_at_a_time
     enforcement_mode: active_set
 
     # First iteration where Q-limit switching is allowed.
@@ -371,7 +389,9 @@ power_flow:
     guard:
       enabled: true
       min_q_range_pu: 0.02
-      # Allowed values: prefer_pq, lock_pq
+      # Allowed values: prefer_pq, lock_pq. lock_pq: PV inside the band,
+      # clamped at the first limit reached; prefer_pq: PQ at the band
+      # middle from the start
       narrow_range_mode: lock_pq
       # Allowed values: lock_pq
       zero_range_mode: lock_pq
@@ -396,14 +416,29 @@ state_estimation:
   # 30 was too tight; the count a run reports afterwards is that of the LAST
   # solve and hides this.
   max_iter: 50
-  # Flat start for state-estimation initialization.
+  # Flat start for state-estimation initialization: every |V| 1 pu and every
+  # angle 0 with the slack at 0 inside the estimate; false starts from the
+  # stored state against the stored slack angle. Results and the write-back
+  # keep the stored slack angle.
   flatstart: true
+  # Start ladder: a WLS from the flat start that does not converge is solved
+  # once more from the voltages stored in the case (MATPOWER Vm/Va, CGMES
+  # SV, SCF start state); the result names the start that converged. No
+  # second try when the case stores no voltages. false: one try only.
+  start_ladder: true
+  start_mode:
+    # Flat start behind phase shifters: a bus the slack reaches only across
+    # phase-shifting transformers starts at their shift sum, the angles of
+    # the power flow flat start (power_flow.start_mode.rotate_behind_pst).
+    # Default false: every angle of the flat start is 0.
+    rotate_behind_pst: false
   jac_eps: 1.0e-6
   update_net: true
   # PMU voltage-angle (VaMeas) reference handling. auto estimates a common
-  # reference-angle offset between the PMU time base and the slack reference
+  # reference-angle offset between the PMU time base and the angle reference
+  # of the model (the stored slack angle)
   # as an additional state whenever Va measurements are present; off assumes
-  # PMU angles are already slack-referenced.
+  # PMU angles are in the angle reference of the model.
   # Allowed values: auto, off
   pmu_ref_offset: auto
   # First WLS iteration in which current-magnitude rows (ImagMeas) enter the
@@ -417,6 +452,51 @@ state_estimation:
   # overwrites tap data silently) back into the model after a converged run.
   update_shunts: true
   update_taps: false
+  # Read measurement tables (CSV with one measurement set per timestamp,
+  # keyed by CGMES mRID or by element name) in the SE service.
+  # Off: such a file is refused with this key named.
+  measurement_table: true
+  # Zero-injection rows (ZI) at passive buses (no generation, load or
+  # shunt) that carry no injection measurement: on adds them in every SE
+  # path (generator, measurement CSV, case file, measurement table) as
+  # weighted rows, constraint adds the same rows and solves every ZI row as
+  # an equality constraint (Lagrange, KKT; exact, no sigma), off adds none.
+  # The Web UI generator checkbox "passive as zero-injection constraint"
+  # sets this key for the case (on or off; a case on constraint stays on
+  # constraint while the box is checked).
+  zero_injection: on
+  # Sigma of one ZI row under zero_injection: on, in MVA, the unit of the
+  # injection rows (MW, Mvar; 0.001 MVA is 1 kW). Smaller binds the balance
+  # harder and makes the gain matrix worse conditioned. Finite, positive.
+  zero_injection_sigma_mva: 0.001
+  # Measurement sigmas per voltage level in physical units, for rows that
+  # carry no sigma of their own (an empty sigma cell of a measurement
+  # table); the measurement table generators write them as well. Order:
+  # the row's own sigma, then the row of the level of the measuring bus
+  # (a branch end: the bus at that end), then the global defaults.
+  # One row per level in block style, keyed by the bus nominal voltage in
+  # kV with a decimal point where needed (10.5; the YAML subset has no
+  # "- item" lists and no {...} flow mappings), one column per
+  # line. Columns: p_mw (MW), q_mvar (MVAr), i_a (A), u_kv (kV), rel_pct
+  # (percent of the value, optional; the sigma is
+  # max(absolute, rel_pct/100 * |value|)). A missing column keeps the
+  # default for that type. The numbers below are placeholders: take them
+  # from your metering. Usually set per case in the case configuration
+  # (Web UI: State Estimation section).
+  #   sigma_by_voltage_level:
+  #     380:
+  #       p_mw: 2.0
+  #       q_mvar: 2.0
+  #       i_a: 20
+  #       u_kv: 0.5
+  #       rel_pct: 0.5
+  #     110:
+  #       p_mw: 1.0
+  #       q_mvar: 1.0
+  #       i_a: 30
+  #       u_kv: 0.3
+  #       rel_pct: 1.0
+  sigma_by_voltage_level: {}
   # Residual-correlation (K-matrix) columns in the bad-data report: one
   # dense m x m pass; above 20000 measurement rows the columns are skipped
   # with a warning and the run goes on.
@@ -441,8 +521,9 @@ state_estimation:
   # of the measurement. Statistics keep the original sigma.
   suppression_sigma: 2000.0
   # Budget of the sequential elimination: at most this many rows may be
-  # removed in one diagnostics run. 0 disables the elimination.
-  max_eliminations: 3
+  # removed in one diagnostics run, one per round, so also the round limit
+  # of the elimination loop. 0 disables the elimination.
+  max_eliminations: 5
   # FD-aware rank tolerance factor for the observability rank decision.
   rank_tol_factor: 10.0
   # Where the observability rank comes from: decomposition is the SVD of
@@ -480,6 +561,53 @@ state_estimation:
   topology_cluster_min: 3
   observability:
     enabled: true
+  # Transformer tap estimation. enabled: false estimates no tap, every
+  # changer keeps its transferred step (SSH profile or measurement file) and
+  # se_tap_estimates.csv lists it with status not_estimated, reason disabled.
+  # fallback: when the run with tap estimation does not converge, a second
+  # run without tap estimation on the same measurements is the result
+  # (reason fallback_not_converged); the SE service also falls back when the
+  # fixed estimate fits worse than its staged pre-solve (worse_fit); false
+  # switches off both and returns the first run as it is.
+  # impedance_correction acts on the analytic impedance correction of a
+  # released regulator, per transformer. Per-step data (tap table rows, the
+  # reactance curve of a phase tap changer with xMin/xMax, TapStepImpedance
+  # factors) always follow the step; for an imported changer set (CGMES,
+  # PowSyBl) the analytic correction is then off under both values. A typed
+  # model follows the power flow: its x curve or x table follows the step,
+  # the correction factor on r under model.tap_changer_model =
+  # impedance_correction applies under auto only. Without per-step data auto
+  # applies the correction of typed models and off keeps the impedance of
+  # the start position. se_tap_estimates.csv names the source per row
+  # (reactance_source: table, analytic, nominal).
+  # Allowed values: auto, off
+  # exclude lists transformers (names or CGMES mRIDs) that never become tap
+  # states: they keep their transferred step, reason excluded, and their
+  # step is not calculated; an entry without a transformer gives a warning.
+  # include_machine_transformers: false keeps machine (generator step-up)
+  # transformers out of the estimation, their step is calculated after it
+  # from the AVR setpoint and the machine telemetry (status calculated,
+  # reason machine_transformer); without a Q measurement on every bus of the
+  # machine node the row stays not_estimated with reason
+  # q_not_measured_in_group and the transferred step, without a P
+  # measurement the scheduled P is used (note p_from_schedule); true
+  # estimates them like the others.
+  # Both are case scope (Web UI: the tap estimation table of the Case page).
+  tap_estimation:
+    enabled: true
+    fallback: true
+    impedance_correction: auto
+    exclude: []
+    include_machine_transformers: false
+  # Range check of the voltage measurements before every WLS: a value outside
+  # 0.5 to 1.5 pu (0 kV and non-finite values included) on a bus the
+  # switching state does not energize is right, the bus and its branches stay
+  # out of the estimation (reason deenergized); on an energized bus it is a
+  # gross error, replaced by a pseudo measurement at the imported state of
+  # the bus (SvVoltage of a CGMES import, else 1.0 pu) with its sigma times
+  # substitute_sigma_factor (at least 1; reason range_check_substituted).
+  bad_data:
+    substitute_sigma_factor: 3.0
 
 # PowSyBl IIDM import (see docs/src/powsybl_import.md)
 powsybl_import:
@@ -511,7 +639,7 @@ cgmes_import:
   # Delivery location(s): folder or ZIP; separate multiple parts (base case
   # and boundary set) with ";". Empty means "no CGMES input configured".
   path: ""
-  # System base in MVA — CGMES does not define one.
+  # System base in MVA (CGMES does not define one).
   base_mva: 100.0
   # Fail when topology references stay unresolved (usually a missing boundary set).
   require_boundary: true
@@ -530,6 +658,37 @@ cgmes_import:
   # Diagnostic override: treat every terminal as connected. For snapshots whose
   # SSH connected flags contradict their own SV state.
   ignore_connected: false
+  # Map EnergySource objects as fixed PQ injections (P and Q from the SSH,
+  # sign inverted from the CGMES load convention; no regulation, the slack
+  # only of an island without other reference). Off by default: they are
+  # left out and counted in one import notice. Turn it on for deliveries that
+  # carry generation as EnergySource.
+  map_energy_source: false
+  # Map CGMES 3.0 PowerElectronicsConnection objects (wind and solar parks,
+  # batteries behind a converter) as injections: P and Q from the SSH, sign
+  # inverted from the CGMES load convention; PV with an enabled voltage
+  # RegulatingControl, else PQ; the slack only of an island without other
+  # reference. Off by default: they are left out and counted in one import
+  # notice.
+  map_power_electronics: false
+  # Attach a switched-bank voltage controller to every LinearShuntCompensator
+  # whose controlEnabled and voltage RegulatingControl are set and regulate
+  # its own bus (sections of bPerSection between 0 and maximumSections). Off
+  # by default: the banks stay at their SSH sections.
+  shunt_control: false
+  # Read the DY profile and give the machines their dynamic data: inertia,
+  # damping and rating of the synchronous machine models, droop and governor
+  # time constant of some turbine governors. No calculation reads them; the
+  # island slack choice reads the unit type. Off by default: the DY file is
+  # skipped.
+  read_dynamics: false
+  # Import an EquivalentInjection on the SV angle reference node or on a
+  # boundary node as a voltage-regulating source at the SV voltage of its
+  # node (the one on the SV angle reference is the slack), with the
+  # short-circuit power from its r/x where the EQ states them. Off by
+  # default: the injection stays as mapped (PQ at the SSH p and q, PV with
+  # regulationStatus, slack when it holds the SV angle reference).
+  equivalent_injection_as_source: false
   # Plausibility band for a voltage RegulatingControl target, in p.u. of the
   # regulated bus's nominal voltage. Outside the band the target is treated as a
   # placeholder: ignored, unit held PV at the bus voltage derived from the
@@ -540,10 +699,14 @@ cgmes_import:
   vset_min_pu: 0.5
   vset_max_pu: 1.5
   # Give every electrical island its own SV-declared angle reference (at most
-  # one per island). Required for multi-island deliveries — without it every
+  # one per island). Required for multi-island deliveries: without it every
   # island beyond the primary has no reference and the island-wise power flow
   # refuses to run. false forces the legacy single-reference behavior.
   multi_slack: true
+  # An EquivalentBranch whose impedance (|z12| and |z21|, per unit on the
+  # base of terminal 1) lies below this value builds no branch: its two
+  # buses are joined as a link, with a notice. 0 switches it off.
+  equivalent_branch_min_z_pu: 1.0e-6
   # Newton-Raphson start state for CGMES runs.
   # - auto (default): use the delivery's own SvVoltage state when it carries
   #   one, else the synthetic flat start. Real deliveries are built around
@@ -552,7 +715,7 @@ cgmes_import:
   #   without convergence, SV 4 iterations).
   # - sv: always start from the imported SvVoltage state.
   # - flat: always use the synthetic flat start (the solver earns the
-  #   solution itself — for method studies).
+  #   solution itself, for method studies).
   # sv/auto-with-SV force-disable the competing start-value machines for the
   # run. On CGMES runs this wins over power_flow.flatstart; MATPOWER/DTF runs
   # ignore it. The SV comparison (sv_compare.csv) runs either way.
@@ -575,9 +738,16 @@ cgmes_import:
 short_circuit:
   # Scalar override for the IEC 60909-0 voltage factor c. 0 = automatic
   # Table-1 defaults by voltage level and case (c_max/c_min); a positive
-  # value (0.5..1.2) replaces the table for every bus — for expert or
+  # value (0.5..1.2) replaces the table for every bus, for expert or
   # verification runs where a worked example prescribes the factor.
   c_factor: 0.0
+  # Fault current of a converter-connected unit (PowerElectronicsConnection
+  # without maxIFault, synchronous machine on a wind or solar unit), as a
+  # multiple of its rated current ratedS/(sqrt(3)*ratedU). 0 = off: such a
+  # unit feeds nothing and its island is flagged as a lower bound. A stated
+  # maxIFault always wins. A manufacturer figure, to be set per case; about
+  # 1.0 to 1.5 is the usual range, as orientation only.
+  converter_current_factor: 0.0
   # Allowed values: auto, solves, takahashi
   # All-bus Thevenin sweep strategy. auto picks the Takahashi selected
   # inverse for islands with at least takahashi_min_buses buses (measured
@@ -616,7 +786,7 @@ matpower_import:
 model:
   # Allowed values: admittance, voltage_dependent_injection
   bus_shunt_model: admittance
-  # Tap-changer model used by all network importers.
+  # Tap-changer model of the MATPOWER and DTF importers.
   # Allowed values: ideal, impedance_correction
   # - ideal: tap steps only change the complex winding ratio; transformer R/X
   #   keep their neutral-position values (no impedance feedback).
@@ -642,17 +812,14 @@ model:
   # state that fits no reading says nothing about the file's convention.
   # Non-negative.
   auto_profile_max_fit_pu: 0.1
-  # Opt-in binary cache of the parsed case file, stored next to the case
-  # file in .sparlectra_net_cache/ and keyed by the case file hash and the
-  # Sparlectra/Julia versions. The network is always built fresh from the
-  # cached case, so import options keep taking effect. Only active when
-  # auto_profile is off; any stale or unreadable cache entry silently
-  # falls back to a fresh parse. Safe to delete the cache directory.
-  # Allowed values: true, false
-  net_cache_enabled: false
   # Allowed values: off, on, auto
   preallocate_network: auto
   preallocate_min_buses: 500
+  # System frequency of the network in Hz (50 in Europe, 60 in North
+  # America). Applies when the case states none: an SCF file's meta.f_nom
+  # wins. Used where a capacitance becomes a susceptance (addACLinePerKm!,
+  # SCF/PGM line c1). Positive.
+  nominal_frequency_hz: 50.0
 
 matpower_export:
   # Whether writeMatpowerCasefile writes the solved AC power-flow state back
@@ -710,7 +877,7 @@ runtime:
   case_source: ""
   configured_default_casefile: ""
 
-# Console/logfile output options live under `output:` — the former
+# Console/logfile output options live under `output:`. The former
 # diagnostics.console_*/logfile_diagnostics duplicates are deprecated and
 # ignored (the parser warns when one is set).
 diagnostics:
@@ -755,11 +922,14 @@ output:
   # tables, short-circuit, island diagnostics). technical = comma delimiter,
   # dot decimal; excel_de = semicolon delimiter, comma decimal, dot
   # thousands separator (opens correctly in a German-locale Excel);
-  # excel_us = comma delimiter, dot decimal, comma thousands separator.
-  # Allowed values: technical, excel_de, excel_us
-  # Delimiter and decimal separator of EVERY CSV file a run writes (technical,
-  # excel_de, excel_us); the one central CSV setting, whatever writes the file.
-  csv_format: technical
+  # excel_us = comma delimiter, dot decimal, comma thousands separator;
+  # auto = follow the regional settings of the machine (decimal comma gives
+  # excel_de, decimal point excel_us; the C/POSIX locale gives technical).
+  # Allowed values: auto, technical, excel_de, excel_us
+  # Delimiter and decimal separator of EVERY CSV file a run writes (auto,
+  # technical, excel_de, excel_us); the one central CSV setting, whatever
+  # writes the file.
+  csv_format: auto
   # Allowed values: off, compact, full
   logfile_diagnostics: compact
   # Allowed values: off, compact, full
@@ -830,6 +1000,72 @@ contingency:
   # result counts. Off reports the warm result alone.
   warm_cold_check: false
   warm_cold_check_margin_pu: 0.02
+  # Correlated events added to a generated N-1 branch list (the n1_all and
+  # n1_branches sources and the branch outage run): elements that trip
+  # together. SCF cases only; other formats run plain N-1 and run.log says
+  # so. Loads, units and shunts of an opened busbar stay in the model and
+  # are reported as cut off.
+  events:
+    enabled: false
+    double_circuits: true     # branches with the same two endpoints
+    busbars: false            # one busbar section: its branches and its closed couplers
+    substations: false        # whole station: every branch at all its sections
+    links: false              # each closed coupler alone
+    name_groups: false        # branches whose file names share a stem
+    # the circuit suffix a name group strips (one or two digits); members
+    # must also share the voltage and the endpoint stations
+    name_stem_pattern: "[ _#(-]?[0-9]{1,2}[)]?$"
+    max_members: 6            # larger events are skipped
+  # N-2 branch pairs added to the same list. rule all: every unordered pair
+  # of closed branches. A run above max_pairs stops before solving.
+  pairs:
+    enabled: false
+    rule: all
+    max_pairs: 50000
+
+qsts:
+  # Run mode of a QSTS run: off (a run is refused), snapshots (every step
+  # solved on its own from the solution of the base step) or sequential (the
+  # steps in order, taps and banks carried from step to step).
+  # Allowed values: off, snapshots, sequential
+  mode: off
+  # Step of a CGMES snapshot series that is the base case, counted from 1
+  # (1 = the first snapshot).
+  base_step: 1
+  # Run the controllers of the control section in the base case and in
+  # every step of a snapshot run; false keeps taps and shunt banks at the
+  # values of each snapshot.
+  snapshot_controls: false
+  # Start voltages of a step in a sequential run: previous (the solution of
+  # the last solved step) or snapshot (the solution of the same step in a
+  # snapshot run without controllers).
+  # Allowed values: previous, snapshot
+  sequential_start: previous
+  # Sequential run: every n-th step (1, n + 1, 2n + 1, ...) puts taps and
+  # banks back on the values of the series; 0 resyncs step 1 only.
+  resync_every: 0
+  # Sequential run: steps a controller stays locked after a counted move;
+  # 0 = no dead time.
+  dead_time_steps: 0
+  # Sequential run: three net moves of one controller with alternating sign
+  # within this many steps count as one hunting pattern; at least 3.
+  hunting_window: 3
+  # Sequential run: voltage band and loading limit of the violation metrics.
+  vm_min_pu: 0.9
+  vm_max_pu: 1.1
+  loading_max_pct: 100.0
+  # Series check of CGMES snapshot deliveries (checkCGMESSeries).
+  series:
+    # Share of common mRIDs over lines, transformers and their ends, busbar
+    # sections, breakers, disconnectors and connectivity nodes; below it a
+    # new series starts.
+    min_structural_overlap: 0.95
+    # Injection churn above which a pair is flagged in the report (never
+    # splits a series); null = no limit.
+    max_injection_churn: null
+    # Largest step between two snapshots in minutes; a larger step starts a
+    # new series; null = no limit.
+    max_gap: null
 
 control:
   # Enable the generic outer-loop control framework.
@@ -855,7 +1091,8 @@ control:
   # controller (block style; the minimal YAML reader has no "- item"
   # sequences). The name becomes the controller name where the type
   # supports one. Types and keys mirror the add* functions:
-  #   power_transformer -> addPowerTransformerControl! (trafo, mode, ...)
+  #   power_transformer -> addPowerTransformerControl! (trafo, mode, ...; tap_min/tap_max
+  #                        give a control range inside the physical tap range)
   #   machine_voltage   -> addMachineVoltageControl!   (bus, target_bus, target_vm_pu, ...)
   #   shunt_voltage     -> addShuntVoltageControl!     (bus, target_vm_pu, bs_min_mvar, bs_max_mvar, ...)
   #   series_reactance  -> addSeriesReactanceControl!  (from_bus, to_bus, p_target_mw, x_min_pu, x_max_pu, ...)
@@ -898,6 +1135,14 @@ webui:
   # (file:///.../docs/build/), the dev site (.../dev/) or a pinned version
   # folder. The Web UI only links there, it never fetches anything.
   docs_base_url: https://welthulk.github.io/Sparlectra.jl/
+  # Size in pixels of the app window (Edge, Chrome, Chromium, Brave) and
+  # its position on the screen. Stop Web UI saves the current size and
+  # position here unless the window is minimized; the next start opens the
+  # window there. null lets the browser place the window.
+  window_width: 1500
+  window_height: 950
+  window_x: null
+  window_y: null
 
 extensions:
   # Reserved for future extension schemas.

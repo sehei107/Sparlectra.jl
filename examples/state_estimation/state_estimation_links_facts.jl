@@ -17,9 +17,10 @@
 # purpose: SE phase 3 walkthrough. A busbar coupler (closed link) splits one
 #          electrical node into two modelled buses: the SE runs on the
 #          contracted net, aggregates the cluster injections (LINKAGG), and
-#          syncs the member voltages. A link P measurement then steers the W2
-#          flow allocation (calcLinkFlowsSE!), and se_view reports the frozen
-#          operating point.
+#          syncs the member voltages. A link P measurement is a WLS row of
+#          the next estimate (calcLinkFlowsSE! reports its residual), also
+#          from a measurement table row on the coupler terminal, and se_view
+#          reports the frozen operating point.
 
 using Sparlectra
 using Printf
@@ -31,8 +32,8 @@ function _create_demo_net()
   for b in ("S", "B1", "B1a", "B2")
     addBus!(net = net, busName = b, vn_kV = 110.0)
   end
-  addACLine!(net = net, fromBus = "S", toBus = "B1", length = 10.0, r = 0.02, x = 0.2, c_nf_per_km = 0.0, tanδ = 0.0)
-  addACLine!(net = net, fromBus = "B1a", toBus = "B2", length = 8.0, r = 0.02, x = 0.2, c_nf_per_km = 0.0, tanδ = 0.0)
+  addPIModelACLine!(net = net, fromBus = "S", toBus = "B1", r_pu = 0.02, x_pu = 0.2, b_pu = 0.0, status = 1)
+  addPIModelACLine!(net = net, fromBus = "B1a", toBus = "B2", r_pu = 0.02, x_pu = 0.2, b_pu = 0.0, status = 1)
   addProsumer!(net = net, busName = "S", type = "EXTERNALNETWORKINJECTION", vm_pu = 1.02, va_deg = 0.0, referencePri = "S")
   addProsumer!(net = net, busName = "B1", type = "ENERGYCONSUMER", p = 10.0, q = 3.0)
   addProsumer!(net = net, busName = "B1a", type = "ENERGYCONSUMER", p = 5.0, q = 2.0)
@@ -45,7 +46,7 @@ function _create_demo_net()
 end
 
 function run_state_estimation_links_facts()
-  print_example_banner("examples/state_estimation/state_estimation_links_facts.jl", "SE on the contracted net (busbar coupler), LINKAGG aggregation, W2 allocation with a link measurement, se_view")
+  print_example_banner("examples/state_estimation/state_estimation_links_facts.jl", "SE on the contracted net (busbar coupler), LINKAGG aggregation, a link measurement as a WLS row, se_view")
 
   net = _create_demo_net()
   ite_pf, erg_pf = runpf!(net, 40, 1e-10, 0; method = :rectangular)
@@ -66,14 +67,31 @@ function run_state_estimation_links_facts()
   println("SE on the contracted net:")
   @printf("  converged = %s; vm(B1) = %.6f pu == vm(B1a) = %.6f pu (members share the representative)\n\n", string(res.converged), net.nodeVec[b1]._vm_pu, net.nodeVec[b1a]._vm_pu)
 
-  # 2) W2 allocation: without a measurement the coupler flow is the KCL
-  # (minimum-norm) split; a link P measurement then pins it
+  # 2) the coupler flow after the estimate: the nodal balance of the
+  # cluster at the estimated state (a single coupler has no circulation).
+  # A link P measurement is a WLS row of the next estimate; its error pulls
+  # the state by its weight and shows in the residual
   rep0 = calcLinkFlowsSE!(net)
   p0 = net.linkVec[1].pFlow_MW
   @printf("coupler flow (no measurement) : %.3f MW  source = %s\n", p0, string(rep0[1].source))
-  addPflowMeasurement!(net; value = p0 + 0.5, sigma = 0.01, linkNr = 1)
+  addPflowMeasurement!(net; value = p0 + 0.5, sigma = 0.1, linkNr = 1)
+  with_state_estimation_config(max_iter = 30, tol = 1e-10, update_net = true) do
+    runse!(net)
+  end
   rep1 = calcLinkFlowsSE!(net)
-  @printf("coupler flow (measured z)     : %.3f MW  source = %s  residual = %.4f MW\n\n", net.linkVec[1].pFlow_MW, string(rep1[1].source), rep1[1].p_meas_residual)
+  @printf("coupler flow (measured z)     : %.3f MW  source = %s  residual = %.4f MW\n", net.linkVec[1].pFlow_MW, string(rep1[1].source), rep1[1].p_meas_residual)
+
+  # the same kind of input from a measurement table: P on the to-end
+  # terminal of the coupler (power into the link from B1a, so the opposite
+  # sign of the flow B1 -> B1a); the table import turns it into a link
+  # measurement. The table replaces the measurement set with this one row,
+  # so no estimate runs here: calcLinkFlowsSE! gives its residual against
+  # the last estimate
+  file = joinpath(mktempdir(), "se_links_demo.table.csv")
+  writeMeasurementTable(file, [(timestamp = "", measurement_mrid = "", terminal_mrid = net.linkVec[1].cName * ":to", node_mrid = "", type = "P", value = -(p0 + 1.0), sigma = 0.01, source = "example", valid = true)])
+  readMeasurementTable!(net; file = file, zero_injection = false)
+  rep2 = calcLinkFlowsSE!(net)
+  @printf("coupler flow (table row)      : %.3f MW  source = %s  residual = %.4f MW\n\n", net.linkVec[1].pFlow_MW, string(rep2[1].source), rep2[1].p_meas_residual)
 
   # 3) the frozen operating point at a glance
   view = se_view(net)

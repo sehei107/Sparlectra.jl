@@ -26,7 +26,7 @@ module SysimageLauncher
 using TOML
 using SHA
 
-export handle_sysimage, unresolved_dependencies, compat_lower_bound, outdated_dependencies, repair_environment, prepare_environments, sysimage_source_roots, sysimage_build_script, external_sysimage, remove_stale_sysimage, ENV_ONLY_FLAG
+export handle_sysimage, console_answer, unresolved_dependencies, compat_lower_bound, outdated_dependencies, repair_environment, prepare_environments, sysimage_source_roots, sysimage_build_script, external_sysimage, remove_stale_sysimage, running_on_sysimage, warm_webui_page, ENV_ONLY_FLAG
 
 const REBUILD_FLAG = "--rebuild-sysimage"
 const NO_IMAGE_FLAG = "--no-sysimage"
@@ -152,6 +152,82 @@ function sysimage_problem(path::AbstractString, project_dir::AbstractString)::Un
   return nothing
 end
 
+# a directory in one spelling: the real path when it exists (symlinked state
+# roots, case on Windows), no trailing separator (SPARLECTRA_APP_ROOT ends
+# with one, the launcher's project_dir does not)
+_comparable_dir(dir::AbstractString)::String = rstrip(isdir(dir) ? realpath(dir) : normpath(abspath(dir)), ['/', '\\'])
+
+"""
+    foreign_sysimage_owner(image, project_dir) -> Union{Nothing,String}
+
+The project directory recorded in the image metadata (`project_dir`) when it
+names another checkout than `project_dir`, otherwise `nothing`: same
+checkout, no such key (an image built before the key existed), or no
+readable metadata (`sysimage_problem` reports that case). There is one image
+per user, so a second checkout (a release clone next to the development
+checkout) finds the image of the first one; it must neither use nor delete
+it.
+"""
+function foreign_sysimage_owner(image::AbstractString, project_dir::AbstractString)::Union{Nothing,String}
+  meta_path = sysimage_meta_path(image)
+  (isfile(image) && isfile(meta_path)) || return nothing
+  meta = try
+    TOML.parsefile(meta_path)
+  catch err
+    # expected failure: a truncated or hand-edited metadata file;
+    # sysimage_problem reports it as unreadable
+    err isa TOML.ParserError || rethrow()
+    return nothing
+  end
+  recorded = get(meta, "project_dir", "")
+  (recorded isa AbstractString && !isempty(recorded)) || return nothing
+  return _comparable_dir(recorded) == _comparable_dir(project_dir) ? nothing : String(recorded)
+end
+
+# The console reader of the last question that got no answer in time, with
+# the stream it reads. A readline on a terminal cannot be cancelled: after a
+# timeout the task stays and takes the next line typed. A second readline on
+# the same stream would race with it, and the older task would take the answer
+# meant for the later question. So the next question on the same stream waits
+# on this task instead of starting another one.
+const _PENDING_CONSOLE_READER = Ref{Union{Nothing,Tuple{IO,Task}}}(nothing)
+
+"""
+    console_answer(prompt; io = stdout, input = stdin, seconds = 30.0) -> String
+
+Print `prompt` to `io` and return the next line from `input`, or "" when
+nobody answers within `seconds`, at the end of the input or when the input
+is closed while the question waits. A reader left over from an earlier
+question on the same `input` that timed out is reused, so one line typed on
+the console always answers the question on screen. Both console questions of
+`start_webui.jl` (sysimage build, update install) go through this function.
+"""
+function console_answer(prompt::AbstractString; io::IO = stdout, input::IO = stdin, seconds::Real = 30.0)::String
+  print(io, prompt)
+  flush(io)
+  pending = _PENDING_CONSOLE_READER[]
+  reader = if pending !== nothing && pending[1] === input && !istaskdone(pending[2])
+    pending[2]
+  else
+    # a finished leftover task holds a line typed after its own timeout; it
+    # is dropped, it was not typed for this question
+    @async try
+      readline(input)
+    catch err
+      # expected failure: the input is closed while the question waits
+      err isa EOFError || err isa Base.IOError || rethrow()
+      ""
+    end
+  end
+  _PENDING_CONSOLE_READER[] = (input, reader)
+  if timedwait(() -> istaskdone(reader), Float64(seconds); pollint = 0.1) !== :ok
+    println(io)
+    return ""
+  end
+  _PENDING_CONSOLE_READER[] = nothing
+  return fetch(reader)
+end
+
 """
 Ask `prompt` and return true only when the user answers yes. The build is
 opt-in: Enter, a timeout and a start without a terminal all mean no. A build
@@ -161,23 +237,8 @@ longer, and a user who did not ask for it should not wait for it;
 """
 function ask_build(prompt::AbstractString; seconds::Real = 30.0)::Bool
   isa(stdin, Base.TTY) || return false
-  print(prompt)
-  flush(stdout)
-  answer = Ref{String}("")
-  reader = @async begin
-    answer[] = try
-      readline(stdin)
-    catch
-      ""
-    end
-  end
-  waited = 0.0
-  while !istaskdone(reader) && waited < seconds
-    sleep(0.1)
-    waited += 0.1
-  end
-  istaskdone(reader) || println()
-  return lowercase(strip(answer[])) in ("y", "yes", "j", "ja")
+  answer = console_answer(prompt; seconds)
+  return lowercase(strip(answer)) in ("y", "yes", "j", "ja")
 end
 
 function build_sysimage(project_dir::AbstractString)::Bool
@@ -228,17 +289,25 @@ function relaunch_with_sysimage(image::AbstractString, script::AbstractString, p
   startup = get(ENV, "SPARLECTRA_STARTUP_FILE", "no")
   cmd = `$(exe) -J$(image) --startup-file=$(startup) --project=$(project_dir) $(thread_flag) $(script) $(args)`
   println("Sysimage: ", image)
-  # Ctrl+C reaches the whole process group, so it hits this process too. The
-  # child prints its own "closing Sparlectra Web UI"; a stack trace from the
-  # parent on top of that would look like a crash. ignorestatus keeps a
+  # Ctrl+C reaches the whole process group, so it hits this process too. A
+  # script run would end on it with the signal and a native backtrace, and
+  # the shell prompt would come back before the child has printed its own
+  # "Sparlectra Web UI stopped by Ctrl+C." So SIGINT becomes an exception
+  # here, and this process keeps waiting until the child has stopped; the
+  # child ends at the latest on a second Ctrl+C. ignorestatus keeps a
   # non-zero child exit from raising here as well - it is forwarded instead.
-  code = try
-    run(ignorestatus(cmd)).exitcode
-  catch err
-    err isa InterruptException || rethrow()
-    0
+  Base.exit_on_sigint(false)
+  # run(...; wait = false) points the streams at devnull unless they are given
+  child = run(pipeline(ignorestatus(cmd); stdin = stdin, stdout = stdout, stderr = stderr); wait = false)
+  while true
+    try
+      wait(child)
+      break
+    catch err
+      err isa InterruptException || rethrow()
+    end
   end
-  exit(code)
+  exit(child.exitcode)
 end
 
 """
@@ -414,8 +483,10 @@ The whole decision, shared by every platform: skip when asked to
 (`SPARLECTRA_NO_SYSIMAGE=1`, `--no-sysimage`) or when this process already
 booted from the image; relaunch through a usable image; otherwise offer the
 build and relaunch through the fresh one. `--rebuild-sysimage` builds even
-when the current image is fine. Returns `nothing` when the caller should
-just continue in this process.
+when the current image is fine. An image whose metadata names another
+project directory (`foreign_sysimage_owner`) is neither used nor removed;
+the build question says that a build replaces it. Returns `nothing` when the
+caller should just continue in this process.
 """
 function handle_sysimage(args::Vector{String}, script::AbstractString, project_dir::AbstractString;
                          image::AbstractString = sysimage_path(), ask = ask_build, relaunch = relaunch_with_sysimage,
@@ -434,7 +505,10 @@ function handle_sysimage(args::Vector{String}, script::AbstractString, project_d
 
   rebuild = REBUILD_FLAG in args
   passthrough = filter(a -> a != REBUILD_FLAG && a != NO_IMAGE_FLAG, args)
-  problem = sysimage_problem(image, project_dir)
+  # the image of another checkout is not judged against this one: it is not
+  # used, and not stale either, so it is never removed from here
+  owner = foreign_sysimage_owner(image, project_dir)
+  problem = owner === nothing ? sysimage_problem(image, project_dir) : "belongs to $(owner)"
 
   if !rebuild && problem === nothing
     relaunch(image, script, project_dir, passthrough)
@@ -445,15 +519,21 @@ function handle_sysimage(args::Vector{String}, script::AbstractString, project_d
   # changed, other Julia, unreadable metadata, metadata missing) is stale;
   # the Web UI never starts on it, and unless a new one replaces it now, it
   # goes
-  stale = problem !== nothing && (isfile(image) || isfile(sysimage_meta_path(image)))
+  stale = owner === nothing && problem !== nothing && (isfile(image) || isfile(sysimage_meta_path(image)))
 
   if rebuild
     println("Rebuilding the sysimage on request ($(REBUILD_FLAG)).")
+    owner === nothing || println("This replaces the sysimage of ", owner, ".")
   else
-    println("Sysimage: ", problem, ".")
+    if owner === nothing
+      println("Sysimage: ", problem, ".")
+    else
+      println("Sysimage: the sysimage belongs to ", owner, "; it is kept and the start goes on without it.")
+    end
     println("Building one takes a few minutes. Afterwards the Web UI starts in seconds")
     println("and no page has to compile on first use.")
-    if !ask("Build the sysimage now? [y/N] ")
+    question = owner === nothing ? "Build the sysimage now? [y/N] " : "Build a sysimage for this checkout now? It replaces the sysimage of $(owner). [y/N] "
+    if !ask(question)
       if stale && remove_stale_sysimage(image) === :removed
         println("Sysimage is out of date and was removed. Start with $(basename(script)) $(REBUILD_FLAG) to build a new one.")
       end
@@ -467,7 +547,8 @@ function handle_sysimage(args::Vector{String}, script::AbstractString, project_d
   # the build writes to a staging file and replaces the image only when it
   # succeeded; a failed build leaves the old image, which is stale and goes
   if build_sysimage(project_dir)
-    problem = sysimage_problem(image, project_dir)
+    owner = foreign_sysimage_owner(image, project_dir)
+    problem = owner === nothing ? sysimage_problem(image, project_dir) : "belongs to $(owner)"
     if problem === nothing
       relaunch(image, script, project_dir, passthrough)
       return nothing
@@ -478,6 +559,50 @@ function handle_sysimage(args::Vector{String}, script::AbstractString, project_d
     println("The outdated sysimage was removed; start with $(basename(script)) $(REBUILD_FLAG) to build a new one.")
   end
   return nothing
+end
+
+"""
+    running_on_sysimage(; current = <image of this process>) -> Bool
+
+Whether this process runs on a sysimage of its own (the managed Web UI
+image or one given with `-J`) rather than the stock Julia image `sys.*`.
+On such an image the Web UI pages are compiled already.
+"""
+running_on_sysimage(; current::AbstractString = unsafe_string(Base.JLOptions().image_file))::Bool = !isempty(current) && !startswith(basename(current), "sys.")
+
+"""
+    warm_webui_page(render; io = stdout) -> Bool
+
+Run `render()` once and report it on `io`: `Preparing the first page`,
+then `ready in N s`. `render` produces the Web UI start page the way the
+server does for a request (the launcher passes the server's own routing
+call), so the window that opens next shows a usable page at once. The
+package image of the application carries the start page compiled, so this
+takes a few seconds; the long compile after an installation or update
+happens earlier, when the packages load. Returns what `render` returns
+(`true` for a usable page). An error from `render` is printed with its
+message and `false` returned; the window opens anyway and shows the same
+error on its own request.
+
+`render` runs on the calling task, which yields as usual: a render that
+logs a warning or touches the event loop needs that, a busy wait on the
+calling thread deadlocked exactly there.
+"""
+function warm_webui_page(render; io::IO = stdout)::Bool
+  print(io, "Preparing the first page ... ")
+  flush(io)
+  started = time()
+  outcome = try
+    render()
+  catch err
+    # the page itself failed to render: the window shows the same error on
+    # its own request, so the start goes on and the console names the reason
+    println(io, "not prepared (", sprint(showerror, err), "); opening the window anyway.")
+    return false
+  end
+  ok = outcome === true
+  println(io, ok ? "ready in $(round(Int, time() - started)) s." : "not ready; opening the window anyway.")
+  return ok
 end
 
 end # module

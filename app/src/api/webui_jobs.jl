@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,6 +49,12 @@ const _WEBUI_OPERATION_LOG_PHASES = Set((
   "topology_precheck",
   "state_estimation",
   "estimation_diagnostics",
+  # N-1 / scenario batch and QSTS phases; the outage or step counter itself
+  # never writes to the operation log
+  "solving_base_case",
+  "running_outages",
+  "running_scenarios",
+  "running_steps",
   "postprocessing_result",
   "writing_artifacts",
   "finalizing_success",
@@ -63,6 +69,7 @@ function _webui_run_kind_label(request::AbstractDict)::String
     v = _service_request_value(request, key, nothing)
     v === true || (v isa AbstractString && lowercase(strip(v)) in ("true", "1", "yes", "on"))
   end
+  _webui_request_is_qsts(request) && return "QSTS run"
   truthy("se_mode") && return "State estimation"
   truthy("contingency_mode") && return "N-1 contingency run"
   truthy("short_circuit_mode") && return "Short-circuit run"
@@ -81,6 +88,7 @@ function _webui_request_run_mode(request::AbstractDict)::Union{Nothing,String}
     v = _service_request_value(request, key, nothing)
     v === true || (v isa AbstractString && lowercase(strip(v)) in ("true", "1", "yes", "on"))
   end
+  _webui_request_is_qsts(request) && return "qsts"
   truthy("se_mode") && return "se"
   truthy("contingency_mode") && return "contingency"
   truthy("short_circuit_mode") && return "short_circuit"
@@ -90,6 +98,25 @@ function _webui_request_run_mode(request::AbstractDict)::Union{Nothing,String}
   v = _service_request_value(request, "se_start_run_id", nothing)
   (v isa AbstractString && !isempty(strip(v))) && return "powerflow_se_start"
   return nothing
+end
+
+## Whether a run of this kind writes the detailed result CSV
+## (bus_voltages_complex.csv, branch_flows.csv). Only the single power-flow
+## pipeline (`_run_sparlectra_api`) writes it: a plain power flow (run mode
+## `nothing`) and a diagnostic run. Every other kind in the dispatch of
+## `start_powerflow_run` (QSTS, state estimation, N-1 and scenario batches,
+## short circuit, import analysis, SE-started power flow) ignores the
+## checkbox, so the job logs the export as skipped for that kind instead of
+## failed. A new run kind is a skip until it is added here.
+const _WEBUI_RUN_MODES_WITH_DETAILED_CSV = Union{Nothing,String}[nothing, "diagnose"]
+
+_webui_run_mode_writes_detailed_csv(run_mode::Union{Nothing,String})::Bool = run_mode in _WEBUI_RUN_MODES_WITH_DETAILED_CSV
+
+## A QSTS request names its mode (sequential or snapshots) instead of a
+## boolean flag; any non-empty value marks the kind, the service checks it.
+function _webui_request_is_qsts(request::AbstractDict)::Bool
+  v = _service_request_value(request, "qsts_mode", nothing)
+  return v isa AbstractString && !isempty(strip(v))
 end
 
 function _check_powerflow_cancelled!(token)
@@ -337,7 +364,8 @@ function start_webui_powerflow_run(request::AbstractDict; case_directory::Union{
   # what the batch counter counts: an id-addressed scenario source runs
   # general scenarios, every other contingency run single outages (the
   # n1_* scenario sources are generated outage lists)
-  progress_unit = _service_request_value(request, "scenario_source", nothing) in ("file_block", "external_file") ? "scenarios" : "outages"
+  # a QSTS run counts its steps
+  progress_unit = _webui_request_is_qsts(request) ? "steps" : _service_request_value(request, "scenario_source", nothing) in ("file_block", "external_file") ? "scenarios" : "outages"
   job = Dict{String,Any}(
     "kind_label" => kind_label,
     "run_mode" => something(_webui_request_run_mode(request), ""),
@@ -403,8 +431,9 @@ function start_webui_powerflow_run(request::AbstractDict; case_directory::Union{
       sparlectra_arm_abort_token!(job["abort_requested"])
       worker_request["phase_callback"] = phase -> _webui_phase_event!(job, phase, event_callback)
       worker_request["operation_callback"] = (event; fields...) -> event_callback(event; fields...)
-      # read only by contingency_mode runs (N-1 and scenario batches); the
-      # closure is thread safe because the update takes the service lock
+      # read only by contingency_mode runs (N-1 and scenario batches) and by
+      # QSTS runs (one call per step); the closure is thread safe because
+      # the update takes the service lock
       worker_request["progress_callback"] = (done, total) -> _update_webui_job_progress!(job, done, total, progress_unit)
       result = try
         runner(worker_request; case_directory)
@@ -481,7 +510,11 @@ function start_webui_powerflow_run(request::AbstractDict; case_directory::Union{
           artifact_source = rescanned_artifacts isa AbstractVector ? rescanned_artifacts : get(result, "artifacts", Any[])
           artifact_names = Set(String(get(artifact, "name", "")) for artifact in artifact_source)
           expected_csv = ["bus_voltages_complex.csv", "branch_flows.csv"]
-          if all(name -> name in artifact_names, expected_csv)
+          csv_run_mode = _webui_request_run_mode(request)
+          if !_webui_run_mode_writes_detailed_csv(csv_run_mode)
+            # the run kind never writes the files (see the rule above)
+            event_callback("detailed_result_csv_export_skipped"; run_id = job["run_id"], reason = string(csv_run_mode, "_run"), csv_format = csv_format.name, status = "skipped")
+          elseif all(name -> name in artifact_names, expected_csv)
             event_callback("detailed_result_csv_exported"; run_id = job["run_id"], csv_format = csv_format.name, artifacts = expected_csv, status = "succeeded")
           elseif get(get(result, "metadata", Dict{String,Any}()), "detailed_result_csv_status", "") == "skipped"
             event_callback("detailed_result_csv_export_skipped"; run_id = job["run_id"], reason = get(get(result, "metadata", Dict{String,Any}()), "detailed_result_csv_skip_reason", "unknown"), final_converged = get(result, "converged", false), solution_available = get(result, "solution_available", false), has_network = false, csv_format = csv_format.name, status = "skipped")

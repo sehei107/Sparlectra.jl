@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,8 +21,8 @@
     _fitColumn(text, width) -> String
 
 Trim `text` to `width` characters, marking the cut with `…`. Fixed-width
-`@sprintf` fields pad but never truncate, so long names — CGMES bus and
-branch identifiers routinely exceed 25 characters — would otherwise push
+`@sprintf` fields pad but never truncate, so long names (CGMES bus and
+branch identifiers routinely exceed 25 characters) would otherwise push
 every following column out of alignment.
 """
 function _fitColumn(text, width::Int)::String
@@ -137,7 +137,7 @@ _effective_bus_name(busNameByIdx::AbstractDict, net::Net, bus_idx::Int)::String 
 
 # External-grid source presentation (issue #299): the hidden internal
 # reference bus "<bus>__extgrid_int" reports type "SOURCE" instead of
-# "SLACK" — the grid connection is a source, the hidden bus only its
+# "SLACK": the grid connection is a source, the hidden bus only its
 # internal anchor. The solver-internal node type stays Slack; this is
 # presentation only (result table, structured report, CSV/JSON rows).
 _is_external_grid_internal_bus(name::AbstractString)::Bool = endswith(name, "__extgrid_int")
@@ -207,6 +207,9 @@ function _original_branch_name(net::Net, br::Branch)::String
 end
 
 function _branch_kind_name(net::Net, br::Branch)::String
+  # a network equivalent (CGMES EquivalentBranch) is neither line nor
+  # transformer; its losses may be negative and are reported as they are
+  haskey(net.equivalent_branch_metadata, Int(br.branchIdx)) && return "equivalent_branch"
   meta = get(net.matpower_branch_metadata, br.branchIdx, nothing)
   if meta !== nothing
     hasproperty(meta, :orig_kind) && return String(getproperty(meta, :orig_kind))
@@ -249,7 +252,7 @@ function _bus_control_flag_cache(net::Net)::Dict{Int,BusControlFlags}
     cache[bus_idx] = BusControlFlags(old.has_qu | has_qu_controller(ps), old.has_pu | has_pu_controller(ps), old.hvdc)
   end
   # HVDC pair terminals: steered injections read "B2B", a grid-forming
-  # reference (island_feed to side) reads "B2B src" — the bus table then
+  # reference (island_feed to side) reads "B2B src": the bus table then
   # explains WHY a SLACK row is a converter and not a power plant
   for c in _hvdc_pair_controllers(net)
     c.enabled || continue
@@ -330,10 +333,12 @@ function _effective_bus_power_components(net::Net, bus_idx::Int)
   q_gen = 0.0
   p_load = 0.0
   q_load = 0.0
-  # a Q(U)-controlled machine's LIVE evaluated value is authoritative (its
-  # own _qƩGen write-back is a separate, known gap - issue #374's own
-  # "related" note); every other generator prefers the solved _qƩGen/_pƩGen
-  # over the per-prosumer nameplate the loop above sums by default.
+  # a Q(U)-controlled machine's LIVE evaluated value is authoritative: the
+  # solver writes it to _qƩGen only at an unclamped PQ bus after a converged
+  # solve (_write_controlled_generation!, rectangular_finalization.jl), at a PV
+  # bus _qƩGen is the solved bus total; every other generator prefers the
+  # solved _qƩGen/_pƩGen over the per-prosumer nameplate the loop below
+  # sums by default.
   bus_has_qu_gen = false
 
   for ps in net.prosumpsVec
@@ -402,7 +407,13 @@ end
 
 Base.Tuple(components::BusPowerComponents) = (components.p_gen, components.q_gen, components.p_load, components.q_load)
 
-function _bus_power_component_cache(net::Net)::Dict{Int,BusPowerComponents}
+# Per-bus generation and load of the solved net for the machine-readable
+# results (buildACPFlowReport, the bus CSV files). Under a distributed slack
+# the generation of a participating bus is what it delivers, schedule plus
+# its share of lambda_P, at every bus type, so the rows add up to load plus
+# losses. `distributed_slack = false` leaves the shares out (the DC report:
+# the status of an earlier AC solve may still sit on the net).
+function _bus_power_component_cache(net::Net; distributed_slack::Bool = true)::Dict{Int,BusPowerComponents}
   base = net.baseMVA
   totals = Dict{Int,NTuple{4,Float64}}()
   # see _effective_bus_power_components (issue #374): a Q(U)-controlled
@@ -435,6 +446,7 @@ function _bus_power_component_cache(net::Net)::Dict{Int,BusPowerComponents}
   # (typically few) clamped buses, and the limit lookup happens once here,
   # not per bus.
   qmin_pu, qmax_pu = isempty(net.qLimitEvents) ? (Float64[], Float64[]) : getQLimits_pu(net)
+  _, ds_shares = distributed_slack ? _distributed_slack_bus_shares(net) : (false, Dict{Int,NTuple{2,Float64}}())
 
   cache = Dict{Int,BusPowerComponents}()
   for node in net.nodeVec
@@ -451,6 +463,8 @@ function _bus_power_component_cache(net::Net)::Dict{Int,BusPowerComponents}
       limit_pu = side === :max ? (node.busIdx <= length(qmax_pu) ? qmax_pu[node.busIdx] : Inf) : (node.busIdx <= length(qmin_pu) ? qmin_pu[node.busIdx] : -Inf)
       isfinite(limit_pu) && (q_gen = _qv_effective_qgen(net, node.busIdx, limit_pu * net.baseMVA))
     end
+    share = get(ds_shares, node.busIdx, nothing)
+    share === nothing || (p_gen = last(_distributed_slack_bus_pgen(net, node.busIdx, share[2])))
     cache[node.busIdx] = BusPowerComponents(p_gen, q_gen, p_load, q_load)
   end
   return cache
@@ -462,10 +476,12 @@ end
 
 # Printed Type column of the branch table. Consult the import metadata
 # first so print and report rows (_branch_kind_name) agree for the same
-# branch, then fall back to the name marker. The PST label is a heuristic
+# branch ("EqBr" for a CGMES EquivalentBranch), then fall back to the kind
+# the branch was built as (_branch_build_kind). The PST label is a heuristic
 # (phase tap present, nonzero shift, no ratio tap) pending the typed
 # BranchKind enum (tracked separately).
 function _branch_kind_label(net::Net, br::Branch)::String
+  haskey(net.equivalent_branch_metadata, Int(br.branchIdx)) && return "EqBr"
   meta = get(net.matpower_branch_metadata, br.branchIdx, nothing)
   kind = if meta !== nothing && hasproperty(meta, :orig_kind)
     Symbol(getproperty(meta, :orig_kind))
@@ -479,16 +495,8 @@ function _branch_kind_label(net::Net, br::Branch)::String
   elseif kind === :line
     "Line"
   else
-    name = br.comp.cName
-    if occursin("_ACL_", name)
-      "Line"
-    elseif occursin("_2WT_", name)
-      "Trafo"
-    elseif occursin("_PI_", name)
-      "PI"
-    else
-      "Branch"
-    end
+    bk = _branch_build_kind(br)
+    bk === :line ? "Line" : (bk === :transformer ? "Trafo" : "PI")
   end
   if label == "Trafo" && br.has_phase_tap && !br.has_ratio_tap && abs(br.phase_shift_deg) > 0.0
     return "PST"
@@ -769,6 +777,8 @@ Prints a single console/log line summarizing the wrong-branch detection
 outcome when it is suspect or invalid (`status` is neither `:ok` nor
 `:not_checked`). Clean runs and disabled detection print nothing, keeping
 logs stable for the common case.
+A voltage finding after a start without angles behind a phase shifter
+appends the hint of `_wrong_branch_pst_start_hint`.
 """
 function _print_wrong_branch_summary_line(io::IO, net::Net)
   rect_status = rectangular_pf_status(net)
@@ -792,8 +802,11 @@ function _print_wrong_branch_summary_line(io::IO, net::Net)
     string(reason)
   end
   label = status === :fail ? "FAIL" : "SUSPECT"
+  # a voltage finding after a start without angles behind a phase shifter
+  # names the start switch (empty otherwise)
+  hint = _wrong_branch_pst_start_hint(rect_status)
   # same 15-character label rule as every other classical header line
-  println(io, "Wrong-branch   : ", label, " (", reason, ", ", detail, ")")
+  println(io, "Wrong-branch   : ", label, " (", reason, ", ", detail, ")", isempty(hint) ? "" : string(" ", hint))
   return nothing
 end
 
@@ -822,25 +835,53 @@ end
 """
     _distributed_slack_bus_shares(net) -> (active::Bool, shares::Dict{Int,NTuple{2,Float64}})
 
-Per-bus distributed-slack participation for the bus table of the classical
-result print: bus index to `(alpha, dp_mw)`, aggregated over the
-generators of a bus (the persisted participation table is per generator).
-`active` is false when the last solve ran without the distributed slack or
-no solver status exists; the table then omits the participation columns.
+Per-bus distributed-slack participation for the result readers: bus index to
+`(alpha, dp_mw)`, summed over the participating units of a bus (see
+[`_distributed_slack_unit_shares`](@ref)). A unit counts at the bus it sits
+on in `net`, which in a link cluster is its own bus, not the representative
+the solver saw. `active` is false when the last solve ran without the
+distributed slack or no solver status exists.
 """
 function _distributed_slack_bus_shares(net::Net)
-  rect_status = rectangular_pf_status(net)
-  active = _rect_status_get(rect_status, :distributed_slack_active, false)
+  active, unit_shares = _distributed_slack_unit_shares(net)
   shares = Dict{Int,NTuple{2,Float64}}()
-  active || return (false, shares)
-  rows = _rect_status_get(rect_status, :distributed_slack_participation, nothing)
-  rows === nothing && return (true, shares)
-  for r in rows
-    hasproperty(r, :bus_idx) || continue
-    a, d = get(shares, r.bus_idx, (0.0, 0.0))
-    shares[r.bus_idx] = (a + r.alpha, d + r.dp_mw)
+  for (k, (alpha, dp)) in unit_shares
+    1 <= k <= length(net.prosumpsVec) || continue
+    bus = getPosumerBusIndex(net.prosumpsVec[k])
+    a, d = get(shares, bus, (0.0, 0.0))
+    shares[bus] = (a + alpha, d + dp)
   end
-  return (true, shares)
+  return (active, shares)
+end
+
+# Scheduled active generation of a bus in MW: the sum over its generating
+# units as the solver takes it for the specified injection (P(U) units at
+# the solved voltage).
+function _bus_scheduled_pgen(net::Net, bus_idx::Int)
+  vm = net.nodeVec[bus_idx]._vm_pu
+  vm_safe = vm > 1e-9 ? vm : 1e-9
+  p = 0.0
+  for ps in net.prosumpsVec
+    (isGenerator(ps) && getPosumerBusIndex(ps) == bus_idx) || continue
+    p += has_pu_controller(ps) ? first(evaluate_controller(ps.puController, vm_safe)) * net.baseMVA : something(ps.pVal, 0.0)
+  end
+  return p
+end
+
+"""
+    _distributed_slack_bus_pgen(net, bus_idx, dp_mw) -> (scheduled, delivered)
+
+Scheduled and delivered active generation (MW) of a bus that takes part in
+the distributed slack with the correction `dp_mw`: the schedule of its units
+and the schedule plus `dp_mw`. The delivered value holds at every bus type:
+the solve makes the P residual of each participant, the reference included,
+equal to its share. It is not read from the solved bus value, which carries
+the share only where the solver wrote P (a reference bus, also one an island
+solve promoted from PV) and the schedule elsewhere.
+"""
+function _distributed_slack_bus_pgen(net::Net, bus_idx::Int, dp_mw::Float64)
+  p_sched = _bus_scheduled_pgen(net, bus_idx)
+  return (p_sched, p_sched + dp_mw)
 end
 
 """
@@ -925,8 +966,8 @@ function printACPFlowResults(
         nslack += 1
       end
     end
-    # auxiliary buses (star points and other internal nodes); the component
-    # name of an isAux build starts with "Aux_" (getNodeComp)
+    # auxiliary buses (star points and other internal nodes): the AuxBus
+    # component type of an isAux build (getNodeComp)
     if _is_aux_node(n)
       auxb += 1
     end
@@ -994,6 +1035,10 @@ function printACPFlowResults(
   if rect_status_hdr !== nothing && hasproperty(rect_status_hdr, :apslf_convergence_line)
     @printf(io, "APSLF radius   : %s\n", String(rect_status_hdr.apslf_convergence_line))
   end
+  # a non-converged APSLF run: why, from AnalyticLoadFlow's diagnosis
+  if rect_status_hdr !== nothing && hasproperty(rect_status_hdr, :apslf_diagnosis_line)
+    println(io, String(rect_status_hdr.apslf_diagnosis_line))
+  end
   # dishonest Newton (0.30.2): the counts only when the switch was on
   if rect_status_hdr !== nothing && hasproperty(rect_status_hdr, :jacobian_reuse) && rect_status_hdr.jacobian_reuse
     @printf(io, "Jacobian reuse : %d reused steps, %d refactorisations, %d discarded\n", rect_status_hdr.jacobian_reuse_steps, rect_status_hdr.jacobian_reuse_refactorisations, rect_status_hdr.jacobian_reuse_discarded)
@@ -1005,6 +1050,9 @@ function printACPFlowResults(
   end
 
   @printf(io, "BaseMVA        :%10d\n", net.baseMVA)
+  # the frequency only matters where a capacitance was converted; a pu
+  # network says so instead of naming a value it never read
+  println(io, "Frequency      : ", nominal_frequency_line(net))
   # sources appear in the count only when present, keeping the common
   # no-source header unchanged
   slack_part = nsource > 0 ? @sprintf("Slack: %d Source: %d", nslack, nsource) : @sprintf("Slack: %d", nslack)
@@ -1065,7 +1113,7 @@ function printACPFlowResults(
 
   if qlimits_handled
     num_guarded_locks = length(net.qLimitEvents)
-    num_iterative_events = length(net.qLimitLog)
+    num_iterative_events = qlimit_pv_to_pq_event_count(net)
     @printf(io, "PV→PQ locks    :%10d\n", num_guarded_locks)
     @printf(io, "PV→PQ events   :%10d\n", num_iterative_events)
   end
@@ -1162,6 +1210,14 @@ function printACPFlowResults(
       break
     end
     p_gen, q_gen, p_load, q_load = _effective_bus_power_components(net, n.busIdx)
+    # distributed slack: the Pg column shows the schedule at every
+    # participating bus, the Pg eff column what the bus delivers (schedule
+    # plus its share of lambda_P), the reference bus included
+    ds_share = ds_active ? get(ds_shares, n.busIdx, nothing) : nothing
+    p_gen_eff = p_gen
+    if ds_share !== nothing
+      p_gen, p_gen_eff = _distributed_slack_bus_pgen(net, n.busIdx, ds_share[2])
+    end
     if n._nodeType == Sparlectra.PQ && haskey(net.qLimitEvents, n.busIdx)
       side = net.qLimitEvents[n.busIdx]
       limit_pu = side === :max ? (n.busIdx <= length(qv_qmax_pu) ? qv_qmax_pu[n.busIdx] : Inf) : (n.busIdx <= length(qv_qmin_pu) ? qv_qmin_pu[n.busIdx] : -Inf)
@@ -1240,11 +1296,7 @@ function printACPFlowResults(
     tap_target_str = haskey(tap_target_vm, n.busIdx) ? @sprintf("%.4f", tap_target_vm[n.busIdx]) : ""
     ds_cells = ""
     if ds_active
-      share = get(ds_shares, n.busIdx, nothing)
-      # Pg eff = scheduled bus generation plus the alpha share of lambda_P;
-      # the Pg column keeps the schedule, this column shows what the
-      # participant actually delivers
-      ds_cells = share === nothing ? @sprintf(" %-10s | %-10s |", "", "") : @sprintf(" %-10s | %-10s |", @sprintf("%.4f", share[1]), @sprintf("%.3f", p_gen + share[2]))
+      ds_cells = ds_share === nothing ? @sprintf(" %-10s | %-10s |", "", "") : @sprintf(" %-10s | %-10s |", @sprintf("%.4f", ds_share[1]), @sprintf("%.3f", p_gen_eff))
     end
     @printf(
       io,
@@ -1319,7 +1371,7 @@ function printACPFlowResults(
     # Detailed engineering-style control section (OLTC/PST/combined).
     printTapControllerSummary(io, net)
   end
-  # Machine remote voltage controllers print only when present — the "none"
+  # Machine remote voltage controllers print only when present: the "none"
   # marker above stays the deterministic anchor for parsers.
   printMachineControllerSummary(io, net)
   # Shunt voltage controllers (SVC / MSC-MSR bank) print only when present.
@@ -1336,6 +1388,9 @@ function printACPFlowResults(
   # nothing else in this report would say so. Prints one line when there is
   # nothing to report, so its absence is never mistaken for a clean result.
   printQVCharacteristicCheck(net; io = io, converged = converged)
+  # the stability conditions (6)/(7) at every voltage-regulated bus, the
+  # same line as run.log and the Web UI result page
+  printQLimitStabilityLine(net; io = io, converged = converged)
   if toFile
     close(io)
     #println("Results have been written to $(joinpath(path, filename))")

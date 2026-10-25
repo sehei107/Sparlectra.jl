@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # file: src/adapters/cgmes/cgmes_reader.jl
-# purpose: layer 2 of the CGMES importer — generic RDF/XML property-bag
+# purpose: layer 2 of the CGMES importer, generic RDF/XML property-bag
 # reader. Every top-level `<cim:Class rdf:ID|about>` becomes/updates one
 # CIMObject; no per-class code. `rdf:ID` creates, `rdf:about` overlays
 # (SSH/TP/SV on EQ). Verified against the ENTSO-E test sets (A2): flat
@@ -30,7 +30,7 @@ name is kept as an additional key.
 
 `source` is the name of the file whose `rdf:ID` created the object (overlays
 via `rdf:about` do not change it). In a multi-area delivery this is the only
-way to tell which area contributed a piece of equipment — the sides of an
+way to tell which area contributed a piece of equipment: the sides of an
 assembled border are otherwise indistinguishable.
 """
 struct CIMObject
@@ -56,11 +56,18 @@ struct CGMESFileInfo
   # names which declared dependency (typically the boundary set) is missing.
   model_id::String
   dependent_on::Vector{String}
+  # md:Model.scenarioTime and md:Model.modelingAuthoritySet as written in
+  # the header ("" when absent); the series check orders snapshots by the
+  # scenario time and groups models by the authority set
+  scenario_time::String
+  modeling_authority::String
 end
 
-# Keep the legacy 8-argument construction working for all existing call sites.
+# Keep the legacy 8- and 10-argument constructions working for all existing call sites.
 CGMESFileInfo(name, header, profile_uris, profiles, version, object_count, skipped, skip_reason) =
-  CGMESFileInfo(name, header, profile_uris, profiles, version, object_count, skipped, skip_reason, "", String[])
+  CGMESFileInfo(name, header, profile_uris, profiles, version, object_count, skipped, skip_reason, "", String[], "", "")
+CGMESFileInfo(name, header, profile_uris, profiles, version, object_count, skipped, skip_reason, model_id, dependent_on) =
+  CGMESFileInfo(name, header, profile_uris, profiles, version, object_count, skipped, skip_reason, model_id, dependent_on, "", "")
 
 _strip_urn(v::AbstractString) = String(replace(v, "urn:uuid:" => ""))
 
@@ -69,7 +76,7 @@ _strip_mrid(v::AbstractString) = startswith(v, "#") ? String(v[2:end]) : String(
 """Store-level overflow for multi-valued references (#294 point 9): RDF/XML
 may repeat the same property on one object (`TopologicalIsland.
 TopologicalNodes` lists thousands of members). `CIMObject.refs` keeps its
-one-value-per-key shape — the 1:1 fast path stays allocation-free — and
+one-value-per-key shape (the 1:1 fast path stays allocation-free) and
 every additional value lands here under `(mrid, key)`, in document order,
 excluding the first value (which stays in `refs`). Query via `refsAll`."""
 const CGMESMultiRefs = Dict{Tuple{String,Symbol},Vector{String}}
@@ -109,6 +116,8 @@ function readCGMESFile!(objects::Dict{String,CIMObject}, byclass::Dict{Symbol,Ve
   keywords = String[]
   model_id = ""
   dependent_on = String[]
+  scenario_time = ""
+  modeling_authority = ""
   for el in EzXML.eachelement(r)
     n = EzXML.nodename(el)
     if n == "FullModel" || n == "DifferenceModel"
@@ -119,6 +128,8 @@ function readCGMESFile!(objects::Dict{String,CIMObject}, byclass::Dict{Symbol,Ve
       for p in EzXML.eachelement(el)
         pn = EzXML.nodename(p)
         pn == "Model.profile" && push!(profile_uris, EzXML.nodecontent(p))
+        pn == "Model.scenarioTime" && (scenario_time = strip(EzXML.nodecontent(p)))
+        pn == "Model.modelingAuthoritySet" && (modeling_authority = strip(EzXML.nodecontent(p)))
         if pn == "Model.DependentOn"
           for a in EzXML.eachattribute(p)
             EzXML.nodename(a) == "resource" && push!(dependent_on, _strip_urn(_strip_mrid(EzXML.nodecontent(a))))
@@ -127,15 +138,15 @@ function readCGMESFile!(objects::Dict{String,CIMObject}, byclass::Dict{Symbol,Ve
       end
       break
     elseif n == "Dataset"
-      # CGMES 3.0 / NC document header (dcat:Dataset) instead of md:FullModel —
+      # CGMES 3.0 / NC document header (dcat:Dataset) instead of md:FullModel:
       # ReliCapGrid boundary files ship like this. The profile is declared as a
       # short code in dcat:keyword ("BD", "EQ", …), there is no Model.profile.
       # Without this branch such a file gets an empty profile set, is parsed
-      # anyway, but never classified — a boundary file then never reaches
+      # anyway, but never classified, a boundary file then never reaches
       # store.boundary and the assembled-border equivalent-injection rule in
       # the mapping cannot fire.
       header = :Dataset
-      # The dataset id (rdf:about) is the model identity — other files'
+      # The dataset id (rdf:about) is the model identity: other files'
       # md:Model.DependentOn declarations point at it, so it must be captured
       # for the dependency matching of the import analysis.
       for a in EzXML.eachattribute(el)
@@ -157,10 +168,10 @@ function readCGMESFile!(objects::Dict{String,CIMObject}, byclass::Dict{Symbol,Ve
   # (GL/DL, a difference model) still satisfies a md:Model.DependentOn
   # declaration and must not show up as "missing" in the import analysis.
   if header == :DifferenceModel
-    return CGMESFileInfo(file.name, header, profile_uris, profiles, version, 0, true, "difference models are not supported", model_id, dependent_on)
+    return CGMESFileInfo(file.name, header, profile_uris, profiles, version, 0, true, "difference models are not supported", model_id, dependent_on, scenario_time, modeling_authority)
   end
   if !isempty(profiles) && isempty(intersect(profiles, profile_filter))
-    return CGMESFileInfo(file.name, header, profile_uris, profiles, version, 0, true, "profile not in import set", model_id, dependent_on)
+    return CGMESFileInfo(file.name, header, profile_uris, profiles, version, 0, true, "profile not in import set", model_id, dependent_on, scenario_time, modeling_authority)
   end
 
   count = 0
@@ -187,7 +198,7 @@ function readCGMESFile!(objects::Dict{String,CIMObject}, byclass::Dict{Symbol,Ve
       objects[mrid] = obj
       push!(get!(Vector{String}, byclass, cls), mrid)
     elseif !is_about && obj.class != cls
-      # duplicate rdf:ID with a different class — keep first, count as object anyway
+      # duplicate rdf:ID with a different class: keep first, count as object anyway
       @debug "CGMES reader: duplicate rdf:ID $(mrid) ($(obj.class) vs $(cls))"
     end
     count += 1
@@ -212,5 +223,5 @@ function readCGMESFile!(objects::Dict{String,CIMObject}, byclass::Dict{Symbol,Ve
       end
     end
   end
-  return CGMESFileInfo(file.name, header, profile_uris, profiles, version, count, false, "", model_id, dependent_on)
+  return CGMESFileInfo(file.name, header, profile_uris, profiles, version, count, false, "", model_id, dependent_on, scenario_time, modeling_authority)
 end

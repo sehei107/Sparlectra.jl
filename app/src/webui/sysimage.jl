@@ -56,17 +56,23 @@ _sysimage_file_sha256(path::AbstractString)::String = bytes2hex(sha256(read(path
 _sysimage_os_label()::String = Sys.iswindows() ? "windows" : (Sys.isapple() ? "macos" : (Sys.islinux() ? "linux" : "other"))
 
 """
-    write_sysimage_meta(meta_path; manifest_path) -> Dict
+    write_sysimage_meta(meta_path; manifest_path, project_dir) -> Dict
 
 Write `sysimage_meta.toml`, the validity contract of the image:
 Sparlectra version, Julia `VERSION` string, OS label and architecture,
 SHA-256 and path of `manifest_path` (best effort, omitted when no manifest
-exists, e.g. registered installations), and the build timestamp. Returns the
-written dictionary. The launchers compare the Julia version string and the
-manifest hash with shell tools only, so both are stored as plain strings.
+exists, e.g. registered installations), the application project directory
+the image was built for (`project_dir`, absolute, no trailing separator),
+and the build timestamp. Returns the written dictionary. The launchers
+compare the Julia version string and the manifest hash with shell tools
+only, so both are stored as plain strings. The launcher neither uses nor
+removes an image whose `project_dir` names another checkout.
 """
-function write_sysimage_meta(meta_path::AbstractString; manifest_path::AbstractString = webui_sysimage_manifest_path())
-  meta = Dict{String,Any}("sparlectra_version" => string(SparlectraVersion), "julia_version" => string(VERSION), "os" => _sysimage_os_label(), "arch" => string(Sys.ARCH), "built_at" => Dates.format(Dates.now(), "yyyy-mm-ddTHH:MM:SS"))
+function write_sysimage_meta(meta_path::AbstractString; manifest_path::AbstractString = webui_sysimage_manifest_path(), project_dir::AbstractString = SPARLECTRA_APP_ROOT)
+  # the build runs in its own environment with this checkout's app/ developed
+  # into it, so SPARLECTRA_APP_ROOT is the checkout the image belongs to
+  owner = rstrip(isdir(project_dir) ? realpath(project_dir) : normpath(abspath(project_dir)), ['/', '\\'])
+  meta = Dict{String,Any}("sparlectra_version" => string(SparlectraVersion), "julia_version" => string(VERSION), "os" => _sysimage_os_label(), "arch" => string(Sys.ARCH), "built_at" => Dates.format(Dates.now(), "yyyy-mm-ddTHH:MM:SS"), "project_dir" => String(owner))
   # The manifest fingerprint is best effort: registered installations may
   # legitimately lack a resolvable Manifest.toml. The sparlectra_version
   # check in sysimage_status covers the package-update case there; a missing
@@ -294,6 +300,17 @@ function _write_sysimage_build_progress(output_root::AbstractString; state::Abst
   return nothing
 end
 
+# The build script of the repository: tools/build_sysimage.jl next to app/,
+# not inside it. pkgdir of this module is the application package (app/)
+# since the package split; 0.50.0 looked for app/tools/ and the Web UI
+# rebuild button failed with "build script is missing". nothing when the
+# package directory is unknown.
+function _sysimage_build_script()::Union{Nothing,String}
+  approot = pkgdir(@__MODULE__)
+  approot === nothing && return nothing
+  return joinpath(dirname(approot), "tools", "build_sysimage.jl")
+end
+
 """
     start_sysimage_rebuild!(; output_root) -> NamedTuple
 
@@ -316,7 +333,7 @@ function start_sysimage_rebuild!(; output_root::AbstractString = default_webui_o
   sysimage_build_active(; output_root) && return (started = false, message = "A sysimage build is already running.", log = log)
   pkgroot = pkgdir(@__MODULE__)
   pkgroot === nothing && return (started = false, message = "Cannot locate the Sparlectra package directory.", log = log)
-  script = joinpath(pkgroot, "tools", "build_sysimage.jl")
+  script = _sysimage_build_script()
   isfile(script) || return (started = false, message = "The build script is missing at $(script); a registry installation without tools/ cannot rebuild the image.", log = log)
   exe = joinpath(Sys.BINDIR, Base.julia_exename())
   cmd = Cmd(`$(exe) --startup-file=no --project=$(pkgroot) $(script)`; dir = pkgroot)

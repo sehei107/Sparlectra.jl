@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -194,6 +194,77 @@ function _webui_pack_cgmes_uploads!(uploads::AbstractVector{WebUICaseUpload}, di
   return (ok = true, name = zip_name, reason = "")
 end
 
+"""
+    _webui_bind_measurement_text(text, case) -> String
+
+The text of a measurement file with its header bound to `case`: every
+`# case:` line of the header comments is removed and one `# case: <case>`
+line goes in directly after the version line (measurement table or CSV v1),
+or at the top when the version line is not among the header comments. The
+line ends of the file are kept (CRLF stays CRLF), a leading BOM stays.
+Everything else, the `# cgmes_model:` lines included, is left as it is; the
+`# case:` line outranks them when the Web UI lists the sets of a case.
+"""
+function _webui_bind_measurement_text(text::AbstractString, case::AbstractString)::String
+  eol = occursin("\r\n", text) ? "\r\n" : "\n"
+  lines = split(String(text), "\n")
+  keep = trues(length(lines))
+  version_at = 0
+  for (i, raw) in enumerate(lines)
+    line = strip(rstrip(i == 1 ? lstrip(raw, '﻿') : raw, '\r'))
+    isempty(line) && continue
+    startswith(line, "#") || break
+    if match(r"^#\s*case:", line) !== nothing
+      keep[i] = false
+    elseif version_at == 0 && (match(r"^#\s*sparlectra-measurement-table\b", line) !== nothing || line == "# sparlectra-measurements v1")
+      version_at = i
+    end
+  end
+  kept = String[]
+  insert_after = 0
+  for (i, l) in enumerate(lines)
+    keep[i] || continue
+    push!(kept, String(l))
+    i == version_at && (insert_after = length(kept))
+  end
+  bom = !isempty(kept) && startswith(kept[1], "﻿")
+  if insert_after == 0 && bom
+    # the BOM stays the first character of the file
+    kept[1] = String(chopprefix(kept[1], "﻿"))
+    insert!(kept, 1, string("﻿# case: ", case, eol == "\r\n" ? "\r" : ""))
+  else
+    insert!(kept, insert_after + 1, string("# case: ", case, eol == "\r\n" ? "\r" : ""))
+  end
+  return join(kept, "\n")
+end
+
+# The assign switch of the SE upload: the uploaded measurement file is stored
+# bound to `case` (see _webui_bind_measurement_text), whatever its own
+# `# case:` or `# cgmes_model:` lines say. A measurement file of the same
+# name is replaced, because assigning it is the user's explicit request; any
+# other file of that name stays. Returns the reason of a refusal, or "".
+# The IOError/SystemError is a failed write (disk full, permissions); the
+# temporary file goes and the case directory stays as it was.
+function _webui_store_assigned_measurement!(destination::AbstractString, data::Vector{UInt8}, case::AbstractString)::String
+  ispath(destination) && !_webui_is_measurement_file(destination) && return "already exists"
+  temp = tempname(dirname(destination))
+  try
+    write(temp, data)
+    if !_webui_is_measurement_file(temp)
+      reason = _measurement_table_without_version(temp) ? "no measurement table (the version line $(MEASUREMENT_TABLE_VERSION_LINE) is missing)" : "no measurement table (the assign switch binds measurement files only)"
+      rm(temp; force = true)
+      return reason
+    end
+    write(temp, _webui_bind_measurement_text(String(copy(data)), case))
+    mv(temp, destination; force = true)
+  catch err
+    rm(temp; force = true)
+    (err isa Base.IOError || err isa SystemError) || rethrow()
+    return "write failure"
+  end
+  return ""
+end
+
 function handle_powerflow_case_import(form::AbstractDict; output_root::AbstractString = "results/powerflow_service", application_root::AbstractString = _webui_application_root(), case_directory::Union{Nothing,AbstractString} = nothing, operation_log::AbstractString = output_root, max_file_bytes::Integer = WEBUI_CASE_IMPORT_MAX_FILE_BYTES, max_request_bytes::Integer = WEBUI_CASE_IMPORT_MAX_REQUEST_BYTES)::SparlectraWebUIResponse
   directory = _webui_case_directory(; case_directory, application_root, output_root)
   mkpath(directory)
@@ -207,6 +278,10 @@ function handle_powerflow_case_import(form::AbstractDict; output_root::AbstractS
   total_bytes = sum((length(upload.data) for upload in uploads); init = 0)
   total_bytes > max_request_bytes && (rejected = [basename(upload.filename) => "oversized" for upload in uploads])
   uploads_to_process = total_bytes > max_request_bytes ? WebUICaseUpload[] : uploads
+  # the assign switch of the SE upload form: bind each uploaded measurement
+  # file to the case selected there, whatever the file says itself
+  assign_case = String(_webui_form_value(form, "return_to", "")) == "stateestimation" && String(_webui_form_value(form, "assign_to_case", "")) == "true" ? basename(String(_webui_form_value(form, "return_case", ""))) : ""
+  assigned = String[]
   # CGMES profile files (EQ, SSH, TP, SV of one delivery) arrive as several
   # .xml uploads and become one ZIP delivery; the file picker cannot hand
   # over a folder, and the shipped demo deliveries are folders
@@ -253,6 +328,16 @@ function handle_powerflow_case_import(form::AbstractDict; output_root::AbstractS
     if destination != normpath(joinpath(directory, basename(destination))) || !startswith(string(destination, Base.Filesystem.path_separator), root)
       push!(rejected, name => "invalid filename")
       continue
+    elseif !isempty(assign_case) && lowercase(splitext(name)[2]) == ".csv"
+      reason = _webui_store_assigned_measurement!(destination, upload.data, assign_case)
+      if isempty(reason)
+        push!(imported, name)
+        push!(assigned, name)
+        imported_roles[name] = string(isMeasurementTable(destination) ? "measurement_table" : "measurement_set", ", assigned to ", assign_case)
+      else
+        push!(rejected, name => reason)
+      end
+      continue
     elseif ispath(destination)
       push!(rejected, name => "already exists")
       continue
@@ -264,13 +349,25 @@ function handle_powerflow_case_import(form::AbstractDict; output_root::AbstractS
       role = if ext == ".dat"
         _webui_dat_role_label(_webui_classify_dat_content(destination))
       elseif ext == ".zip"
-        _webui_cgmes_upload_role(destination, directory)
+        # an SCF time series (QSTS) is a zip too; the content decides, as in
+        # the case chooser, before the zip is read as a CGMES delivery
+        _webui_is_scf_series_cached(destination) ? "scf_time_series" : _webui_cgmes_upload_role(destination, directory)
       elseif ext == ".json"
         "sparlectra_case"
       elseif ext == ".csv"
-        # measurement sets (SE phase 5) are detected by the version comment,
-        # not the extension; a .csv without it is retained but never offered
-        _webui_is_measurement_csv(destination) ? "measurement_set" : "unknown"
+        # measurement sets (SE phase 5) and measurement tables are detected
+        # by their version line, not the extension; a .csv without either is
+        # retained but never offered. A table header without its version
+        # line is named, so the user knows what is missing.
+        if _webui_is_measurement_csv(destination)
+          "measurement_set"
+        elseif isMeasurementTable(destination)
+          "measurement_table"
+        elseif _measurement_table_without_version(destination)
+          "measurement_table_without_version_line"
+        else
+          "unknown"
+        end
       elseif ext == ".yaml"
         "case_config"
       else
@@ -294,17 +391,45 @@ function handle_powerflow_case_import(form::AbstractDict; output_root::AbstractS
   # the SE section hosts its own upload form for measurement sets; return
   # to the Runs page's SE anchor (with its case selection preserved)
   if String(_webui_form_value(form, "return_to", "")) == "stateestimation"
-    return _webui_redirect("/powerflow?casefile=$(_webui_urlencode(String(_webui_form_value(form, "return_case", ""))))&message=$(message)#state-estimation")
+    # an assigned file is armed for the next run, as a generated set is
+    armed = isempty(assigned) ? "" : string("&measurement_file=", _webui_urlencode(last(assigned)))
+    return _webui_redirect("/powerflow?casefile=$(_webui_urlencode(String(_webui_form_value(form, "return_case", ""))))&message=$(message)$(armed)#state-estimation")
   end
   query = isempty(selected) ? "" : "?casefile=$(_webui_urlencode(selected))"
   separator = isempty(query) ? "?" : "&"
   return _webui_redirect("/powerflow/case$(query)$(separator)import_message=$(message)")
 end
 
+# A CGMES test-set alias typed without the `cgmes:` form, as people write
+# it: any case, an optional `cgmes` prefix followed by a space, `_`, `-` or
+# `:`, an optional `.zip`. Returns the alias key, or nothing. The rest must
+# equal a key of CGMES_TESTSET_ALIASES exactly; there is no fuzzy matching,
+# so a typo still fails (and gets the list below).
+function _webui_loose_cgmes_alias(name::AbstractString)::Union{Nothing,String}
+  key = lowercase(strip(String(name)))
+  m = match(r"^cgmes[ _\-:](.+)$", key)
+  m === nothing || (key = strip(String(m[1])))
+  endswith(key, ".zip") && (key = key[1:(end - 4)])
+  return haskey(CGMESImporter.CGMES_TESTSET_ALIASES, key) ? key : nothing
+end
+
+# The message for a bare name nothing resolves: what the field accepts. An
+# input that contains an alias (plain substring test, longest alias first)
+# gets a "did you mean" line.
+function _webui_case_resolve_accepted_message(name::AbstractString)::String
+  aliases = sort(collect(keys(CGMESImporter.CGMES_TESTSET_ALIASES)))
+  lowered = lowercase(String(name))
+  contained = sort([a for a in aliases if occursin(a, lowered)]; by = length, rev = true)
+  hint = isempty(contained) ? "" : " Did you mean cgmes:$(first(contained))?"
+  return "not a shipped case, a case file in the case directory, a MATPOWER case name or a CGMES test set. Accepted: a MATPOWER name such as case118.m, a shipped case such as sp_case14.scf.json, or cgmes:<alias> with alias one of $(join(aliases, ", ")).$(hint)"
+end
+
 """
 Resolve a manually typed case reference (a bare MATPOWER case name to download,
-or a full local path to copy) into the case cache directory, without starting
-a PowerFlow run. The resolved file then appears in the "choose existing case"
+a shipped case, a CGMES test set as `cgmes:<alias>` or as the plain alias, or
+a full local path to copy) into the case cache directory, without starting
+a PowerFlow run. A name that matches none of these fails with a message that
+lists the accepted forms. The resolved file then appears in the "choose existing case"
 selector, mirroring `handle_powerflow_case_import` for typed rather than
 uploaded cases.
 """
@@ -348,12 +473,24 @@ function handle_powerflow_case_resolve(form::AbstractDict; output_root::Abstract
       # A bare name: a bundled case first (the shipped SCF and PGM files and
       # the CGMES demo deliveries, which are packed into the case directory
       # here), then a MATPOWER case name downloaded into the case directory.
+      # A CGMES alias typed loosely ("smallgrid", "CGMES SmallGrid.zip") is
+      # fetched as if "cgmes:<alias>" had been typed; a file of that name in
+      # the case directory still wins. Anything else that is neither a file
+      # there nor a MATPOWER name (.m, .jl) gets the list of accepted forms
+      # instead of the extension error of the MATPOWER download.
       staged = _webui_stage_bundled_case!(application_root, directory, manual_value)
+      loose_alias = _webui_loose_cgmes_alias(manual_value)
+      local_file = isfile(joinpath(directory, manual_value)) || isfile(manual_value)
+      matpower_name = endswith(lowercase(manual_value), ".m") || endswith(lowercase(manual_value), ".jl")
       if staged !== nothing
         resolved_name = basename(staged)
-      else
+      elseif loose_alias !== nothing && !local_file
+        resolved_name = basename(CGMESImporter.fetchCGMESTestSet(loose_alias; outdir = directory))
+      elseif local_file || matpower_name
         resolved_path = ensure_casefile(manual_value; outdir = directory)
         resolved_name = basename(resolved_path)
+      else
+        error(_webui_case_resolve_accepted_message(manual_value))
       end
     end
   catch err
@@ -445,6 +582,9 @@ function handle_powerflow_export_scf(form::AbstractDict; output_root::AbstractSt
   (endswith(stem, ".scf") || endswith(stem, ".pgm")) && (stem = first(splitext(stem)))
   out_name = string(stem, strict ? ".pgm.json" : ".scf.json")
   out_path = joinpath(directory, out_name)
+  # a measurement CSV v1 sidecar (reader removed in 0.50.0) does not stop
+  # the export: the case is written without it and the message says why
+  v1_note = ""
   try
     # the request builder validates the same override set the run path uses,
     # so the exported config block can never carry a key a run would reject
@@ -456,22 +596,32 @@ function handle_powerflow_export_scf(form::AbstractDict; output_root::AbstractSt
     # the Web UI runs (MATPOWER, SCF, DTF, CGMES, PowSyBl), not only the
     # file-based ones (a CGMES .zip failed here with "extension .zip is not
     # supported")
-    net = import_case(case_path, config; run_kind = :powerflow).net
+    imported = import_case(case_path, config; run_kind = :powerflow)
+    net = imported.net
     sidecar = string(first(splitext(case_path)), ".measurements.csv")
     # the set's own provenance comments travel into the case file: whether the
     # values carry noise decides how a J from them may be read at all
     provenance = Dict{String,Any}()
-    if isfile(sidecar)
-      readMeasurementsCSV!(net; file = sidecar)
+    if isfile(sidecar) && _is_measurement_csv_v1(sidecar)
+      v1_note = " Measurement set $(basename(sidecar)) was not included: $(MEASUREMENT_CSV_V1_REMOVED)"
+    elseif isfile(sidecar)
+      _read_measurement_file!(net, sidecar; index = isMeasurementTable(sidecar) ? _measurement_key_index(imported) : nothing)
       merge!(provenance, _webui_measurement_set_provenance(sidecar))
     end
     intended = String["power_flow"]
     isempty(net.measurements) || push!(intended, "state_estimation")
+    source_format = _detect_case_format(case_path)
+    # per unit stays per unit: a MATPOWER case states its parameters per
+    # unit, and an SCF case that declares units = pu carries them in its pu
+    # blocks. An SI copy of either loses the last bit of about one value in
+    # ten. A strict PGM file has no place for them.
+    keep_pu = !strict && (source_format === :matpower || (source_format === :scf && scf_case_units(read_scf_json(case_path)) === :pu))
     exportSCF(
       net;
       file = out_path,
       case_name = first(splitext(basename(requested))),
-      source_format = String(_detect_case_format(case_path)),
+      source_format = String(source_format),
+      units = keep_pu ? :pu : :si,
       source_reference = basename(requested),
       intended_calculations = intended,
       measurement_provenance = provenance,
@@ -484,8 +634,8 @@ function handle_powerflow_export_scf(form::AbstractDict; output_root::AbstractSt
     record_webui_operation!(operation_log, "scf_export_failed"; route = "/powerflow/export-scf", method = "POST", user_action = true, casefile = requested, message = sprint(showerror, err))
     return back("SCF export failed for '$(requested)': $(sprint(showerror, err))")
   end
-  record_webui_operation!(operation_log, "scf_export_completed"; route = "/powerflow/export-scf", method = "POST", user_action = true, casefile = requested, scf_file = out_name)
-  return done("Exported $(out_name) ($(round(filesize(out_path) / 1024; digits = 1)) kB) into the case directory." * (strict ? " Strict PGM: names, roles, tap nameplates, measurements and configuration are NOT in this file." : ""), out_name)
+  record_webui_operation!(operation_log, "scf_export_completed"; route = "/powerflow/export-scf", method = "POST", user_action = true, casefile = requested, scf_file = out_name, measurement_note = v1_note)
+  return done("Exported $(out_name) ($(round(filesize(out_path) / 1024; digits = 1)) kB) into the case directory." * (strict ? " Strict PGM: names, roles, tap nameplates, measurements, configuration and the system frequency (f_nom) are NOT in this file." : "") * v1_note, out_name)
 end
 
 """
@@ -508,6 +658,8 @@ are saved as SCF the same way the plain export does), so it writes:
   source case (a text copy with its `# case:` header line rewritten); a
   second or further bound set is copied as
   `<name>_<original stem>.measurements.csv` so the names never collide.
+  A measurement CSV v1 set (reader removed in 0.50.0) is neither read nor
+  copied; the message names it and the converter.
 
 Refuses an existing `<name>.scf.json` unless `save_as_overwrite` is a truthy
 form value (`true`/`on`/`1`). `save_as_name` is validated like the case
@@ -546,6 +698,9 @@ function handle_powerflow_case_save_as(form::AbstractDict; output_root::Abstract
   isfile(out_scf) && !overwrite && return back("A case named '$(new_name)' already exists. Tick \"overwrite\" to replace it.")
 
   copied_measurements = String[]
+  # measurement CSV v1 sets (reader removed in 0.50.0) are neither read nor
+  # copied: the case is saved without them and the message names them
+  skipped_v1 = String[]
   try
     request = powerflow_webui_request(form; default_output_root = output_root)
     overrides = Dict{String,Any}(String(k) => v for (k, v) in get(request, "config_overrides", Dict{String,Any}()))
@@ -558,8 +713,10 @@ function handle_powerflow_case_save_as(form::AbstractDict; output_root::Abstract
     config = imported.config
     sidecar = string(first(splitext(case_path)), ".measurements.csv")
     provenance = Dict{String,Any}()
-    if isfile(sidecar)
-      readMeasurementsCSV!(net; file = sidecar)
+    if isfile(sidecar) && _is_measurement_csv_v1(sidecar)
+      push!(skipped_v1, basename(sidecar))
+    elseif isfile(sidecar)
+      _read_measurement_file!(net, sidecar; index = isMeasurementTable(sidecar) ? _measurement_key_index(imported) : nothing)
       merge!(provenance, _webui_measurement_set_provenance(sidecar))
     end
     # run_sparlectra prints the full console result table by default; a
@@ -607,6 +764,10 @@ function handle_powerflow_case_save_as(form::AbstractDict; output_root::Abstract
       isempty(bound) || (meas_case[name] = bound)
     end
     bound_sets = [name for name in directory_measurements if get(meas_case, name, "") == requested]
+    for name in filter(n -> _is_measurement_csv_v1(joinpath(directory, n)), bound_sets)
+      name in skipped_v1 || push!(skipped_v1, name)
+    end
+    filter!(n -> !(n in skipped_v1), bound_sets)
     new_case_header = "# case: $(string(new_name, ".scf.json"))"
     for (i, name) in enumerate(bound_sets)
       target_name = i == 1 ? string(new_name, ".measurements.csv") : string(new_name, "_", first(splitext(name)), ".measurements.csv")
@@ -632,9 +793,9 @@ function handle_powerflow_case_save_as(form::AbstractDict; output_root::Abstract
     record_webui_operation!(operation_log, "case_save_as_failed"; route, method = "POST", user_action = true, casefile = requested, save_as_name = new_name, message = sprint(showerror, err))
     return back("Save case as '$(new_name)' failed: $(sprint(showerror, err))")
   end
-  record_webui_operation!(operation_log, "case_save_as_completed"; route, method = "POST", user_action = true, casefile = requested, save_as_name = new_name, scf_file = basename(out_scf), measurement_files = join(copied_measurements, ","))
+  record_webui_operation!(operation_log, "case_save_as_completed"; route, method = "POST", user_action = true, casefile = requested, save_as_name = new_name, scf_file = basename(out_scf), measurement_files = join(copied_measurements, ","), skipped_v1 = join(skipped_v1, ","))
   out_name = basename(out_scf)
-  msg = "Saved as $(out_name)" * (isempty(copied_measurements) ? "" : " with $(length(copied_measurements)) measurement set(s)") * ". Settings outside case scope (installation configuration) are not written here."
+  msg = "Saved as $(out_name)" * (isempty(copied_measurements) ? "" : " with $(length(copied_measurements)) measurement set(s)") * ". Settings outside case scope (installation configuration) are not written here." * (isempty(skipped_v1) ? "" : " Not included: $(join(skipped_v1, ", ")). $(MEASUREMENT_CSV_V1_REMOVED)")
   return _webui_redirect("/powerflow/case?casefile=$(_webui_urlencode(out_name))&import_message=$(_webui_urlencode(msg))")
 end
 
@@ -791,7 +952,11 @@ function handle_contingency_weights_page(query::AbstractDict; output_root::Abstr
       config = load_sparlectra_config(config_file; reload = true)
       # the shared importer, so a CGMES case lists its elements too
       net = import_case(case_path, config; run_kind = :contingency).net
-      all_elements = vcat([c.name for c in generateN1Branches(net)], [c.name for c in generateN1Generators(net)])
+      # the names the run uses: the file names of an SCF case, the
+      # generated names otherwise (a run still reads weights saved under the
+      # generated names, as aliases)
+      names = _detect_case_format(case_path) === :scf ? contingency_names(net, read_scf_json(case_path)) : contingency_names(net)
+      all_elements = vcat([c.name for c in generateN1Branches(net; names = names)], [c.name for c in generateN1Generators(net; names = names)])
     catch err
       net_error = first(split(sprint(showerror, err), '\n'))
     end
@@ -1002,6 +1167,29 @@ function _webui_scenario_from_form(form::AbstractDict)
   return Scenario(name = name, weight = weight, ops = ops)
 end
 
+# The typed case and its scenarios block (`set === nothing`: the case carries
+# no block), read once per Runs page for the editor tab and the Scenarios
+# button; `nothing` when the case is not an SCF case of the directory or
+# cannot be read (the page then shows neither, as before 0.40.0)
+function _webui_load_case_scenarios(case::AbstractString, directory::AbstractString)
+  _webui_scenarios_case_ok(case) || return nothing
+  case_path = joinpath(directory, case)
+  isfile(case_path) || return nothing
+  return try
+    c = read_scf_json(case_path)
+    (case = c, set = scf_case_scenarios(c), path = case_path)
+  catch err
+    # a broken case file is reported by the run itself; the page only drops
+    # the scenario controls
+    @debug "scenarios block not read" case_path exception = err
+    nothing
+  end
+end
+
+# whether the Scenarios button has something to run: a block with scenarios,
+# an N-1 mode or event classes
+_webui_scenarios_runnable(loaded)::Bool = loaded !== nothing && loaded.set !== nothing && (!isempty(loaded.set.scenarios) || loaded.set.mode !== :explicit || !isempty(loaded.set.events))
+
 """
     _webui_scenarios_editor_tab(case, directory) -> String
 
@@ -1012,18 +1200,10 @@ standalone editor page, which shares the same fragment renderer. Returns
 "" when the case is not a readable SCF file; the Runs page then simply
 shows no scenario tab (the standalone route still reports the reason).
 """
-function _webui_scenarios_editor_tab(case::AbstractString, directory::AbstractString)::String
-  _webui_scenarios_case_ok(case) || return ""
-  case_path = joinpath(directory, case)
-  isfile(case_path) || return ""
-  set, opts = try
-    c = read_scf_json(case_path)
-    sset = scf_case_scenarios(c)
-    (sset === nothing ? ScenarioSet() : sset, _webui_scenario_component_options(c))
-  catch
-    return ""
-  end
-  return _webui_scenarios_editor_fragment(; case = case, scenarios = set.scenarios, component_options = opts, file_digest = _config_file_hash(case_path))
+function _webui_scenarios_editor_tab(case::AbstractString, directory::AbstractString; loaded = _webui_load_case_scenarios(case, directory))::String
+  loaded === nothing && return ""
+  set = loaded.set === nothing ? ScenarioSet() : loaded.set
+  return _webui_scenarios_editor_fragment(; case = case, scenarios = set.scenarios, component_options = _webui_scenario_component_options(loaded.case), file_digest = _config_file_hash(loaded.path))
 end
 
 """
@@ -1181,38 +1361,280 @@ end
 # generator off in the same save.
 function _webui_resolve_solver_start_conflict!(updates::AbstractDict)
   get(updates, "power_flow.solver", nothing) == "apslf" && (updates["power_flow.apslf_start.enabled"] = false)
-  # the flat start does not touch the other start settings here: the start
-  # machines follow their own keys, only the two start modes are overridden
-  # by the run (_flatstart_profile_config), the page greys those two, and
+  # the flat start does not touch the other start settings here: the run
+  # switches the projection, the DC seed and the two start modes off
+  # (_flatstart_profile_config), the page greys the controls it has, and
   # they come back as saved when the flat start is unchecked again
   return updates
 end
 
+# What a Settings save compares against (L20): a save writes a key only
+# where the submitted value differs from the value the key gets without
+# it. The result is the effective nested dictionary of the chain (read it
+# with _dotted_config_value): the deprecated in-file SCF block over the
+# configuration file over the packaged defaults. Once a case configuration
+# file exists, resolve_config skips the configuration file's case-scope
+# keys (`case_scope_from_defaults = true`); for a case without one they
+# take part (`false`). The caller states which, there is no default: a
+# case without a case file compared against the packaged defaults pinned
+# every value the configuration file changes (max_iter 25 stayed in the
+# case file after the configuration went to 30).
+function _webui_case_inherited_raw(config_file::AbstractString, source::AbstractString; case_scope_from_defaults::Bool)::Dict{String,Any}
+  scf_level = lowercase(splitext(String(source))[2]) == ".json" && isfile(source) ? scf_case_config(String(source); dropped = String[]) : Dict{String,Any}()
+  _, raw = _load_api_config(String(config_file), validate_gui_config_overrides(scf_level); case_scope_from_defaults)
+  return raw
+end
+
+# The general file over the packaged defaults, the baseline of the
+# machine-scope keys and of the save with target `general`.
+function _webui_general_inherited_raw(config_file::AbstractString)::Dict{String,Any}
+  _, raw = _load_api_config(String(config_file), Dict{String,Any}())
+  return raw
+end
+
+# Value equality across the spellings a form value and a YAML value take
+# for the same setting: 80 and 80.0, a stripped string, vectors and tables
+# element by element, an empty text or list for an unset key.
+function _webui_same_config_value(a, b)::Bool
+  _unset(x) = x === nothing || (x isa AbstractString && isempty(strip(x))) || (x isa AbstractVector && isempty(x)) || (x isa AbstractDict && isempty(x))
+  (a === nothing || b === nothing) && return _unset(a) && _unset(b)
+  (a isa Bool || b isa Bool) && return a isa Bool && b isa Bool && a == b
+  a isa Real && b isa Real && return a == b
+  a isa AbstractString && b isa AbstractString && return strip(a) == strip(b)
+  if a isa AbstractVector && b isa AbstractVector
+    return length(a) == length(b) && all(_webui_same_config_value(x, y) for (x, y) in zip(a, b))
+  end
+  if a isa AbstractDict && b isa AbstractDict
+    sa = Dict{String,Any}(string(k) => v for (k, v) in a)
+    sb = Dict{String,Any}(string(k) => v for (k, v) in b)
+    return Set(keys(sa)) == Set(keys(sb)) && all(_webui_same_config_value(sa[k], sb[k]) for k in keys(sa))
+  end
+  return isequal(a, b)
+end
+
+# True when the posted value of `key` equals its inherited value in `raw`.
+# A key with a form field is also compared in the form's spelling (a select
+# posts "off" for a stored false, a bus list is one text).
+function _webui_posted_equals_inherited(key::AbstractString, value, raw::AbstractDict)::Bool
+  inherited = _dotted_config_value(raw, key)
+  _webui_same_config_value(value, inherited) && return true
+  idx = findfirst(t -> String(t[1]) == key, _WEBUI_FORM_CONFIG_FIELDS)
+  (idx === nothing || inherited === nothing) && return false
+  field = String(_WEBUI_FORM_CONFIG_FIELDS[idx][2])
+  shown = try
+    (_webui_normalize_case_profile_form_value(field, value), _webui_normalize_case_profile_form_value(field, inherited))
+  catch err
+    # a value the form cannot render in this spelling counts as changed,
+    # so the save keeps it rather than dropping a user's choice
+    err isa ArgumentError || rethrow()
+    return false
+  end
+  return _webui_same_config_value(shown[1], shown[2])
+end
+
+# The failures a configuration read reports for a bad file: the loader and
+# its validators throw ArgumentError, the YAML reader ErrorException (it
+# calls error()), a missing or unreadable file SystemError or IOError.
+# Anything else is a bug in the caller and is rethrown.
+_webui_config_read_failure(err)::Bool = err isa Union{ArgumentError,ErrorException,SystemError,Base.IOError}
+
+# A key the creating save may take over from the configuration file: case
+# scope (scf_is_case_config_key excludes output, benchmark, runtime, webui
+# and matpower_export) and no file or directory path, which belongs to the
+# machine even where it sits in a case section.
+_webui_adoptable_case_key(key::AbstractString)::Bool = scf_is_case_config_key(key) && !occursin(r"(_file|_path|_dir|_directory|_root)$", key)
+
+# Every Web UI write that CREATES
+# the case configuration file (the saves, the measurement generator, the
+# legacy sidecar conversion) also takes over each case-scope key in which
+# the configuration file differs from the packaged default. Once the file
+# exists, resolve_config skips the configuration file's case-scope keys, so
+# without this a save of tol alone moved max_iter from the installation's
+# 30 to the default 80. Only on creation: an existing case file is never
+# filled up. Keys in `skip` are decided by the caller. Returns the keys to
+# take over with the configuration file's values; throws what the
+# configuration read throws (see _webui_config_read_failure).
+function _webui_case_adoption(config_file::AbstractString, source::AbstractString; skip = String[])::Dict{String,Any}
+  # no configuration file selected (a page served without a runtime): the
+  # case inherits the packaged defaults, nothing differs from them
+  isempty(strip(config_file)) && return Dict{String,Any}()
+  installed_chain = _webui_case_inherited_raw(config_file, source; case_scope_from_defaults = false)
+  defaults_chain = _webui_case_inherited_raw(config_file, source; case_scope_from_defaults = true)
+  adoption = Dict{String,Any}()
+  for key in sort!(collect(GUI_EDITABLE_CONFIG_KEYS))
+    (_webui_adoptable_case_key(key) && !(key in skip)) || continue
+    installed = _dotted_config_value(installed_chain, key)
+    # an unset value cannot be written into a case file
+    installed === nothing && continue
+    _webui_same_config_value(installed, _dotted_config_value(defaults_chain, key)) && continue
+    adoption[key] = installed
+  end
+  return adoption
+end
+
+# Which posted values a case-scope save writes (L20), shared by the Settings,
+# Case page and State Estimation saves and the result page's "save settings
+# for this case". A value equal to what the case gets without the save is
+# not a decision: it is not written, and removed where the file holds it.
+# The baseline is the chain resolve_config uses for this case: with a case
+# configuration file the packaged defaults (plus the in-file SCF block),
+# without one the configuration file over the defaults. Form-block fields
+# inherit their spec default, `case_format` inherits auto, and
+# `measurement_file` the convention set the SE section arms without a
+# stored choice (`default_measurement_file`, `nothing` when there is none). Machine-scope keys are returned in
+# `dropped`. Throws what the configuration read throws (see
+# _webui_config_read_failure). Returns `(keep, remove, remove_form,
+# form_updates, dropped, inherited, candidate, adopted)`, `candidate` being
+# the case configuration after the save and `adopted` the keys a creating
+# save took over from the configuration file (variant A, see below).
+function _webui_case_save_plan(config_file::AbstractString, source::AbstractString, config_updates::AbstractDict, form_updates::AbstractDict; default_measurement_file = nothing)
+  has_case_file = isfile(case_config_path(source))
+  inherited = _webui_case_inherited_raw(config_file, source; case_scope_from_defaults = has_case_file)
+  # The system frequency key is locked for a case whose file states
+  # meta.f_nom (it wins on import) or uses no capacitance in farad (every
+  # format but an SCF/PGM file with a line c1 in an si file): the Case page
+  # renders the select disabled, and a posted value is not saved. A value
+  # stored before is removed by the save, so the case file never holds a
+  # frequency that cannot act (or only raises the mismatch warning).
+  freq_key = "model.nominal_frequency_hz"
+  freq_locked = _webui_case_frequency_locked(source, nothing)
+  keep = Dict{String,Any}()
+  remove = String[]
+  dropped = String[]
+  for (key, value) in config_updates
+    key = String(key)
+    if key == freq_key && freq_locked
+      continue
+    elseif !scf_is_case_config_key(key)
+      push!(dropped, key)
+    elseif _webui_posted_equals_inherited(key, value, inherited)
+      push!(remove, key)
+    else
+      keep[key] = value
+    end
+  end
+  form_kept = Dict{String,Any}()
+  remove_form = String[]
+  for (field, value) in form_updates
+    field = String(field)
+    spec = get(_WEBUI_OPTION_BY_FIELD, field, nothing)
+    at_default = if spec !== nothing
+      _webui_same_config_value(value, spec.default)
+    elseif field == "case_format"
+      value == "auto"
+    elseif field == "measurement_file"
+      default_measurement_file !== nothing && _webui_same_config_value(value, default_measurement_file)
+    else
+      false
+    end
+    at_default ? push!(remove_form, field) : (form_kept[field] = value)
+  end
+  # variant A (_webui_case_adoption) on the save that creates the case
+  # file; an unchanged save still creates none
+  adopted = String[]
+  if !has_case_file && (!isempty(keep) || !isempty(form_kept))
+    for (key, installed) in _webui_case_adoption(config_file, source; skip = collect(keys(keep)))
+      keep[key] = installed
+      filter!(!=(key), remove)
+      push!(adopted, key)
+    end
+    sort!(adopted)
+  end
+  if freq_locked
+    delete!(keep, freq_key)
+    filter!(!=(freq_key), adopted)
+    freq_key in remove || push!(remove, freq_key)
+  end
+  # the merged case configuration must build NOW: an incompatible pair
+  # saved today failed the next run instead (a Web UI run: apslf_start
+  # kept from an earlier save under a newly chosen apslf solver)
+  stored = try
+    load_case_config(source)
+  catch err
+    # an unreadable case file is replaced by the save, which logs the loss
+    # (_webui_merge_case_config_write, on_unreadable)
+    _webui_config_read_failure(err) || rethrow()
+    Dict{String,Any}()
+  end
+  candidate = merge(stored, keep)
+  foreach(k -> delete!(candidate, k), remove)
+  # With a case file, a save that leaves nothing in it deletes it
+  # (write_case_config), and the case then reads the configuration file
+  # again. The posted values are compared against that chain instead, so a
+  # value the configuration file does not have stays in the case file and
+  # the run uses what was posted.
+  stored_form = [f for f in keys(_webui_case_form_defaults(source, nothing)) if (haskey(_WEBUI_OPTION_BY_FIELD, f) || f == "case_format") && !(f in remove_form)]
+  isempty(_webui_stored_measurement_choice(source)) || "measurement_file" in remove_form || push!(stored_form, "measurement_file")
+  if has_case_file && isempty(candidate) && isempty(stored_form) && isempty(form_kept) && !isempty(remove)
+    general_chain = _webui_case_inherited_raw(config_file, source; case_scope_from_defaults = false)
+    for key in copy(remove)
+      # the locked frequency key is removed whatever the chain says
+      (key == freq_key && freq_locked) && continue
+      _webui_posted_equals_inherited(key, config_updates[key], general_chain) && continue
+      keep[key] = candidate[key] = config_updates[key]
+      filter!(!=(key), remove)
+    end
+  end
+  return (; keep, remove, remove_form, form_updates = form_kept, dropped, inherited, candidate, adopted)
+end
+
+# The SE section's measurement-set choice stored in the case file's form
+# block, "" when there is none. It has no option spec, so
+# _webui_case_form_defaults does not return it. An unreadable file gives ""
+# here; the save replaces that file and logs it (on_unreadable).
+function _webui_stored_measurement_choice(source::AbstractString)::String
+  path = case_config_path(source)
+  isfile(path) || return ""
+  raw = try
+    load_yaml_dict(path)
+  catch err
+    _webui_config_read_failure(err) || rethrow()
+    return ""
+  end
+  # a shared-stem file of the other case carries the other case's form
+  declared = strip(string(get(raw, "case", "")))
+  (isempty(declared) || declared == basename(String(source))) || return ""
+  block = get(raw, "form", nothing)
+  block isa AbstractDict || return ""
+  value = get(block, "measurement_file", nothing)
+  return value isa AbstractString ? basename(strip(value)) : ""
+end
+
 """
-    _webui_merge_case_config_write(source, keep_updates, form_updates; on_unreadable) -> NamedTuple
+    _webui_merge_case_config_write(source, keep_updates, form_updates; on_unreadable, remove, remove_form) -> NamedTuple
 
 Merge updates into the case configuration file next to `source` and write
 it: the existing file is the base (`keep_updates` win on conflict), existing
 form-block fields survive a save from a page that does not carry them (the
-PF result save must not wipe the SE generator options; `case_format` is the
-one non-spec form-block field and survives the same way), and
+PF result save must not wipe the SE generator options; the non-spec
+form-block fields `case_format` and `measurement_file` survive the same
+way), and
 `form_updates` win over stored form values. An unreadable existing file is
 replaced deliberately (the save is the user's explicit request to persist
 the current state); `on_unreadable` is called with the error so the caller
-can log the loss. Returns `(path, config, form)` of what was written.
+can log the loss. `remove` (dotted configuration keys) and `remove_form`
+(form-block fields) are deleted from the stored file first: the Settings
+save passes the fields set back to their inherited value. Returns
+`(path, config, form)` of what was written.
 """
-function _webui_merge_case_config_write(source::AbstractString, keep_updates::AbstractDict, form_updates::AbstractDict; on_unreadable::Function = err -> nothing)
+function _webui_merge_case_config_write(source::AbstractString, keep_updates::AbstractDict, form_updates::AbstractDict; on_unreadable::Function = err -> nothing, remove = String[], remove_form = String[])
   existing_config = try
     load_case_config(source)
   catch err
     on_unreadable(err)
     Dict{String,Any}()
   end
+  foreach(k -> delete!(existing_config, String(k)), remove)
   config = merge(existing_config, keep_updates)
   form_fields = Dict{String,Any}()
   for (field, value) in _webui_case_form_defaults(source, nothing)
     (haskey(_WEBUI_OPTION_BY_FIELD, String(field)) || String(field) == "case_format") && (form_fields[String(field)] = value)
   end
+  # a save from the Settings or Case page posts no measurement set and
+  # dropped the stored choice; the SE section then armed another set
+  stored_set = _webui_stored_measurement_choice(source)
+  isempty(stored_set) || (form_fields["measurement_file"] = stored_set)
+  foreach(k -> delete!(form_fields, String(k)), remove_form)
   merge!(form_fields, form_updates)
   path = write_case_config(source, config; form = form_fields)
   return (; path, config, form = form_fields)
@@ -1317,6 +1739,17 @@ function handle_settings_save(form::AbstractDict; output_root::AbstractString = 
       config_updates[String(config_key)] = _webui_parse_form_value(raw, type, field)
     end
     _webui_apply_qlimits_off!(config_updates)
+    # the sigma table of the SE section (no option spec: a table); an
+    # empty table is saved as an empty mapping, so it replaces a stored one
+    sigma_levels = _webui_sigma_levels_from_form(form)
+    sigma_levels === nothing || (config_updates[_WEBUI_SIGMA_LEVEL_KEY] = sigma_levels)
+    # the tap estimation table of the Case page (no option spec: a table);
+    # the save plan drops each key again where it equals the inherited value
+    tap_excl = _webui_tap_exclusions_from_form(form)
+    if tap_excl !== nothing
+      config_updates[_WEBUI_TAP_EXCLUDE_KEY] = tap_excl.exclude
+      config_updates[_WEBUI_TAP_MACHINE_KEY] = tap_excl.include_machine
+    end
   catch err
     record_webui_operation!(operation_log, "settings_save_failed"; route, method = "POST", user_action = true, casefile = case, target, status = "rejected", message = sprint(showerror, err))
     return back("Could not save settings: $(sprint(showerror, err))")
@@ -1347,7 +1780,7 @@ function handle_settings_save(form::AbstractDict; output_root::AbstractString = 
   case_format_raw = lowercase(strip(String(something(_webui_form_value(form, "case_format", ""), ""))))
   # scf and pgm name the same reader; both are accepted so the choice made
   # in the form survives the save (see _normalize_case_format)
-  case_format_raw in ("auto", "matpower", "dtf_for001", "cgmes", "scf", "pgm") && (form_updates["case_format"] = case_format_raw)
+  case_format_raw in ("auto", "matpower", "dtf_for001", "cgmes", "scf", "pgm", "powsybl") && (form_updates["case_format"] = case_format_raw)
   # the SE section's save carries the measurement-set choice (a file name,
   # no option spec of its own): kept in the form block so the section arms
   # that set again on the next load (it was never stored)
@@ -1357,16 +1790,33 @@ function handle_settings_save(form::AbstractDict; output_root::AbstractString = 
     isempty(case) && return back(return_to == "case" ? "Select a case before saving case options." : "Select a case first (Case page), or save to the configuration file.")
     source = isabspath(case) ? normpath(case) : _webui_resolve_case_profile_source(case; case_directory = directory)
     (isempty(source) || !(isfile(source) || isdir(source))) && return back("Case '$(case)' was not found in the case directory; resolve it first.")
-    keep = Dict{String,Any}()
-    dropped = String[]
-    for (key, value) in config_updates
-      scf_is_case_config_key(key) ? (keep[key] = value) : push!(dropped, key)
+    # the page posts every field it renders; only a value that differs
+    # from what the key inherits is a decision (L20: an unchanged save
+    # wrote about 90 keys into the case file and pinned them). A field at
+    # its inherited value is removed from the file, which also covers a
+    # field set back.
+    _webui_resolve_solver_start_conflict!(config_updates)
+    # the SE section posts the set it arms. Only the convention file
+    # <case>.measurements.csv is a stable default; the newest-set rule moves
+    # with every generated set, so a choice made under it is kept.
+    se_default = nothing
+    if haskey(form_updates, "measurement_file")
+      armed = _webui_se_form_state(Dict{String,Any}("case" => basename(source)); output_root, application_root, case_directory = directory, config_file, use_saved_choice = false).selected_measurement
+      armed in [string(st, ".measurements.csv") for st in _webui_case_stems(basename(source))] && (se_default = armed)
     end
-    _webui_resolve_solver_start_conflict!(keep)
-    # the merged case configuration must build NOW: an incompatible pair
-    # saved today failed the next run instead (a Web UI run: apslf_start
-    # kept from an earlier save under a newly chosen apslf solver)
-    candidate = merge(try load_case_config(source) catch; Dict{String,Any}() end, keep)
+    plan = try
+      _webui_case_save_plan(config_file, source, config_updates, form_updates; default_measurement_file = se_default)
+    catch err
+      # the configuration file or the case's in-file block does not load;
+      # the message names it and nothing is written
+      _webui_config_read_failure(err) || rethrow()
+      record_webui_operation!(operation_log, "settings_save_failed"; route, method = "POST", user_action = true, casefile = case, target, status = "rejected", message = sprint(showerror, err))
+      return back("Could not save settings for this case: $(sprint(showerror, err))")
+    end
+    (; keep, remove, remove_form, dropped, inherited) = plan
+    form_updates = plan.form_updates
+    had_case_file = isfile(case_config_path(source))
+    candidate = plan.candidate
     try
       _load_api_config(config_file, validate_gui_config_overrides(candidate); case_scope_from_defaults = true)
     catch err
@@ -1374,29 +1824,54 @@ function handle_settings_save(form::AbstractDict; output_root::AbstractString = 
       return back("Could not save settings for this case: $(sprint(showerror, err))")
     end
     written = try
-      _webui_merge_case_config_write(source, keep, form_updates; on_unreadable = err -> record_webui_operation!(operation_log, "settings_save_replaced_unreadable"; route, method = "POST", user_action = true, casefile = case, status = "replaced", message = sprint(showerror, err)))
+      _webui_merge_case_config_write(source, keep, form_updates; remove, remove_form, on_unreadable = err -> record_webui_operation!(operation_log, "settings_save_replaced_unreadable"; route, method = "POST", user_action = true, casefile = case, status = "replaced", message = sprint(showerror, err)))
     catch err
       record_webui_operation!(operation_log, "settings_save_failed"; route, method = "POST", user_action = true, casefile = case, target, status = "rejected", message = sprint(showerror, err))
       return back("Could not write the case configuration file: $(sprint(showerror, err))")
     end
-    record_webui_operation!(operation_log, "settings_saved"; route, method = "POST", user_action = true, casefile = case, target, return_to, status = "succeeded", profile_path = written.path, saved_keys = length(written.config), form_fields = length(written.form), machine_scope_dropped = join(sort!(dropped), ","))
+    record_webui_operation!(operation_log, "settings_saved"; route, method = "POST", user_action = true, casefile = case, target, return_to, status = "succeeded", profile_path = written.path, saved_keys = length(written.config), form_fields = length(written.form), adopted_from_config = length(plan.adopted), machine_scope_dropped = join(sort!(dropped), ","))
     # machine-scope keys on the form (the CSV format among them) are not
     # case settings, but a save is a save: they go to the configuration file
     # in the same request, and the message names both files. Before this
     # they were dropped with a note, and a user who saved with the default
     # target saw the value jump back on every save.
+    # Only machine keys whose value changed are written: an unchanged one
+    # rewrote the file (its comments lost) and marked the key as set by the
+    # user, which also took it away from the auto profile.
     note = ""
-    if !isempty(dropped)
-      machine_updates = Dict{String,Any}(k => config_updates[k] for k in dropped)
+    changed_machine = sort!(String[k for k in dropped if !_webui_posted_equals_inherited(k, config_updates[k], inherited)])
+    if !isempty(changed_machine)
+      machine_updates = Dict{String,Any}(k => config_updates[k] for k in changed_machine)
       general = _webui_write_general_settings!(config_file, machine_updates)
       general.ok || return back("Saved case settings to $(basename(written.path)), but the configuration file was not written: $(general.message)")
-      note = " Machine-scope key(s) saved to $(basename(config_file)): $(join(sort!(dropped), ", "))."
+      note = " Machine-scope key(s) saved to $(basename(config_file)): $(join(changed_machine, ", "))."
     end
+    # nothing differs from what the case inherits: write_case_config wrote
+    # no file (or removed the one that held only inherited values)
+    isfile(written.path) || return back("No setting differs from what this case inherits; $(basename(written.path)) is not needed and does not exist.$(note)")
     verb = return_to == "case" ? "Saved case options" : "Saved settings for this case"
-    return back("$(verb) to $(basename(written.path)).$(note)")
+    # a new case file no longer follows the configuration file, so the
+    # message says how many of its values came from there (variant A)
+    created = had_case_file ? "" : " New case file; $(length(plan.adopted)) value(s) taken from $(basename(config_file)), where it differs from the packaged defaults."
+    return back("$(verb) to $(basename(written.path)).$(created)$(note)")
   end
   target == "general" || return back("Unknown settings target '$(target)'.")
   _webui_resolve_solver_start_conflict!(config_updates)
+  # the same rule for the general file: a key whose value did not change is
+  # not written and not marked as set by the user
+  general_inherited = try
+    _webui_general_inherited_raw(config_file)
+  catch err
+    # the configuration file does not load
+    _webui_config_read_failure(err) || rethrow()
+    record_webui_operation!(operation_log, "settings_save_failed"; route, method = "POST", user_action = true, target, status = "rejected", message = sprint(showerror, err))
+    return back("Could not save settings: $(sprint(showerror, err))")
+  end
+  filter!(kv -> !_webui_posted_equals_inherited(kv.first, kv.second, general_inherited), config_updates)
+  if isempty(config_updates)
+    record_webui_operation!(operation_log, "settings_saved"; route, method = "POST", user_action = true, target, status = "unchanged", config_file, saved_keys = 0)
+    return back("No setting differs from $(basename(config_file)); nothing was written.")
+  end
   general = _webui_write_general_settings!(config_file, config_updates)
   if !general.ok
     record_webui_operation!(operation_log, "settings_save_failed"; route, method = "POST", user_action = true, target, status = "rejected", message = general.message)
@@ -1803,8 +2278,22 @@ function handle_powerflow_case_settings_save(run_id::AbstractString, form::Abstr
     haskey(settings_raw, String(field)) || continue
     form_updates[String(field)] = value
   end
+  # the same rule as the Settings save (L20): a run setting equal to what
+  # the case inherits is not written, so the case keeps following the
+  # configuration file and the defaults
+  run_config_file = String(something(get(settings_raw, "config_file", nothing), ""))
+  isempty(run_config_file) && (run_config_file = DEFAULT_SPARLECTRA_CONFIG_PATH)
+  had_case_file = isfile(case_config_path(case_settings_source))
+  plan = try
+    _webui_case_save_plan(run_config_file, case_settings_source, keep, form_updates)
+  catch err
+    # the run's configuration file or the case's in-file block does not load
+    _webui_config_read_failure(err) || rethrow()
+    record_webui_operation!(operation_log, "case_settings_save_failed"; route = "/powerflow/result/$(run_id)/case-settings/save", method = "POST", user_action = true, run_id, status = "rejected", message = sprint(showerror, err))
+    return _webui_html(render_webui_error(400, "Could not save the case settings: $(sprint(showerror, err))"); status = 400)
+  end
   written = try
-    _webui_merge_case_config_write(case_settings_source, keep, form_updates; on_unreadable = err -> record_webui_operation!(operation_log, "case_settings_save_replaced_unreadable"; route = "/powerflow/result/$(run_id)/case-settings/save", method = "POST", user_action = true, run_id, status = "replaced", message = sprint(showerror, err)))
+    _webui_merge_case_config_write(case_settings_source, plan.keep, plan.form_updates; remove = plan.remove, remove_form = plan.remove_form, on_unreadable = err -> record_webui_operation!(operation_log, "case_settings_save_replaced_unreadable"; route = "/powerflow/result/$(run_id)/case-settings/save", method = "POST", user_action = true, run_id, status = "replaced", message = sprint(showerror, err)))
   catch err
     record_webui_operation!(operation_log, "case_settings_save_failed"; route = "/powerflow/result/$(run_id)/case-settings/save", method = "POST", user_action = true, run_id, status = "rejected", message = sprint(showerror, err))
     return _webui_html(render_webui_error(400, "Could not write the case configuration file: $(sprint(showerror, err))"); status = 400)
@@ -1821,11 +2310,13 @@ function handle_powerflow_case_settings_save(run_id::AbstractString, form::Abstr
     stale_sidecar && rm(legacy; force = true)
   catch
   end
-  record_webui_operation!(operation_log, "case_settings_saved"; route = "/powerflow/result/$(run_id)/case-settings/save", method = "POST", user_action = true, run_id, status = "succeeded", profile_path = written_path, saved_keys = length(keep), form_fields = length(form_fields), machine_scope_dropped = join(dropped_keys, ","), stale_sidecar_removed = stale_sidecar)
+  record_webui_operation!(operation_log, "case_settings_saved"; route = "/powerflow/result/$(run_id)/case-settings/save", method = "POST", user_action = true, run_id, status = "succeeded", profile_path = written_path, saved_keys = length(keep), form_fields = length(form_fields), adopted_from_config = length(plan.adopted), machine_scope_dropped = join(dropped_keys, ","), stale_sidecar_removed = stale_sidecar)
   case_dir = _webui_case_directory(; application_root = _webui_application_root(), output_root = output_root)
   back_name = dirname(abspath(case_settings_source)) == abspath(case_dir) ? basename(case_settings_source) : case_settings_source
-  return _webui_html(_webui_case_settings_saved_html(written_path, back_name, length(keep) + length(form_fields), successful, !successful && override; label = "Saved case configuration:", extra = string(
+  saved_label = isfile(written_path) ? "Saved case configuration:" : "No setting of this run differs from what the case inherits; no case configuration file:"
+  return _webui_html(_webui_case_settings_saved_html(written_path, back_name, length(keep) + length(form_fields), successful, !successful && override; label = saved_label, extra = string(
     isempty(dropped_keys) ? "" : "<li><strong>Kept on this machine (not case scope):</strong> $(length(dropped_keys)) key(s)</li>",
+    had_case_file || !isfile(written_path) ? "" : "<li><strong>Taken from the configuration file:</strong> $(length(plan.adopted)) value(s) where it differs from the packaged defaults</li>",
     stale_sidecar ? "<li><strong>Old settings sidecar removed:</strong> the case configuration file is the record now</li>" : "",
   )))
 end
@@ -1869,6 +2360,41 @@ end
 const _WEBUI_TEXT_MIME_TYPES = Set(("text/plain", "application/json", "application/x-yaml", "text/csv", "text/html", "text/markdown"))
 const _WEBUI_ARTIFACT_PREVIEW_BYTES = 64 * 1024
 
+# An HTML artifact the run wrote, sent as the page itself. The file was
+# resolved by resolve_powerflow_artifact (name from the run's artifact list,
+# path inside the run directory). It is served from the Web UI origin, so
+# the policy allows no script, no form, no network request and no framing;
+# only its inline style and the files of this server (the charts it embeds
+# with <object>, which are SVG documents of their own) load. Chromium checks
+# an <object> that shows a document against frame-src, not object-src, so
+# both name 'self' (without frame-src the charts stay empty).
+const _WEBUI_ARTIFACT_HTML_POLICY = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; object-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+
+# The document is sent as it is on disk, plus a plain link bar right after
+# <body>: the Web UI often runs in an app window without a back button, and
+# the report has no navigation of its own. Plain links need no script, so the
+# strict policy stays.
+function _webui_artifact_html_document(path::AbstractString, run_id::AbstractString = "")::SparlectraWebUIResponse
+  headers = Pair{String,String}[
+    "Content-Type" => "text/html; charset=utf-8",
+    "Content-Security-Policy" => _WEBUI_ARTIFACT_HTML_POLICY,
+    "X-Content-Type-Options" => "nosniff",
+  ]
+  body = read(path)
+  if !isempty(run_id)
+    text = String(body)
+    m = match(r"<body[^>]*>", text)
+    if m !== nothing
+      id = _webui_urlencode(run_id)
+      bar = "<nav class=\"artifact-back\" style=\"font:14px sans-serif;padding:6px 10px;background:#eef;border-bottom:1px solid #99c\"><a href=\"/powerflow/result/$(id)\">← Back to the run</a> · <a href=\"/powerflow/artifacts/$(id)\">Artifacts</a></nav>"
+      cut = m.offset + ncodeunits(m.match)
+      text = string(text[1:(cut - 1)], bar, text[cut:end])
+      body = Vector{UInt8}(text)
+    end
+  end
+  return SparlectraWebUIResponse(200, headers, body)
+end
+
 function _read_webui_artifact_preview(path::AbstractString; max_bytes::Integer = _WEBUI_ARTIFACT_PREVIEW_BYTES)::NamedTuple
   open(path, "r") do io
     bytes = read(io, max_bytes + 1)
@@ -1879,26 +2405,86 @@ function _read_webui_artifact_preview(path::AbstractString; max_bytes::Integer =
 end
 
 """
-    handle_powerflow_artifact(run_id, artifact_name; raw = false)
+    handle_powerflow_artifact(run_id, artifact_name; raw = false, page = false, csv_display = _WebUICsvDisplay())
 
 The artifact viewer. Text artifacts open as a page (CSV as a table, Markdown
 rendered, everything else as escaped text; `raw = true` forces the text
-panel), other types are sent as a download. See `render_powerflow_artifact_page`.
+panel). An HTML artifact (the QSTS overview) is sent as the page itself,
+with a policy that blocks script, so its relative chart paths resolve under
+this route. SVG charts show in the browser as the bare SVG (the overview embeds them
+that way), or with `page = true` inside a Web UI page with Back and Download
+(`render_powerflow_chart_page`); other types are sent as a download. `csv_display` is the number display
+of a CSV table (from the query, `_webui_csv_display`); a CSV page also links
+the other CSV artifacts of the run. The two short-circuit tables
+(`short_circuit_max.csv`, `short_circuit_min.csv`) carry the head line of
+their case from the run metadata (`sc_status_line_max`/`_min`: run status,
+flagged rows, lower-bound rows) above the table. See
+`render_powerflow_artifact_page`.
 """
-function handle_powerflow_artifact(run_id::AbstractString, artifact_name::AbstractString; raw::Bool = false)::SparlectraWebUIResponse
+function handle_powerflow_artifact(run_id::AbstractString, artifact_name::AbstractString; raw::Bool = false, page::Bool = false, csv_display::_WebUICsvDisplay = _WebUICsvDisplay())::SparlectraWebUIResponse
   artifact = resolve_powerflow_artifact(run_id, artifact_name)
   if artifact isa AbstractDict
     reason = get(artifact, "reason", "artifact_error")
     status = reason in ("unsafe_artifact_name", "artifact_not_found") ? 400 : 404
     return _webui_html(render_webui_error(status, get(artifact, "message", reason)); status = status)
   end
+  # an HTML report of the run (the QSTS overview) opens as itself, so the
+  # relative paths of its charts (qsts_plots/<name>.svg) resolve under this
+  # route; raw=1 still shows the source
+  artifact.mime_type == "text/html" && !raw && return _webui_artifact_html_document(artifact.path, run_id)
   if artifact.mime_type in _WEBUI_TEXT_MIME_TYPES
     preview = _read_webui_artifact_preview(artifact.path)
-    return _webui_html(render_powerflow_artifact_page(artifact, preview; raw))
+    csv_siblings = String[]
+    if artifact.mime_type == "text/csv" && !raw
+      # the run resolved above, so the list is a vector; a failure dict
+      # (run removed in between) only drops the links
+      listed = list_powerflow_artifacts(run_id)
+      listed isa AbstractVector && (csv_siblings = [String(get(a, "name", "")) for a in listed if get(a, "mime_type", "") == "text/csv"])
+    end
+    head_line = ""
+    sc_case = match(r"^short_circuit_(max|min)\.csv$", String(artifact_name))
+    if sc_case !== nothing
+      # the run resolved above; a run removed in between (nothing) or one
+      # written before the head line existed (no key) shows the table alone
+      run = _registered_powerflow_run(run_id)
+      run === nothing || (head_line = string(get(run.metadata, "sc_status_line_" * sc_case.captures[1], "")))
+    end
+    return _webui_html(render_powerflow_artifact_page(artifact, preview; raw, csv_display, csv_siblings, head_line))
   end
   bytes = read(artifact.path)
+  # a chart of a QSTS run shows in the browser (its point tooltips need the
+  # SVG itself, not a download); every other binary artifact downloads
+  artifact.mime_type == "image/svg+xml" && page && return _webui_html(render_powerflow_chart_page(run_id, artifact))
+  artifact.mime_type == "image/svg+xml" && return SparlectraWebUIResponse(200, Pair{String,String}["Content-Type" => "image/svg+xml; charset=utf-8"], bytes)
   headers = ["Content-Disposition" => "attachment; filename=\"$(replace(basename(artifact.name), '"' => '_'))\""]
   return SparlectraWebUIResponse(200, Pair{String,String}["Content-Type" => artifact.mime_type; headers], bytes)
+end
+
+"""
+    handle_qsts_chart(run_id, element, quantity) -> SparlectraWebUIResponse
+
+`GET /powerflow/result/<run_id>/qsts-chart?element=&quantity=`: one
+quantity of one element of a QSTS run as SVG (`image/svg+xml`), drawn from
+the run's element view `qsts_view.json` by the renderer of `qstsChart`
+with the band of the run. An empty `element` selects a step quantity.
+404 when the run has no view, 400 for an element or quantity the view does
+not hold.
+"""
+function handle_qsts_chart(run_id::AbstractString, element::AbstractString, quantity::AbstractString)::SparlectraWebUIResponse
+  artifact = resolve_powerflow_artifact(run_id, _QSTS_VIEW_FILE)
+  if artifact isa AbstractDict
+    return SparlectraWebUIResponse(404, string("No QSTS view for run ", run_id, ": ", get(artifact, "message", "unknown reason")); content_type = "text/plain; charset=utf-8")
+  end
+  view = try
+    scf_json_parse(read(artifact.path, String))
+  catch err
+    # the reader names a broken file with an ArgumentError (byte position)
+    err isa ArgumentError || rethrow()
+    return SparlectraWebUIResponse(500, string(_QSTS_VIEW_FILE, " could not be read: ", sprint(showerror, err)); content_type = "text/plain; charset=utf-8")
+  end
+  svg = _qsts_view_chart_svg(view, element, quantity)
+  svg === nothing && return SparlectraWebUIResponse(400, string("The QSTS view of run ", run_id, " holds no quantity ", repr(String(quantity)), " for element ", repr(String(element)), "."); content_type = "text/plain; charset=utf-8")
+  return SparlectraWebUIResponse(200, svg; content_type = "image/svg+xml; charset=utf-8")
 end
 
 function handle_powerflow_artifact_download(run_id::AbstractString, artifact_name::AbstractString)::SparlectraWebUIResponse
@@ -2074,17 +2660,18 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    _webui_se_form_state(query; output_root, application_root, case_directory, config_file, selected_fallback) -> NamedTuple
+    _webui_se_form_state(query; output_root, application_root, case_directory, config_file, selected_fallback, use_saved_choice) -> NamedTuple
 
 Assembles the state of the state-estimation section embedded on the Runs
 page: case and measurement-set discovery, set info and
 editors, sticky generator values, and truth-run candidates. `query` carries
 the SE-specific keys (`case`, `message`, `g_*`); when `case` is absent, the
 page's shared case selection arrives as `selected_fallback`. Returns the
-keyword set of `render_se_form`. GET /stateestimation itself is a real
+keyword set of `render_se_form`. `use_saved_choice = false` ignores the
+measurement set stored in the case configuration file. GET /stateestimation itself is a real
 redirect to the Runs page (no second rendering path).
 """
-function _webui_se_form_state(query::AbstractDict; output_root::AbstractString, application_root::AbstractString = _webui_application_root(), case_directory = nothing, config_file::AbstractString = "", selected_fallback::AbstractString = "")
+function _webui_se_form_state(query::AbstractDict; output_root::AbstractString, application_root::AbstractString = _webui_application_root(), case_directory = nothing, config_file::AbstractString = "", selected_fallback::AbstractString = "", use_saved_choice::Bool = true)
   directory = _webui_case_directory(; case_directory = case_directory, application_root = application_root, output_root = output_root)
   cases = _webui_casefile_options_in_directory(directory)
   selected = String(get(query, "case", ""))
@@ -2095,45 +2682,74 @@ function _webui_se_form_state(query::AbstractDict; output_root::AbstractString, 
   # per-set case binding: the in-file `# case:` comment decides; the stem
   # convention <case>.measurements.csv only fills in for older files
   meas_case = Dict{String,String}()
+  # model ids of the sets bound by `# cgmes_model:` only (no `# case:` line)
+  set_models = Set{String}()
   for name in measurements
-    bound = _webui_measurement_set_case(joinpath(directory, name))
-    if isempty(bound) && endswith(name, ".measurements.csv")
+    binding = _webui_measurement_set_binding(joinpath(directory, name))
+    bound = binding.case
+    isempty(bound) && union!(set_models, binding.models)
+    if isempty(bound) && isempty(binding.models) && endswith(name, ".measurements.csv")
       stem = String(name[1:(end - length(".measurements.csv"))])
       hits = [c for c in cases if first(splitext(c)) == stem]
       length(hits) == 1 && (bound = hits[1])
     end
     isempty(bound) || (meas_case[name] = bound)
   end
-  # a case with at least one bound set gets the star in the selector
+  # a case with at least one bound set gets the star in the selector, a
+  # CGMES case also for a set that names its EQ model
   starred = Set{String}(values(meas_case))
+  if !isempty(set_models)
+    for c in cases
+      lowercase(splitext(c)[2]) == ".zip" || continue
+      any(in(set_models), _webui_case_cgmes_model_ids_cached(joinpath(directory, c))) && push!(starred, c)
+    end
+  end
   # preselect a set BOUND to the selected case; a foreign set fails the SE
   # run with per-row resolution errors, so it must never be a silent
   # default. WITHOUT a selected case nothing is preselected and no set
   # panel renders (a fresh page must not show set info out of thin air).
-  bound_sets = [name for name in measurements if get(meas_case, name, "") == selected]
   # What the case file says about its OWN measurement set: how many rows it
-  # carries, and whether those are ideal (noise-free) or measured. Parsed
-  # once, because both answers come from the same block.
-  case_measurement_rows, case_measurement_noise = try
+  # carries, and whether those are ideal (noise-free) or measured, plus the
+  # source case an SCF export records (a set bound to that source fits the
+  # case, the SE service accepts it). Parsed once, all three come from the
+  # same block.
+  case_measurement_rows, case_measurement_noise, case_source = try
     if !isempty(selected) && lowercase(splitext(selected)[2]) == ".json"
-      block = get(get(scf_json_parse(read(joinpath(directory, selected), String)), "sparlectra", Dict{String,Any}()), "measurements", nothing)
+      sp = get(scf_json_parse(read(joinpath(directory, selected), String)), "sparlectra", Dict{String,Any}())
+      meta = sp isa AbstractDict ? get(sp, "meta", nothing) : nothing
+      src = meta isa AbstractDict ? get(meta, "source_reference", "") : ""
+      src = src isa AbstractString ? String(src) : ""
+      block = sp isa AbstractDict ? get(sp, "measurements", nothing) : nothing
       if block isa AbstractDict
-        # one entry of `rows` is one PGM SENSOR, and a sensor carries one or
-        # two measurement rows (a P/Q pair). The page must show measurements,
-        # not sensors, or it understates the set.
-        n = sum(length(get(r, "sparlectra_ids", [])) for r in get(block, "rows", []); init = 0)
+        # The page shows measurements, not sensors. From SCF 1.2 on one
+        # entry of `rows` is one measurement; in 1.0 one entry is one PGM
+        # SENSOR with one or two measurements (a P/Q pair) in its
+        # sparlectra_ids, and the shunt-bay rows have their own list.
+        n = sum((r isa AbstractDict && haskey(r, "sparlectra_ids")) ? length(r["sparlectra_ids"]) : 1 for r in get(block, "rows", []); init = 0) + length(get(block, "shunt_bay_rows", []))
         prov = get(block, "provenance", nothing)
         noise = prov isa AbstractDict ? get(prov, "noise", nothing) : nothing
-        (n, noise isa Bool ? noise : nothing)
+        (n, noise isa Bool ? noise : nothing, src)
       else
-        (0, nothing)
+        (0, nothing, src)
       end
     else
-      (0, nothing)
+      (0, nothing, "")
     end
   catch
-    (0, nothing)
+    (0, nothing, "")
   end
+  # the picker offers only the sets that belong to the selected case: a set
+  # of another case can only fail the binding check of the SE service. The
+  # full directory list stays for the stars of the case selector.
+  case_sets = isempty(selected) ? NamedTuple{(:name, :case, :model),Tuple{String,String,String}}[] : _webui_measurement_sets_for_case(directory, selected; also_bound_to = [case_source])
+  measurements = [s.name for s in case_sets]
+  # sets without a `# case:` line that are offered because of their name;
+  # the picker labels them as such
+  meas_name_matched = Set{String}(s.name for s in case_sets if isempty(s.case) && isempty(s.model))
+  # sets offered because their `# cgmes_model:` line names the EQ model of
+  # the selected CGMES case, with the matching model id
+  meas_model_matched = Dict{String,String}(s.name => s.model for s in case_sets if !isempty(s.model))
+  bound_sets = measurements
   # Precedence: a set BOUND to this case wins, because generating one is a
   # deliberate act and the newer data. Among several bound sets the
   # CONVENTION file <case>.measurements.csv wins, exactly as the page
@@ -2142,7 +2758,11 @@ function _webui_se_form_state(query::AbstractDict; output_root::AbstractString, 
   # measurements carried inside a case file are the default only while no
   # bound set exists; without either, the page asks instead of arming a
   # foreign set.
-  convention_set = isempty(selected) ? "" : string(first(splitext(selected)), ".measurements.csv")
+  # for `sp_case14.scf.json` both `sp_case14.scf.measurements.csv` and the
+  # shipped `sp_case14.measurements.csv` count as the convention file
+  convention_candidates = isempty(selected) ? String[] : [string(st, ".measurements.csv") for st in _webui_case_stems(selected)]
+  convention_hit = findfirst(in(bound_sets), convention_candidates)
+  convention_set = convention_hit === nothing ? "" : convention_candidates[convention_hit]
   # among several bound sets without the convention file the NEWEST wins
   # (generated sets carry a time stamp since 0.20.0, so the last one
   # generated is the one the user means), not the alphabetically first
@@ -2159,21 +2779,25 @@ function _webui_se_form_state(query::AbstractDict; output_root::AbstractString, 
   # The saved choice outranks the convention and the newest
   # set; the explicit query key of a redirect (a set just written) outranks
   # the saved choice. Decided HERE, before the set info below is read.
+  # `use_saved_choice = false` gives the set armed without a stored choice,
+  # the value a save compares the posted choice against (L20)
   saved_meas = ""
-  if !isempty(selected)
-    loaded_early = _webui_load_case_settings(output_root, joinpath(directory, selected); case_directory = directory)
+  if !isempty(selected) && use_saved_choice
+    loaded_early = _webui_load_case_settings(output_root, joinpath(directory, selected); config_file, case_directory = directory)
     loaded_early isa AbstractDict && (saved_meas = basename(String(get(loaded_early, "measurement_file", ""))))
   end
   if !isempty(saved_meas) && !(saved_meas in measurements)
-    # the saved choice points at a set that is gone (deleted, renamed):
-    # fall back to the next rule and say so, never arm a missing file
-    message = string(message, isempty(message) ? "" : " ", "The saved measurement set ", saved_meas, " is no longer in the case directory; ", isempty(selected_meas) ? "no set is armed" : string(selected_meas, " is armed instead"), ".")
+    # the saved choice points at a set that is gone (deleted, renamed) or
+    # no longer belongs to the case: fall back to the next rule and say so,
+    # never arm a missing or foreign file
+    message = string(message, isempty(message) ? "" : " ", "The saved measurement set ", saved_meas, " is no longer in the case directory or not bound to this case; ", isempty(selected_meas) ? "no set is armed" : string(selected_meas, " is armed instead"), ".")
   end
   (!isempty(saved_meas) && saved_meas in measurements) && (selected_meas = saved_meas)
   (!isempty(requested_meas) && requested_meas in measurements) && (selected_meas = requested_meas)
   set_info = isempty(selected_meas) ? String[] : _webui_measurement_set_comments(joinpath(directory, selected_meas))
   # the case-binding comment renders as its own line, not inside the table
   set_case = isempty(selected_meas) ? "" : get(meas_case, selected_meas, "")
+  set_model = isempty(selected_meas) ? "" : get(meas_model_matched, selected_meas, "")
   set_info = [l for l in set_info if !startswith(l, "case:")]
   # generator v2 provenance: show the summary lines compactly, drop the
   # bulky per-row truth_value block, and keep the taps table at the front
@@ -2186,12 +2810,16 @@ function _webui_se_form_state(query::AbstractDict; output_root::AbstractString, 
   n_flow_choices > 0 && push!(set_provenance, "flow-end choices documented for $(n_flow_choices) branch(es)")
   set_info = [l for l in set_info if !(startswith(l, "generator:") || startswith(l, "seed:") || startswith(l, "noise:") || startswith(l, "source:") || startswith(l, "truth:") || startswith(l, "flow_ends:") || startswith(l, "flow_end,") || startswith(l, "passive:") || startswith(l, "truth_value,"))]
   set_counts = isempty(selected_meas) ? Tuple{String,Int}[] : _webui_measurement_set_counts(joinpath(directory, selected_meas))
+  # a measurement CSV v1 gets the deprecation notice at the file
+  set_v1 = !isempty(selected_meas) && _webui_is_measurement_csv(joinpath(directory, selected_meas))
   # inline editor for small sets: the file exactly as stored, editable and
-  # saved back verbatim (atomic); large files stay download-only
+  # saved back verbatim (atomic); large files stay download-only. A
+  # measurement table and a measurement CSV v1 both open here; the save
+  # keeps the format of the file
   set_text = ""
   if !isempty(selected_meas)
     p = joinpath(directory, selected_meas)
-    isfile(p) && filesize(p) <= 262_144 && (set_text = read(p, String))
+    isfile(p) && filesize(p) <= 262_144 && _webui_is_measurement_file(p) && (set_text = read(p, String))
   end
   # structured value editor rows (voltages, flows, balances, everything)
   set_rows = isempty(selected_meas) ? NamedTuple[] : _webui_measurement_set_rows(joinpath(directory, selected_meas))
@@ -2220,7 +2848,7 @@ function _webui_se_form_state(query::AbstractDict; output_root::AbstractString, 
   end
   se_profile = Dict{String,Any}()
   if !isempty(selected)
-    loaded = _webui_load_case_settings(output_root, joinpath(directory, selected); case_directory = directory)
+    loaded = _webui_load_case_settings(output_root, joinpath(directory, selected); config_file, case_directory = directory)
     loaded isa AbstractDict && (se_profile = loaded)
     for (k, v) in se_profile
       startswith(k, "_") && continue
@@ -2244,9 +2872,15 @@ function _webui_se_form_state(query::AbstractDict; output_root::AbstractString, 
     end
     sort!(truth_runs; by = r -> r.timestamp, rev = true)
   end
+  # the sigma table of the SE section: the nominal voltages of the case and
+  # the values of its case configuration. Read for every selected case,
+  # also before a measurement set exists (the table then sits in a save
+  # form of its own and steers the generator); the levels need the
+  # imported case, which _webui_case_voltage_levels caches.
+  sigma_levels = isempty(selected) ? (rows = NamedTuple[], error = "", editable = true, stored = false) : _webui_sigma_level_table(selected, directory, config_file)
   # a case file brings its measurements along; the section then offers the
   # run without any CSV in the cache
-  return (cases = cases, measurements = measurements, case_measurement_rows = case_measurement_rows, case_measurement_noise = case_measurement_noise, selected_case = selected, selected_measurement = selected_meas, config_file = config_file, message = message, set_info = set_info, set_provenance = set_provenance, set_counts = set_counts, meas_case = meas_case, starred = starred, set_case = set_case, set_text = set_text, set_rows = set_rows, gen_values = gen_values, truth_runs = truth_runs)
+  return (sigma_levels = sigma_levels, cases = cases, measurements = measurements, case_measurement_rows = case_measurement_rows, case_measurement_noise = case_measurement_noise, selected_case = selected, selected_measurement = selected_meas, config_file = config_file, message = message, set_info = set_info, set_provenance = set_provenance, set_counts = set_counts, set_v1 = set_v1, meas_case = meas_case, meas_name_matched = meas_name_matched, meas_model_matched = meas_model_matched, starred = starred, set_case = set_case, set_model = set_model, set_text = set_text, set_rows = set_rows, gen_values = gen_values, truth_runs = truth_runs)
 end
 
 """
@@ -2256,9 +2890,11 @@ POST /stateestimation/measurements/save: the inline editor of the SE page.
 Overwrites an EXISTING measurement CSV in the case cache with the posted
 content, atomically (temp file + rename). Containment mirrors the download:
 basename only, `.csv`, target must already exist in the case directory and
-be a measurement CSV; the posted content must itself start with the
-`# sparlectra-measurements v1` marker and stays below 2 MB. Line endings
-are normalized to `\\n` (browsers post textarea content with CRLF).
+be a measurement file; the posted content keeps the format of the file
+(a measurement table must still read as one, a measurement CSV v1 must
+start with the `# sparlectra-measurements v1` marker) and stays below 2 MB.
+Line endings are normalized to `\\n` (browsers post textarea content with
+CRLF).
 """
 function handle_se_measurement_save(form::AbstractDict; output_root::AbstractString, application_root::AbstractString = _webui_application_root(), case_directory = nothing, operation_log::AbstractString = output_root)
   directory = _webui_case_directory(; case_directory = case_directory, application_root = application_root, output_root = output_root)
@@ -2268,13 +2904,30 @@ function handle_se_measurement_save(form::AbstractDict; output_root::AbstractStr
   name = basename(requested)
   (name == requested && !isempty(name) && lowercase(splitext(name)[2]) == ".csv") || return redirectq("invalid measurement file name")
   path = joinpath(directory, name)
-  (isfile(path) && _webui_is_measurement_csv(path)) || return redirectq("measurement file not found: $(name)")
+  (isfile(path) && _webui_is_measurement_file(path)) || return redirectq("measurement file not found: $(name)")
   content = replace(String(_webui_form_value(form, "content", "")), "\r\n" => "\n")
   sizeof(content) <= 2_097_152 || return redirectq("content too large for the inline editor; upload the file instead")
-  startswith(strip(content), "# sparlectra-measurements v1") || return redirectq("content rejected: the first line must be '# sparlectra-measurements v1'")
   endswith(content, "\n") || (content *= "\n")
   tmp = path * ".tmp"
-  write(tmp, content)
+  if isMeasurementTable(path)
+    # a table stays a table: the posted text must pass the reader (version
+    # line and header); its ArgumentError is the refusal of the whole file
+    write(tmp, content)
+    verdict = try
+      readMeasurementTable(tmp)
+      ""
+    catch err
+      err isa ArgumentError || rethrow()
+      err.msg
+    end
+    if !isempty(verdict) || !isMeasurementTable(tmp)
+      rm(tmp; force = true)
+      return redirectq("content rejected: not a measurement table ($(isempty(verdict) ? "version line and header expected" : replace(verdict, tmp => name)))")
+    end
+  else
+    startswith(strip(content), "# sparlectra-measurements v1") || return redirectq("content rejected: the first line must be '# sparlectra-measurements v1'")
+    write(tmp, content)
+  end
   mv(tmp, path; force = true)
   record_webui_operation!(operation_log, "se_measurements_saved"; route = "/stateestimation/measurements/save", method = "POST", user_action = true, measurement_file = name)
   return redirectq("saved $(name)")
@@ -2295,7 +2948,7 @@ function handle_se_measurement_download(query::AbstractDict; output_root::Abstra
   name = basename(requested)
   (name == requested && lowercase(splitext(name)[2]) == ".csv") || return _webui_html(render_webui_error(400, "Invalid measurement file name."); status = 400)
   path = joinpath(directory, name)
-  (isfile(path) && _webui_is_measurement_csv(path)) || return _webui_html(render_webui_error(404, "Measurement file not found."); status = 404)
+  (isfile(path) && _webui_is_measurement_file(path)) || return _webui_html(render_webui_error(404, "Measurement file not found."); status = 404)
   headers = ["Content-Type" => "text/csv; charset=utf-8", "Content-Disposition" => "attachment; filename=\"$(name)\""]
   return SparlectraWebUIResponse(200, headers, read(path))
 end
@@ -2305,10 +2958,10 @@ end
 
 POST /stateestimation/measurements/update-values: the structured table
 editor of the SE page. Rewrites ONLY the value/sigma/active columns of the
-addressed data rows (keyed by their file line number), leaving comments,
-header, ordering, and all other columns untouched; the write is atomic.
-Containment mirrors the text editor: basename, `.csv`, existing measurement
-CSV in the case directory. Rejected rows (unparsable value, non-positive
+addressed data rows (keyed by their file line number; in a measurement
+table value, sigma and valid), leaving comments, header, ordering, and all
+other columns untouched; the write is atomic. Containment mirrors the text
+editor: basename, `.csv`, existing measurement file in the case directory. Rejected rows (unparsable value, non-positive
 sigma) reject the whole save so a typo never half-applies.
 """
 function handle_se_measurement_update_values(form::AbstractDict; output_root::AbstractString, application_root::AbstractString = _webui_application_root(), case_directory = nothing, operation_log::AbstractString = output_root)
@@ -2319,8 +2972,9 @@ function handle_se_measurement_update_values(form::AbstractDict; output_root::Ab
   name = basename(requested)
   (name == requested && !isempty(name) && lowercase(splitext(name)[2]) == ".csv") || return redirectq("invalid measurement file name")
   path = joinpath(directory, name)
-  (isfile(path) && _webui_is_measurement_csv(path)) || return redirectq("measurement file not found: $(name)")
+  (isfile(path) && _webui_is_measurement_file(path)) || return redirectq("measurement file not found: $(name)")
   lines = readlines(path)
+  table = isMeasurementTable(path)
   # the file's own delimiter (from its header line) decides how a row is
   # split and how an edited number is written back: decimal comma in an
   # excel_de file, decimal point otherwise; the user may type either
@@ -2332,15 +2986,32 @@ function handle_se_measurement_update_values(form::AbstractDict; output_root::Ab
     v === nothing && continue
     s = String(_webui_form_value(form, "s_$(ln)", ""))
     a = String(_webui_form_value(form, "a_$(ln)", "true"))
-    parts = split(String(line), delimiter; limit = 11)
-    length(parts) >= 11 || return redirectq("row at line $(ln) is not editable")
     vf = something(tryparse(Float64, String(v)), Sparlectra._parse_result_csv_number(String(v), delimiter), nothing)
     sf = something(tryparse(Float64, s), Sparlectra._parse_result_csv_number(s, delimiter), nothing)
     vf === nothing && return redirectq("line $(ln): value '$(v)' is not a number; nothing was saved")
     (sf === nothing || sf <= 0.0) && return redirectq("line $(ln): sigma '$(s)' must be a positive number; nothing was saved")
     a in ("true", "false") || return redirectq("line $(ln): active must be true or false; nothing was saved")
+    if table
+      # a table row: value, sigma and valid are fields 6, 7 and 9; the text
+      # cells are written back as the table writer writes them (quoted only
+      # when they carry a comma or a quote)
+      f = Sparlectra._measurement_table_fields(String(line))
+      length(f) == 9 || return redirectq("row at line $(ln) is not editable")
+      vtext = repr(vf)
+      stext = repr(sf)
+      if strip(f[6]) != vtext || strip(f[7]) != stext || strip(f[9]) != a
+        f[6] = vtext
+        f[7] = stext
+        f[9] = a
+        lines[ln] = join((Sparlectra._measurement_table_cell(x) for x in f), ",")
+        changed += 1
+      end
+      continue
+    end
     vtext = number(vf)
     stext = number(sf)
+    parts = split(String(line), delimiter; limit = 11)
+    length(parts) >= 11 || return redirectq("row at line $(ln) is not editable")
     if String(parts[8]) != vtext || String(parts[9]) != stext || String(parts[10]) != a
       parts[8] = vtext
       parts[9] = stext
@@ -2359,6 +3030,47 @@ function handle_se_measurement_update_values(form::AbstractDict; output_root::Ab
   mv(tmp, path; force = true)
   record_webui_operation!(operation_log, "se_measurements_values_updated"; route = "/stateestimation/measurements/update-values", method = "POST", user_action = true, measurement_file = name, changed = changed)
   return redirectq("updated $(changed) measurement value(s) in $(name)")
+end
+
+# The configuration a topology hypothesis test judges a state-estimation run
+# with: the run's effective configuration from resolve_config, the function
+# the SE service resolves it with (case configuration file, general file,
+# defaults), plus the estimator thresholds the run recorded as decided
+# (se_* metadata, where a form value beat the files). The candidate solves
+# keep their fixed max_iter 100 and tol 1e-8.
+function _se_hypothesis_config(result::AbstractDict)
+  metadata = get(result, "metadata", Dict{String,Any}())
+  cfg = resolve_config(String(get(result, "config_file", DEFAULT_SPARLECTRA_CONFIG_PATH)), String(get(result, "casefile", ""))).config
+  num(k) = (v = get(metadata, k, nothing); (v isa Real && !(v isa Bool)) ? Float64(v) : nothing)
+  se = _se_config_with(cfg.state_estimation; max_iter = 100, tol = 1e-8, k_eliminate = num("se_k_eliminate"), robust_k1 = num("se_robust_k1"), robust_k2 = num("se_robust_k2"), k_suppress = num("se_k_suppress"), suppression_sigma = num("se_suppression_sigma"))
+  return _sparlectra_config_with(cfg; state_estimation = se)
+end
+
+# The lines of measurements.csv that measurements_verdict.csv marks as
+# eliminated. The table artifact is the input set of the run (valid as
+# read, reloadable as it is); the rows the run removed are named in the
+# verdict file only. Throws ArgumentError on a file without the verdict
+# header.
+function _se_verdict_eliminated_lines(file::AbstractString)::Set{Int}
+  lines = readlines(file)
+  isempty(lines) && throw(ArgumentError("$(basename(file)) is empty"))
+  head = lines[1]
+  # the header starts with `line`, the next character is the delimiter of
+  # output.csv_format
+  (startswith(head, "line") && length(head) > 4) || throw(ArgumentError("$(basename(file)) has no verdict header"))
+  delim = head[5]
+  cols = _webui_compare_split_csv(head, delim)
+  cols == _SE_VERDICT_HEADER || throw(ArgumentError("$(basename(file)) has no verdict header"))
+  iline = findfirst(==("line"), cols)
+  ielim = findfirst(==("eliminated"), cols)
+  out = Set{Int}()
+  for l in lines[2:end]
+    isempty(strip(l)) && continue
+    f = _webui_compare_split_csv(l, delim)
+    length(f) == length(cols) || throw(ArgumentError("$(basename(file)): $(length(f)) fields in '$(l)', expected $(length(cols))"))
+    f[ielim] == "true" && push!(out, parse(Int, f[iline]))
+  end
+  return out
 end
 
 """
@@ -2381,22 +3093,55 @@ function handle_se_topology_hypotheses(form::AbstractDict; output_root::Abstract
   outdir = String(get(result, "output_dir", ""))
   mf = joinpath(outdir, "measurements.csv")
   isfile(mf) || return back("measurements.csv of this run is not available any more")
+  vf = joinpath(outdir, "measurements_verdict.csv")
+  # a run written before 0.50.0 kept the artifact in the measurement CSV v1
+  # layout, which is no longer read; the run page stays, the test needs a
+  # new run
+  _is_measurement_csv_v1(mf) && return back("this run was written by a Sparlectra version before 0.50.0: its measurements.csv is a measurement CSV v1, which is no longer read. Repeat the state estimation to test topology hypotheses.")
+  isfile(vf) || return back("measurements_verdict.csv of this run is not available any more; the test needs it to leave out the rows the run eliminated")
+  # the settings of the run under test; the general file alone skipped a
+  # case configuration file and judged with other thresholds than the run.
+  # A configuration that no longer resolves is reported like a failed test.
+  config = try
+    _se_hypothesis_config(result)
+  catch err
+    return back("topology hypothesis test failed: $(sprint(showerror, err))")
+  end
   t0 = time_ns()
   rep = try
-    config = load_sparlectra_config(String(get(result, "config_file", DEFAULT_SPARLECTRA_CONFIG_PATH)); reload = true)
     # same format hint the run form uses: a bare .DAT is ambiguous and the
     # detector refuses to guess, so the DTF network case would fail here
     se_case = String(get(result, "casefile", ""))
-    net = _se_import_case_net(se_case, config; requested_format = _webui_case_format_hint(se_case))
-    readMeasurementsCSV!(net; file = mf, replace = true)
-    with_state_estimation_config(max_iter = 100, tol = 1e-8) do
+    hint = _webui_case_format_hint(se_case)
+    imported = _se_import_case(se_case, config; requested_format = hint)
+    # the run's own artifact, a measurement table keyed like the run read
+    # it (mRIDs for a CGMES case, names otherwise); every row carries its
+    # sigma and the zero-injection rows of the run, so nothing is added
+    index = _se_measurement_index(imported, _se_case_format(se_case; requested = hint))
+    index === nothing && throw(ArgumentError("the CGMES import kept no CGMES model to resolve the mRIDs of measurements.csv"))
+    net = imported.net
+    # the sigma floor of the import is the run's zero-injection sigma, so
+    # ZI rows the run wrote below 1e-3 keep their sigma
+    set = readMeasurementTable!(net; file = mf, index = index, zero_injection = false, zero_injection_sigma = config.state_estimation.zero_injection_sigma_mva)
+    # the test starts from the set the run ended with: the rows the run
+    # eliminated leave here as they left the run (the table keeps them
+    # valid, the verdict file names them); with them back in, the base J
+    # carried the gross errors (J 16870 at dof 83 instead of 78.4 at dof
+    # 82 on sp_case14 with its bad-data set)
+    eliminated = _se_verdict_eliminated_lines(vf)
+    for (k, m) in enumerate(net.measurements)
+      any(in(eliminated), get(set.sources, m.id, Int[])) && (net.measurements[k] = _set_measurement_active(m, false))
+    end
+    with_sparlectra_config(config) do
       test_topology_hypotheses(net; max_candidates = 5)
     end
   catch err
     return back("topology hypothesis test failed: $(sprint(showerror, err))")
   end
+  se_used = config.state_estimation
   open(joinpath(outdir, "topology_hypotheses.md"), "w") do io
     println(io, "# Topology hypothesis test (advisory)\n")
+    println(io, "Settings of the run: k_eliminate ", se_used.k_eliminate, ", k_suppress ", se_used.k_suppress, ", robust_mode ", se_used.robust_mode, ", zero_injection ", se_used.zero_injection, ".\n")
     println(io, "Base run: J = ", round(rep.base_j; sigdigits = 4), " (dof ", rep.base_dof, ", band ", rep.base_verdict, "). ", rep.n_candidates, " candidate(s) tested.")
     rep.ambiguous && println(io, "\nSEVERAL hypotheses land in the band: the case is ambiguous, ranked by J below.")
     println(io, "\n| element | current status | hypothesis | J before | J after | z before | z after | verdict | time s |")
@@ -2467,8 +3212,11 @@ function handle_se_generate_measurements(form::AbstractDict; output_root::Abstra
   casefile = String(_webui_form_value(form, "casefile", ""))
   # sticky inputs: every generator value travels back in the redirect as a
   # g_* query key so the re-rendered form keeps what the user typed
-  gq = join(("&g_$(k)=$(_webui_urlencode(String(_webui_form_value(form, k, ""))))" for k in ("noise", "gross_error_k", "gross_error_count", "tap_error_steps", "tap_error_count", "sigma_u_pct", "include_currents", "sigma_i_pct", "sigma_ia_deg", "sigma_p_pct", "sigma_q_pct", "gen_truth_source", "gen_truth_run_id", "gen_flow_ends", "gen_passive_sigma", "gen_passive_as_zi", "gen_seed")), "")
-  redirectq(msg) = _webui_se_redirect(casefile, msg; extra_query = gq)
+  gq = join(("&g_$(k)=$(_webui_urlencode(String(_webui_form_value(form, k, ""))))" for k in ("noise", "gross_error_k", "gross_error_count", "tap_error_steps", "tap_error_count", "sigma_u_pct", "include_currents", "sigma_i_pct", "sigma_ia_deg", "sigma_p_pct", "sigma_q_pct", "gen_truth_source", "gen_truth_run_id", "gen_flow_ends", "gen_passive_sigma", "gen_passive_as_zi", "gen_seed", "gen_resolution_u_kv", "gen_resolution_p_mw", "gen_resolution_q_mvar", "gen_resolution_i_a", "gen_resolution_angle_deg")), "")
+  # every exit through here is a rejection; it goes into the operation log
+  # with its reason, because the page shows the message once and a click
+  # that wrote no file otherwise left no trace at all
+  redirectq(msg) = (record_webui_operation!(operation_log, "se_measurements_rejected"; route = "/stateestimation/generate-measurements", method = "POST", user_action = true, casefile = casefile, status = "rejected", message = msg); _webui_se_redirect(casefile, msg; extra_query = gq))
   isempty(casefile) && return redirectq("no case selected")
   case_path = joinpath(directory, basename(casefile))
   isfile(case_path) || return redirectq("case not found: $(casefile)")
@@ -2524,9 +3272,11 @@ function handle_se_generate_measurements(form::AbstractDict; output_root::Abstra
   flow_ends = Symbol(flow_ends_raw)
   passive_sigma = something(tryparse(Float64, String(_webui_form_value(form, "gen_passive_sigma", "0.05"))), NaN)
   (isfinite(passive_sigma) && passive_sigma > 0.0) || return redirectq("passive-node balance sigma must be positive (MW/MVar)")
-  # default ON: a passive node is a hard balance, and
-  # the protected constraint is the only constraint the set has
-  passive_as_zi = _webui_parse_bool(String(_webui_form_value(form, "gen_passive_as_zi", "true")))
+  # the zero-injection switch of the case (state_estimation.zero_injection,
+  # default on): the form shows the configured value; a request without
+  # the field leaves the decision to the configuration
+  passive_raw = _webui_form_value(form, "gen_passive_as_zi", nothing)
+  passive_as_zi = passive_raw === nothing ? nothing : _webui_parse_bool(String(passive_raw))
   # reproducibility seed: the same seed regenerates the identical set, a
   # different one draws a fresh noise realization
   gen_seed = something(tryparse(Int, String(_webui_form_value(form, "gen_seed", "42"))), -1)
@@ -2535,6 +3285,15 @@ function handle_se_generate_measurements(form::AbstractDict; output_root::Abstra
   # the set until that many rows are critical, never past observability
   gen_critical = something(tryparse(Int, String(_webui_form_value(form, "gen_critical_count", "0"))), -1)
   gen_critical >= 0 || return redirectq("critical measurements must be zero or a positive integer")
+  # display resolution of an online system per quantity (U kV, P MW,
+  # Q Mvar, I A, angles deg); 0 or an empty field is no rounding
+  resolution = Dict{String,Float64}()
+  for (k, label) in (("gen_resolution_u_kv", "U"), ("gen_resolution_p_mw", "P"), ("gen_resolution_q_mvar", "Q"), ("gen_resolution_i_a", "I"), ("gen_resolution_angle_deg", "angle"))
+    raw = strip(String(_webui_form_value(form, k, "0")))
+    r = isempty(raw) ? 0.0 : something(tryparse(Float64, raw), NaN)
+    (isfinite(r) && r >= 0.0) || return redirectq("resolution $(label) must be zero (no rounding) or positive")
+    resolution[k] = r
+  end
   # every generation writes a NEW file, stamped with the wall-clock time,
   # so a fresh set never overwrites the one a run just used and the noisy
   # copy of a set keeps standing next to it
@@ -2551,7 +3310,7 @@ function handle_se_generate_measurements(form::AbstractDict; output_root::Abstra
   gen = try
     # the options constructor validates the combination (the form checks
     # above cover the single fields); its ArgumentError text is the message
-    opts = MeasurementGeneratorOptions(; noise = noise, gross_k = gross_k, gross_count = gross_count, tap_steps = tap_steps, tap_count = tap_count, include_i = include_i, sigma_u_pct = sigma_u_pct, sigma_i_pct = sigma_i_pct, sigma_p_pct = sigma_p_pct, sigma_q_pct = sigma_q_pct, sigma_ia_deg = sigma_ia_deg, truth_source = truth_source, run_id = truth_run_id, run_root = String(output_root), flow_ends = flow_ends, passive_sigma = passive_sigma, passive_as_zi = passive_as_zi, seed = gen_seed, critical_count = gen_critical)
+    opts = MeasurementGeneratorOptions(; noise = noise, gross_k = gross_k, gross_count = gross_count, tap_steps = tap_steps, tap_count = tap_count, include_i = include_i, sigma_u_pct = sigma_u_pct, sigma_i_pct = sigma_i_pct, sigma_p_pct = sigma_p_pct, sigma_q_pct = sigma_q_pct, sigma_ia_deg = sigma_ia_deg, truth_source = truth_source, run_id = truth_run_id, run_root = String(output_root), flow_ends = flow_ends, passive_sigma = passive_sigma, passive_as_zi = passive_as_zi, seed = gen_seed, critical_count = gen_critical, resolution_u_kv = resolution["gen_resolution_u_kv"], resolution_p_mw = resolution["gen_resolution_p_mw"], resolution_q_mvar = resolution["gen_resolution_q_mvar"], resolution_i_a = resolution["gen_resolution_i_a"], resolution_angle_deg = resolution["gen_resolution_angle_deg"])
     _se_generate_measurement_set(case_path, out_path, opts; config_file = config_file)
   catch err
     _webui_case_release!(casefile)
@@ -2562,13 +3321,25 @@ function handle_se_generate_measurements(form::AbstractDict; output_root::Abstra
   record_webui_operation!(operation_log, "se_measurements_generated"; route = "/stateestimation/generate-measurements", method = "POST", user_action = true, casefile = casefile, measurement_file = out_name)
   # persist the generator options in the case sidecar so a case reload
   # restores them (the run-based save path never sees this form)
+  adopted_note = ""
   try
-    _webui_merge_case_settings!(output_root, case_path, Dict{String,Any}("noise" => noise, "gross_error_k" => gross_k, "gross_error_count" => gross_count, "tap_error_steps" => tap_steps, "tap_error_count" => tap_count, "sigma_u_pct" => sigma_u_pct, "include_currents" => include_i, "sigma_i_pct" => sigma_i_pct, "sigma_ia_deg" => sigma_ia_deg, "sigma_p_pct" => sigma_p_pct, "sigma_q_pct" => sigma_q_pct, "gen_truth_source" => truth_source_raw, "gen_flow_ends" => flow_ends_raw, "gen_passive_sigma" => passive_sigma, "gen_passive_as_zi" => passive_as_zi, "gen_seed" => gen_seed, "gen_critical_count" => gen_critical); case_directory = directory)
+    merged = _webui_merge_case_settings!(output_root, case_path, Dict{String,Any}("noise" => noise, "gross_error_k" => gross_k, "gross_error_count" => gross_count, "tap_error_steps" => tap_steps, "tap_error_count" => tap_count, "sigma_u_pct" => sigma_u_pct, "include_currents" => include_i, "sigma_i_pct" => sigma_i_pct, "sigma_ia_deg" => sigma_ia_deg, "sigma_p_pct" => sigma_p_pct, "sigma_q_pct" => sigma_q_pct, "gen_truth_source" => truth_source_raw, "gen_flow_ends" => flow_ends_raw, "gen_passive_sigma" => passive_sigma, "gen_seed" => gen_seed, "gen_critical_count" => gen_critical, resolution...); config_file, case_directory = directory)
+    # a generation that created the case file names what variant A took over
+    merged !== nothing && !isempty(merged.adopted) && (adopted_note = "; new case file, $(length(merged.adopted)) value(s) taken from $(basename(config_file)), where it differs from the packaged defaults")
+    # the checkbox goes into the case configuration as
+    # state_estimation.zero_injection, read by every SE run of the case
+    # as on or off; a case set to constraint (equality-constrained zero
+    # injection, configured in the file) keeps it while the box is checked,
+    # the box only says whether the rows exist
+    if passive_as_zi !== nothing
+      zi_mode = passive_as_zi ? (resolve_config(config_file, case_path).config.state_estimation.zero_injection === :constraint ? "constraint" : "on") : "off"
+      _webui_merge_case_settings!(output_root, case_path, Dict{String,Any}("gen_passive_as_zi" => zi_mode); config_file, case_directory = directory)
+    end
   catch err
     record_webui_operation!(operation_log, "case_settings_save_failed"; route = "/stateestimation/generate-measurements", method = "POST", user_action = true, message = sprint(showerror, err))
   end
   sigma_note = ", sigma U=$(sigma_u_pct)% P=$(sigma_p_pct)% Q=$(sigma_q_pct)%$(include_i ? " I=$(sigma_i_pct)%" : "") of reading"
-  return _webui_se_redirect(casefile, "generated $(out_name) ($(gen.rows) rows, $(gen.noisy ? "noisy" : "noise-free")$(sigma_note)$(gen.truth_note)$(gen.flow_note)$(gen.passive_note)$(gen.critical_note)$(gen.gross_note)$(gen.tap_note)$(gen.island_note))"; extra_query = gq * "&measurement_file=" * _webui_urlencode(out_name))
+  return _webui_se_redirect(casefile, "generated $(out_name) ($(gen.rows) rows, $(gen.noisy ? "noisy" : "noise-free")$(sigma_note)$(gen.truth_note)$(gen.flow_note)$(gen.passive_note)$(gen.critical_note)$(gen.gross_note)$(gen.tap_note)$(gen.island_note))$(adopted_note)"; extra_query = gq * "&measurement_file=" * _webui_urlencode(out_name))
 end
 
 """
@@ -2598,22 +3369,33 @@ function handle_se_add_noise(form::AbstractDict; output_root::AbstractString = "
   out_name = _webui_stamped_measurement_name(directory, string(first(splitext(basename(casefile))), ".noisy"))
   out_path = joinpath(directory, out_name)
   rows = try
-    # the session's configuration file plus the case's own settings, so the
-    # perturbed set is written in the CSV format the user chose
+    # the session's configuration file plus the case's own settings decide
+    # how the case is imported
     config = resolve_config(config_file, case_path).config
-    net = _se_import_case_net(case_path, config; requested_format = _webui_case_format_hint(case_path))
+    imported = _se_import_case(case_path, config; requested_format = _webui_case_format_hint(case_path))
+    net = imported.net
+    # the key index the SE service reads a table of this case with; the
+    # perturbed set is written with it
+    index = _se_measurement_index(imported, _se_case_format(case_path; requested = _webui_case_format_hint(case_path)))
+    index === nothing && return back("$(casefile): the CGMES import kept no CGMES model to key the measurement table by mRID.")
     if !isempty(source)
+      src = joinpath(directory, source)
       empty!(net.measurements)
-      readMeasurementsCSV!(net; file = joinpath(directory, source), replace = true)
+      _read_measurement_file!(net, src; index = isMeasurementTable(src) ? index : nothing)
     end
     isempty(net.measurements) && return back("Neither the case file nor a selected set carries measurements to perturb.")
     addMeasurementNoise!(net; rng = Random.MersenneTwister(seed))
-    writeMeasurementsCSV(net; file = out_path,
-      headerComments = String["case: $(casefile)", "generator: noise-only (existing values perturbed, no power flow)",
-                              "seed: $(seed)", "noise: gaussian (each row's own sigma)",
-                              "source: $(isempty(source) ? "measurements carried by the case file" : source)"],
-      busReference = _detect_case_format(case_path) === :cgmes ? :mrid : :name, format = String(config.output.csv_format))
-    length(net.measurements)
+    # written as a measurement table like every set Sparlectra writes; a
+    # row the table cannot carry is named in the file
+    conv = _measurement_table_from_measurements(net, net.measurements, index)
+    comments = String["case: $(casefile)", "generator: noise-only (existing values perturbed, no power flow)",
+                      "seed: $(seed)", "noise: gaussian (each row's own sigma)",
+                      "source: $(isempty(source) ? "measurements carried by the case file" : source)"]
+    for p in conv.problems
+      push!(comments, string("not written: ", p.id, ": ", p.problem, ": ", p.detail))
+    end
+    writeMeasurementTable(out_path, conv.rows; comments = comments)
+    length(conv.rows)
   catch err
     record_webui_operation!(operation_log, "se_measurements_noised_failed"; route = "/stateestimation/add-noise", method = "POST", user_action = true, casefile = casefile, message = sprint(showerror, err))
     return back("Could not add noise: $(first(split(sprint(showerror, err), '\n')))")
@@ -2642,7 +3424,7 @@ function handle_se_measurement_delete(form::AbstractDict; output_root::AbstractS
   path = normpath(joinpath(directory, name))
   dirname(path) == normpath(directory) || return back("Invalid measurement file name.")
   isfile(path) || return back("Measurement file not found: $(name)")
-  _webui_is_measurement_csv(path) || return back("$(name) is not a measurement set; only measurement sets can be deleted here.")
+  _webui_is_measurement_file(path) || return back("$(name) is not a measurement set; only measurement sets can be deleted here.")
   try
     rm(path)
   catch err

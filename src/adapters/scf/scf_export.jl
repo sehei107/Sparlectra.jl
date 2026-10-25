@@ -20,12 +20,24 @@
 #          Ids are assigned deterministically (component type, then name),
 #          so rebuilding the same net produces byte-identical output.
 
-# Format revision. Bumped whenever the written file changes shape, so a reader
-# can refuse a file it does not understand instead of misreading it. 1.1: an
-# ineffective voltage setpoint is no longer written, an unlimited reactive
-# limit is expressed by omission, and fields equal to their documented default
-# are left out (see the default catalog in docs/src/scf.md).
-const SCF_FORMAT_VERSION = "1.0"
+# Format revision. Bumped whenever the written file changes shape or meaning,
+# so a reader can refuse a file it does not understand instead of misreading
+# it. "1.1" was the pre-release name of 1.0 and is read as 1.0, so the next
+# revision is 1.2: the current sensors carry ampere (PGM's unit), and
+# measurements.rows follows the measurement table (one row per value, table
+# types and keys, kV/MW/MVAr/A/degrees; shunt-bay rows are rows of their
+# own). Revisions 1.0 and 1.1 wrote the current 1000 times too large and the
+# rows per sensor; the reader still accepts them (see _scf_current_divisor
+# and _scf_read_measurements_v10!). 1.3 adds the optional block
+# extra.<machine>.dynamics (DynamicData, #506); a 1.2 reader ignores unknown
+# extra keys without a word and would drop it, so the revision moves. A 1.2
+# file has no such block and reads unchanged. 1.3 also brings the unit
+# declaration meta.units ("si", the default, or "pu") with the pu block
+# extra.<branch or shunt>.pu; a 1.2 reader refuses a 1.3 file by its
+# revision, so it never reads pu values as SI. 1.3 also carries the optional
+# key `estimation` in sparlectra.tap_changer_models entries (the tap changer
+# sets of the state estimation, 0.60.0).
+const SCF_FORMAT_VERSION = "1.3"
 
 # Configuration groups a case file may NOT carry: they describe the machine
 # and the session, not the network. Logging and result-table shape, benchmark
@@ -109,9 +121,11 @@ _scf_is_transformer(br::Branch)::Bool = br.ratio != 0.0
     _scf_bus_name(net, i) -> String
 
 The REFERENCE name of a bus: the `busDict` key. That is the name
-measurements, controllers, contingencies, and reports resolve against, and
-the name the reader has to restore; the internal component name ("Bus_1_110",
-"Aux_12_380") is kept separately in `extra.component_name` when it differs.
+measurements, controllers, scenarios, and reports resolve against, and
+the name the reader has to restore. Since 0.50.0 `addBus!` gives the node
+that name as its component name; a component name that differs (the
+schematic "Bus_1_110" read from an older file) is kept separately in
+`extra.component_name`.
 """
 function _scf_bus_name(net::Net, i::Int)::String
   for (name, idx) in net.busDict
@@ -120,15 +134,27 @@ function _scf_bus_name(net::Net, i::Int)::String
   return getCompName(net.nodeVec[i].comp)
 end
 
+# The shunts that addShuntVoltageControl! created. Each belongs to its
+# controller (shunt_idx): the controller entry rebuilds it on import, so
+# writing it as a plain shunt as well put a second, fixed shunt on the bus
+# with every round trip, and after a control run that row held the solved
+# susceptance, which doubled the compensation.
+_scf_controller_shunts(net::Net)::Set{Int} = Set{Int}(c.shunt_idx for c in _shunt_controllers(net))
+
 """
-    scf_id_map(net) -> ScfIdMap
+    scf_id_map(net; controller_shunts = false) -> ScfIdMap
 
 Assign SCF ids deterministically: components are walked in a fixed type
 order and, inside a type, in lexicographic name order (ties broken by the
 internal index). Rebuilding the same net therefore produces the same ids and
 the same file bytes.
+
+A shunt owned by a shunt voltage controller gets no id and is not written:
+the controller entry recreates it. `controller_shunts = true` (the strict
+PGM writer, which drops the controllers) writes it as a plain shunt with its
+present susceptance.
 """
-function scf_id_map(net::Net)::ScfIdMap
+function scf_id_map(net::Net; controller_shunts::Bool = false)::ScfIdMap
   next = 0
   nid = () -> (next += 1)
   names = Dict{Int,String}()
@@ -173,7 +199,8 @@ function scf_id_map(net::Net)::ScfIdMap
     end
   end
   shunts = Dict{Int,Int}()
-  for i in sort(collect(eachindex(net.shuntVec)); by = i -> (getCompName(net.shuntVec[i].comp), i))
+  owned = controller_shunts ? Set{Int}() : _scf_controller_shunts(net)
+  for i in sort([i for i in eachindex(net.shuntVec) if !(i in owned)]; by = i -> (getCompName(net.shuntVec[i].comp), i))
     id = nid()
     shunts[i] = id
     names[id] = getCompName(net.shuntVec[i].comp)
@@ -372,7 +399,7 @@ end
     _scf_cgmes_mrids(net) -> (buses, branches, links)
 
 Resolve the CGMES mRIDs of a delivery-sourced net by their structural keys
-(`TN|<bus>`, `ACL|<a>|<b>|<k>`, `PT|<a>|<b>|<k>`, `SW|...`), so `external_id`
+(`TN|<bus>`, `ACL|<a>|<b>|<k>`, `PT|<a>|<b>|<k>`, `EQB|<a>|<b>|<k>`, `EQBT|<a>|<b>|<k>`, `SW|...`), so `external_id`
 carries the source-system identity instead of the internal component id.
 Empty dictionaries on nets from other formats.
 """
@@ -395,12 +422,15 @@ function _scf_cgmes_mrids(net::Net)
     a = get(nby, Int(br.fromBus), "")
     b = get(nby, Int(br.toBus), "")
     (isempty(a) || isempty(b)) && continue
+    # an EquivalentBranch shares the counter of its branch kind
     if _scf_is_transformer(br)
       kk = CGMESImporter.cgmesNextParallelIndex!(ctrafo, a, b)
       m = get(net.cgmes_ids, CGMESImporter.cgmesKeyPowerTransformer(a, b, kk), "")
+      isempty(m) && (m = get(net.cgmes_ids, CGMESImporter.cgmesKeyEquivalentBranchTransformer(a, b, kk), ""))
     else
       kk = CGMESImporter.cgmesNextParallelIndex!(cline, a, b)
       m = get(net.cgmes_ids, CGMESImporter.cgmesKeyACLineSegment(a, b, kk), "")
+      isempty(m) && (m = get(net.cgmes_ids, CGMESImporter.cgmesKeyEquivalentBranch(a, b, kk), ""))
     end
     isempty(m) || (branches[k] = m)
   end
@@ -450,7 +480,12 @@ end
 
 # The feeder record of a bus, as the (sk in VA, R/X) pair a PGM `source`
 # states. Sparlectra keeps this in the short-circuit source data, which both
-# the CGMES import and addExternalGrid! fill.
+# the CGMES import and addExternalGrid! fill. A network injection record
+# states the initial short-circuit current; an EquivalentInjection record
+# (a CGMES EquivalentInjection imported as source, or the slack on an
+# X-node) states its internal impedance r + jx in ohm, and then
+# sk = Un^2 / |r + jx| and R/X = r / x. The short circuit stamps that record
+# itself; the file only states it on the source as well.
 function _scf_feeder_for_bus(net::Net, busIdx::Int)
   sc = net.sc_sources
   sc === nothing && return nothing
@@ -465,6 +500,12 @@ function _scf_feeder_for_bus(net::Net, busIdx::Int)
     rx = f.maxR1ToX1Ratio
     z01 = f.maxZ0ToZ1Ratio
     return (sk_va = sqrt(3.0) * vn * 1.0e3 * Float64(ik), rx = (rx === nothing || !isfinite(Float64(rx))) ? 0.1 : Float64(rx), z01 = z01 === nothing ? nothing : Float64(z01))
+  end
+  for e in sc.equivalent_injections
+    (e.bus !== nothing && String(e.bus) == bus) || continue
+    f = _ei_record_sk_rx(e, vn)
+    f === nothing && continue
+    return (sk_va = f.sk_MVA * 1.0e6, rx = f.rx, z01 = nothing)
   end
   return nothing
 end
@@ -487,7 +528,10 @@ function _scf_appliances(net::Net, ids::ScfIdMap)
     # says Injection or Consumption; see _scf_is_pgm_source)
     if _scf_is_pgm_source(ps)
       row = Dict{String,Any}("id" => id, "node" => node, "status" => 1, "u_ref" => ps.vm_pu === nothing ? 1.0 : ps.vm_pu)
-      ps.va_deg === nothing || (row["u_ref_angle"] = deg2rad(ps.va_deg))
+      # the radian value that reads back to the same degrees: a source at a
+      # nonzero angle (a CGMES slack at its SV angle) would otherwise move by
+      # one ulp per write-read cycle and the file would not be a fixed point
+      ps.va_deg === nothing || (row["u_ref_angle"] = _scf_stable(ps.va_deg, deg2rad, rad2deg))
       # PGM's source is a voltage source BEHIND its impedance, so a complete
       # source states sk and rx_ratio. The values are the feeder's own
       # short-circuit data, which is where Sparlectra keeps them.
@@ -521,6 +565,17 @@ function _scf_appliances(net::Net, ids::ScfIdMap)
   return sources, loads, gens, regs
 end
 
+# the state fields of one shunt that deviate from the defaults (status 1,
+# model Y, not estimated); shared by the shunt_state rows and the shunt of a
+# shunt voltage controller, which travels in its controller entry
+function _scf_shunt_state_fields(sh::Shunt)::Dict{String,Any}
+  d = Dict{String,Any}()
+  sh.status == 1 || (d["status"] = sh.status)
+  sh.model === :Y || (d["model"] = String(Symbol(sh.model)))
+  sh.estimate && (d["estimate"] = true)
+  return d
+end
+
 """
     _scf_shunt_state(net, ids) -> Vector
 
@@ -532,14 +587,11 @@ row, so an ordinary case file stays free of noise.
 """
 function _scf_shunt_state(net::Net, ids::ScfIdMap)
   rows = Vector{Any}()
-  for i in eachindex(net.shuntVec)
-    sh = net.shuntVec[i]
-    row = Dict{String,Any}("shunt" => ids.shunt[i])
-    sh.status == 1 || (row["status"] = sh.status)
-    sh.model === :Y || (row["model"] = String(Symbol(sh.model)))
-    sh.estimate && (row["estimate"] = true)
-    length(row) == 1 && continue
-    push!(rows, row)
+  for i in sort!(collect(keys(ids.shunt)))
+    fields = _scf_shunt_state_fields(net.shuntVec[i])
+    isempty(fields) && continue
+    fields["shunt"] = ids.shunt[i]
+    push!(rows, fields)
   end
   sort!(rows; by = r -> r["shunt"])
   return rows
@@ -575,7 +627,8 @@ end
 
 function _scf_shunts(net::Net, ids::ScfIdMap)
   rows = Vector{Any}()
-  for i in eachindex(net.shuntVec)
+  # only the shunts the id map names (controller-owned ones are left out)
+  for i in sort!(collect(keys(ids.shunt)))
     sh = net.shuntVec[i]
     zb_sh = _scf_zbase(sh.vn_kV, net.baseMVA)
     # The reader's arithmetic is not `si * zb`: it forms the shunt draw in
@@ -591,9 +644,36 @@ function _scf_shunts(net::Net, ids::ScfIdMap)
 end
 
 ## --- measurements ----------------------------------------------------------
-## PGM sensors carry value and sigma; the Sparlectra row detail that PGM has
-## no slot for (id string, weight, active flag, unpaired P/Q rows) is listed
-## under sparlectra.measurements so the round trip stays lossless.
+## PGM sensors carry value and sigma in SI for a PGM reader. The Sparlectra
+## rows behind them are listed under sparlectra.measurements.rows with the
+## semantics of the measurement table (src/stateestimation/measurement_table.jl):
+## one entry per measured value in the order of the measurement vector,
+## table types (U, P, Q, I, Ia, Va), a node or terminal key, and value and
+## sigma in the units of the table (kV, MW, MVAr, A, degrees), no per-unit
+## base. The round trip stays lossless.
+
+# U (value or sigma, pu of the bus) as the kV number of the table: a Float64
+# where that divides back to `pu`, else the longer decimal of
+# _measurement_table_kv_text as ScfDecimalText, which the JSON writer
+# prints as it is and the reader divides from its text at 256 bits, as the
+# measurement table does. `vn` is the kV value the reader divides by,
+# u_rated / 1e3 of the file.
+function _scf_kv_number(pu::Float64, vn::Float64)
+  t = _measurement_table_kv_text(pu, vn)
+  _measurement_table_digits(t) <= 17 && return parse(Float64, t)
+  return ScfDecimalText(t, parse(Float64, t))
+end
+
+# The table type of a measurement row in the SCF block
+function _scf_table_type(m)::String
+  m.typ == VmMeas && return "U"
+  m.typ == VaMeas && return "Va"
+  (m.typ == PinjMeas || m.typ == PflowMeas) && return "P"
+  (m.typ == QinjMeas || m.typ == QflowMeas || m.typ == ShuntQMeas) && return "Q"
+  m.typ == ImagMeas && return "I"
+  m.typ == IaMeas && return "Ia"
+  throw(ArgumentError("SCF export: measurement type $(m.typ) has no table type"))
+end
 
 # what the reader reconstructs from the SI value of a sensor; used to decide
 # whether the exact internal value has to be recorded alongside it
@@ -608,7 +688,8 @@ function _scf_roundtrip_value(m, net::Net)::Float64
   elseif m.typ == VaMeas || m.typ == IaMeas
     return rad2deg(deg2rad(m.value))
   elseif m.typ == ImagMeas
-    return (m.value * 1.0e3) / 1.0e3
+    # ampere in the file and inside, written unchanged
+    return m.value
   else
     return (m.value * 1.0e6) / 1.0e6
   end
@@ -621,9 +702,11 @@ function _scf_sensors(net::Net, ids::ScfIdMap, next_id::Ref{Int})
   rows = Vector{Any}()
   meas = net.measurements
   isempty(meas) && return volt, power, current, rows
-  # position of each row in the measurement vector: the WLS objective sums in
-  # that order, so restoring it is what makes an SE round trip bit-identical
-  pos_by_id = Dict{String,Int}(m.id => i for (i, m) in enumerate(meas))
+  # The groups below hold POSITIONS in the measurement vector, not the rows:
+  # the WLS objective sums in that order, so restoring it is what makes an SE
+  # round trip bit-identical. A lookup by id gave two rows with the same
+  # default id (two readings at one bus) the same position, and the reader
+  # reordered them.
   newid = () -> (next_id[] += 1)
   # Group by measured location so P/Q and Vm/Va become one PGM sensor. A
   # location can carry the quantity MORE than once (redundant transducers are
@@ -631,58 +714,59 @@ function _scf_sensors(net::Net, ids::ScfIdMap, next_id::Ref{Int})
   # a location becomes its own PGM sensor - PGM allows several sensors on one
   # measured object. Keying by location alone silently dropped every reading
   # but the last.
-  vm = Dict{Int,Vector{Measurement}}()
-  va = Dict{Int,Vector{Measurement}}()
-  pinj = Dict{Int,Vector{Measurement}}()
-  qinj = Dict{Int,Vector{Measurement}}()
-  pflow = Dict{Tuple{Int,Symbol},Vector{Measurement}}()
-  qflow = Dict{Tuple{Int,Symbol},Vector{Measurement}}()
-  imag_ = Dict{Tuple{Int,Symbol},Vector{Measurement}}()
-  iang = Dict{Tuple{Int,Symbol},Vector{Measurement}}()
-  other = Measurement[]
-  add!(d, key, m) = push!(get!(() -> Measurement[], d, key), m)
+  vm = Dict{Int,Vector{Int}}()
+  va = Dict{Int,Vector{Int}}()
+  pinj = Dict{Int,Vector{Int}}()
+  qinj = Dict{Int,Vector{Int}}()
+  pflow = Dict{Tuple{Int,Symbol},Vector{Int}}()
+  qflow = Dict{Tuple{Int,Symbol},Vector{Int}}()
+  imag_ = Dict{Tuple{Int,Symbol},Vector{Int}}()
+  iang = Dict{Tuple{Int,Symbol},Vector{Int}}()
+  add!(d, key, pos) = push!(get!(() -> Int[], d, key), pos)
   # readings at one location, in the order the measurement vector holds them
   nocc(d, key) = length(get(d, key, ()))
   at(d, key, i) = (v = get(d, key, nothing); v === nothing || i > length(v) ? nothing : v[i])
-  for m in meas
+  row_at(pos) = pos === nothing ? nothing : meas[pos]
+  # position -> PGM sensor id, and position -> node of a shunt-bay row
+  sensor_of = Dict{Int,Int}()
+  bay_node = Dict{Int,Int}()
+  for (pos, m) in enumerate(meas)
     if m.typ == VmMeas && m.busIdx !== nothing
-      add!(vm, m.busIdx, m)
+      add!(vm, m.busIdx, pos)
     elseif m.typ == VaMeas && m.busIdx !== nothing
-      add!(va, m.busIdx, m)
+      add!(va, m.busIdx, pos)
     elseif m.typ == PinjMeas && m.busIdx !== nothing
-      add!(pinj, m.busIdx, m)
+      add!(pinj, m.busIdx, pos)
     elseif m.typ == QinjMeas && m.busIdx !== nothing
-      add!(qinj, m.busIdx, m)
+      add!(qinj, m.busIdx, pos)
     elseif m.typ == PflowMeas && m.branchIdx !== nothing
-      add!(pflow, (m.branchIdx, m.direction), m)
+      add!(pflow, (m.branchIdx, m.direction), pos)
     elseif m.typ == QflowMeas && m.branchIdx !== nothing
-      add!(qflow, (m.branchIdx, m.direction), m)
+      add!(qflow, (m.branchIdx, m.direction), pos)
     elseif m.typ == ImagMeas && m.branchIdx !== nothing
-      add!(imag_, (m.branchIdx, m.direction), m)
+      add!(imag_, (m.branchIdx, m.direction), pos)
     elseif m.typ == IaMeas && m.branchIdx !== nothing
-      add!(iang, (m.branchIdx, m.direction), m)
-    else
-      push!(other, m)
+      add!(iang, (m.branchIdx, m.direction), pos)
+    elseif m.branchIdx === nothing && m.busIdx !== nothing && (m.typ == ShuntQMeas || m.typ == ImagMeas || m.typ == IaMeas)
+      # Shunt-bay rows (bus referenced: the shunt Q is the sum over the
+      # shunts of the bus). PGM has no current sensor on a shunt, and its
+      # shunt power sensor would need the bus mapped to one shunt object and
+      # a sign convention, so these rows have no PGM sensor; their row in
+      # the namespaced block carries the value.
+      node = get(ids.node, m.busIdx, nothing)
+      node === nothing || (bay_node[pos] = node)
     end
+    # anything else (a link flow, a row without a location) gets no row and
+    # is named after the rows are built
   end
-  # One PGM sensor can stand for two Sparlectra rows (P and Q, Vm and Va),
-  # and PGM carries ONE sigma per sensor in SI. The authoritative internal
-  # sigmas (per-unit for Vm, degrees for Va, MW/MVar for powers, kA for
-  # currents) therefore travel here, so a round trip is exact; the weight is
-  # derived from sigma and is never written.
-  rowrec(sensor_id, ms...) = begin
-    entry = Dict{String,Any}("sensor" => sensor_id, "sparlectra_ids" => String[m.id for m in ms], "sigmas" => Float64[m.sigma for m in ms])
-    all(m -> m.active, ms) || (entry["active"] = Bool[m.active for m in ms])
-    # The PGM sensor stays the authority for the measured value. The SI
-    # conversion (MW to W, per-unit to V, degrees to radians) is not always
-    # bit-reversible, so a value is recorded here ONLY when reading it back
-    # would not reproduce the exact internal number; that keeps the round
-    # trip exact without duplicating values that convert cleanly.
-    vals = Float64[m.value for m in ms]
-    rts = Float64[_scf_roundtrip_value(m, net) for m in ms]
-    vals == rts || (entry["values"] = vals)
-    entry["positions"] = Int[get(pos_by_id, m.id, 0) for m in ms]
-    push!(rows, entry)
+  # PGM carries ONE sigma per sensor in SI, which cannot hold two different
+  # row sigmas (P and Q) exactly; the row of each measurement carries its own
+  # sigma, so a round trip is exact. The weight is derived from sigma and is
+  # never written.
+  rowrec(sensor_id, positions::Int...) = begin
+    for p in positions
+      sensor_of[p] = sensor_id
+    end
     return nothing
   end
   # voltage sensors (Vm always, Va when the bus carries a PMU angle)
@@ -691,15 +775,16 @@ function _scf_sensors(net::Net, ids::ScfIdMap, next_id::Ref{Int})
     node === nothing && continue
     u_base = _scf_u_rated(getNodeVn(net.nodeVec[bus]))
     for k = 1:nocc(vm, bus)
-      m = vm[bus][k]
+      mpos = vm[bus][k]
+      m = meas[mpos]
       sid = newid()
       row = Dict{String,Any}("id" => sid, "measured_object" => node, "u_measured" => m.value * u_base, "u_sigma" => m.sigma * u_base)
-      a = at(va, bus, k)
-      if a === nothing
-        rowrec(sid, m)
+      apos = at(va, bus, k)
+      if apos === nothing
+        rowrec(sid, mpos)
       else
-        row["u_angle_measured"] = deg2rad(a.value)
-        rowrec(sid, m, a)
+        row["u_angle_measured"] = deg2rad(meas[apos].value)
+        rowrec(sid, mpos, apos)
       end
       push!(volt, row)
     end
@@ -709,10 +794,10 @@ function _scf_sensors(net::Net, ids::ScfIdMap, next_id::Ref{Int})
     node === nothing && continue
     # angle readings that no magnitude sensor at this bus took along
     for k = (nocc(vm, bus) + 1):nocc(va, bus)
-      m = va[bus][k]
+      apos = va[bus][k]
       sid = newid()
-      push!(volt, Dict{String,Any}("id" => sid, "measured_object" => node, "u_measured" => nothing, "u_angle_measured" => deg2rad(m.value), "u_sigma" => nothing))
-      rowrec(sid, m)
+      push!(volt, Dict{String,Any}("id" => sid, "measured_object" => node, "u_measured" => nothing, "u_angle_measured" => deg2rad(meas[apos].value), "u_sigma" => nothing))
+      rowrec(sid, apos)
     end
   end
   # injection power sensors
@@ -720,8 +805,10 @@ function _scf_sensors(net::Net, ids::ScfIdMap, next_id::Ref{Int})
     node = get(ids.node, bus, nothing)
     node === nothing && continue
     for k = 1:max(nocc(pinj, bus), nocc(qinj, bus))
-      p = at(pinj, bus, k)
-      q = at(qinj, bus, k)
+      ppos = at(pinj, bus, k)
+      qpos = at(qinj, bus, k)
+      p = row_at(ppos)
+      q = row_at(qpos)
       sid = newid()
       row = Dict{String,Any}(
         "id" => sid,
@@ -738,7 +825,7 @@ function _scf_sensors(net::Net, ids::ScfIdMap, next_id::Ref{Int})
         row["q_sigma"] = q.sigma * 1.0e6
       end
       push!(power, row)
-      rowrec(sid, filter(!isnothing, [p, q])...)
+      rowrec(sid, Int[x for x in (ppos, qpos) if x !== nothing]...)
     end
   end
   # branch flow power sensors
@@ -747,8 +834,10 @@ function _scf_sensors(net::Net, ids::ScfIdMap, next_id::Ref{Int})
     bid = get(ids.branch, bidx, nothing)
     bid === nothing && continue
     for k = 1:max(nocc(pflow, key), nocc(qflow, key))
-      p = at(pflow, key, k)
-      q = at(qflow, key, k)
+      ppos = at(pflow, key, k)
+      qpos = at(qflow, key, k)
+      p = row_at(ppos)
+      q = row_at(qpos)
       sid = newid()
       frow = Dict{String,Any}(
         "id" => sid,
@@ -763,38 +852,89 @@ function _scf_sensors(net::Net, ids::ScfIdMap, next_id::Ref{Int})
         frow["q_sigma"] = q.sigma * 1.0e6
       end
       push!(power, frow)
-      rowrec(sid, filter(!isnothing, [p, q])...)
+      rowrec(sid, Int[x for x in (ppos, qpos) if x !== nothing]...)
     end
   end
-  # current sensors (magnitude in kA internally, angle in degrees)
+  # current sensors (magnitude in A, as PGM expects and as the estimator
+  # holds it; angle in degrees internally, radians in the file)
   for key in sort!(unique(vcat(collect(keys(imag_)), collect(keys(iang)))); by = k -> (k[1], String(k[2])))
     bidx, dir = key
     bid = get(ids.branch, bidx, nothing)
     bid === nothing && continue
     for k = 1:max(nocc(imag_, key), nocc(iang, key))
-      im_ = at(imag_, key, k)
-      ia = at(iang, key, k)
+      ipos = at(imag_, key, k)
+      apos = at(iang, key, k)
+      im_ = row_at(ipos)
+      ia = row_at(apos)
       sid = newid()
       row = Dict{String,Any}(
         "id" => sid,
         "measured_object" => bid,
         "measured_terminal_type" => dir == :to ? "branch_to" : "branch_from",
         "angle_measurement_type" => "global_angle",
-        "i_measured" => im_ === nothing ? nothing : im_.value * 1.0e3,
-        "i_sigma" => im_ === nothing ? nothing : im_.sigma * 1.0e3,
+        "i_measured" => im_ === nothing ? nothing : im_.value,
+        "i_sigma" => im_ === nothing ? nothing : im_.sigma,
       )
       if ia !== nothing
         row["i_angle_measured"] = deg2rad(ia.value)
         row["i_angle_sigma"] = deg2rad(ia.sigma)
       end
       push!(current, row)
-      rowrec(sid, filter(!isnothing, [im_, ia])...)
+      rowrec(sid, Int[x for x in (ipos, apos) if x !== nothing]...)
     end
   end
   for v in (volt, power, current)
     sort!(v; by = r -> r["id"])
   end
-  sort!(rows; by = r -> r["sensor"])
+  # One row per measurement, in the order of the measurement vector: the
+  # WLS objective sums in that order, so the file order is part of the
+  # numerical identity of an SE run (the table keeps file order the same way).
+  for (pos, m) in enumerate(meas)
+    sensor = get(sensor_of, pos, nothing)
+    node = get(bay_node, pos, nothing)
+    sensor === nothing && node === nothing && continue
+    row = Dict{String,Any}("type" => _scf_table_type(m))
+    # the id only where it is not the default id of its location, which the
+    # reader restores (SCF writes no field equal to its documented default)
+    rdir = m.branchIdx === nothing ? :none : (m.direction == :to ? :to : :from)
+    m.id == _default_measurement_id(m.typ; busIdx = m.busIdx, branchIdx = m.branchIdx, direction = rdir) || (row["id"] = m.id)
+    if node !== nothing
+      row["terminal"] = Dict{String,Any}("shunt_bay" => node)
+    elseif m.branchIdx !== nothing
+      row["terminal"] = Dict{String,Any}("branch" => ids.branch[m.branchIdx], "side" => m.direction == :to ? "to" : "from")
+    else
+      row["node"] = ids.node[m.busIdx]
+    end
+    sensor === nothing || (row["sensor"] = sensor)
+    # U in kV on the u_rated of the file (the reader divides by the same
+    # number), everything else in the unit the estimator holds: MW, MVAr,
+    # A, degrees
+    vn = m.typ == VmMeas ? _scf_u_rated(getNodeVn(net.nodeVec[m.busIdx])) / 1.0e3 : 1.0
+    unit(x) = m.typ == VmMeas ? _scf_kv_number(x, vn) : x
+    row["sigma"] = unit(m.sigma)
+    # The PGM sensor is the authority for the measured value. The SI
+    # conversion (MW to W, per-unit to V, degrees to radians) is not always
+    # bit-reversible, so the row carries a value ONLY when reading the sensor
+    # back would not reproduce the exact internal number, and always for a
+    # shunt-bay row, which has no sensor.
+    (sensor === nothing || _scf_roundtrip_value(m, net) != m.value) && (row["value"] = unit(m.value))
+    m.active || (row["valid"] = false)
+    # a zero-injection row says so itself (the table has its source token;
+    # the id decides nothing), written only when true
+    m.zero_injection && (row["zero_injection"] = true)
+    push!(rows, row)
+  end
+  # Whatever is left has no slot in the file. A link flow is a WLS row of the
+  # estimate (0.60.0) and the measurement table carries it on the link
+  # terminals, but the case file has no sensor for a bus link; a row on a
+  # bus or branch the file does not write has no key. Name them instead of
+  # dropping them.
+  written = Set{Int}(union(keys(sensor_of), keys(bay_node)))
+  left = [m for (pos, m) in enumerate(meas) if !(pos in written)]
+  links = [m for m in left if m.linkIdx !== nothing]
+  isempty(links) || @warn "SCF export: $(length(links)) link flow row(s) are not written: the case file has no sensor for a bus link; write the set as a measurement table, which carries link rows" ids = first(String[m.id for m in links], 5)
+  nokey = [m for m in left if m.linkIdx === nothing]
+  isempty(nokey) || @warn "SCF export: $(length(nokey)) measurement row(s) have no key in the case file and are not written" types = sort!(unique(string.(getfield.(nokey, :typ)))) ids = first(String[m.id for m in nokey], 5)
   return volt, power, current, rows
 end
 
@@ -824,9 +964,8 @@ function _scf_roles(net::Net, ids::ScfIdMap)
     # listed explicitly so the reader restores every one of them
     roles["slack"] = Dict{String,Any}("mode" => "single", "nodes" => slack_nodes)
   end
-  # auxiliary nodes: the explicit AuxBus type plus the star points the
-  # three-winding equivalent creates (the CGMES importer names them
-  # AUX3WT_<transformer> and leaves their component type at busbar)
+  # auxiliary nodes: the AuxBus type every isAux build carries, plus a node
+  # named AUX3WT_<transformer> (the CGMES importer's star point name)
   aux = Int[ids.node[i] for i in eachindex(net.nodeVec) if _scf_is_aux_node(net, i)]
   isempty(aux) || (roles["aux_nodes"] = sort!(aux))
   iso = Int[ids.node[b] for b in net.isoNodes if haskey(ids.node, b)]
@@ -841,11 +980,10 @@ const _SCF_STAR_NODE_PREFIX = "AUX3WT_"
 const _SCF_DEFAULT_BRANCH_KIND = "BranchC"
 const _SCF_DEFAULT_TAP_EST_MODE = "none"
 
-# a node is auxiliary when it carries the AuxBus type or is a three-winding
-# star point (the importer's naming convention)
+# a node is auxiliary when it carries the AuxBus type (every isAux build,
+# _is_aux_node) or is named as a three-winding star point of the CGMES
+# importer, AUX3WT_<trafo>
 function _scf_is_aux_node(net::Net, i::Int)::Bool
-  # the AuxBus type or an isAux build ("Aux_" component name), then the
-  # importer's bus name of a three-winding star point, AUX3WT_<trafo>
   _is_aux_node(net.nodeVec[i]) && return true
   return startswith(_scf_bus_name(net, i), _SCF_STAR_NODE_PREFIX)
 end
@@ -859,9 +997,10 @@ one auxiliary star node. The electrical parameters therefore live exactly
 once, in `data.generic_branch`; this block only says which three branches
 belong together, which node is their star point, and which end is which.
 
-Leg direction is Sparlectra's own: `from_node` is the star node, `to_node`
-the terminal, and each end names both explicitly, so no reader has to guess
-an orientation.
+Leg direction is Sparlectra's own: `from_node` is usually the star node and
+`to_node` the terminal, a leg with its tap at the terminal runs the other
+way (`leg_direction` says which), and each end names both explicitly, so no
+reader has to guess an orientation.
 """
 function _scf_transformer3w(net::Net, ids::ScfIdMap)
   rows = Vector{Any}()
@@ -882,7 +1021,11 @@ function _scf_transformer3w(net::Net, ids::ScfIdMap)
     for (j, role) in enumerate(("hv", "mv", "lv"))
       ends[j]["role"] = role
     end
-    row = Dict{String,Any}("id" => ids.transformer3w[i], "star_node" => ids.node[i], "ends" => ends, "leg_direction" => "star_to_terminal")
+    # a CGMES leg with a tap changer and every PowSyBl leg run terminal →
+    # star, so the direction is read from the legs
+    from_star = [Int(net.branchVec[k].fromBus) == i for k in legs]
+    direction = all(from_star) ? "star_to_terminal" : (any(from_star) ? "mixed" : "terminal_to_star")
+    row = Dict{String,Any}("id" => ids.transformer3w[i], "star_node" => ids.node[i], "ends" => ends, "leg_direction" => direction)
     tc = [get(ids.tap_changer, k, nothing) for k in legs]
     filter!(!isnothing, tc)
     isempty(tc) || (row["tap_changer"] = first(tc))
@@ -910,12 +1053,15 @@ end
 # The typed tap-changer models of a winding as plain JSON objects: `ratio`
 # with the PowerTransformerTaps constructor inputs, `phase` with the
 # PhaseTapChangerModel fields (kind as a string, the table for :tabular),
-# and the impedance-correction option the resolver applied.
+# the impedance-correction option the resolver applied, and `step_assumed`
+# on a model whose step was not transferred.
 function _scf_tap_model_dict(br::Branch, w::PowerTransformerWinding)
   d = Dict{String,Any}()
   if w.taps !== nothing
     t = w.taps
     d["ratio"] = Dict{String,Any}("vn_kv" => w.Vn, "step" => t.step, "low_step" => t.lowStep, "high_step" => t.highStep, "neutral_step" => t.neutralStep, "voltage_increment_kv" => t.voltageIncrement_kV, "neutral_u_kv" => t.neutralU, "convention" => String(t.convention))
+    # the step was not transferred: the written step is the middle position
+    br.ratio_step_assumed && (d["ratio"]["step_assumed"] = true)
   end
   if w.phase_taps !== nothing
     m = w.phase_taps
@@ -926,9 +1072,14 @@ function _scf_tap_model_dict(br::Branch, w::PowerTransformerWinding)
     m.x_min === nothing || (p["x_min"] = m.x_min)
     m.x_max === nothing || (p["x_max"] = m.x_max)
     m.table === nothing || (p["table"] = Any[_scf_table_point_dict(r) for r in m.table])
+    br.phase_step_assumed && (p["step_assumed"] = true)
     d["phase"] = p
   end
   br.tap_correction === :ideal || (d["tap_changer_model"] = String(br.tap_correction))
+  # the winding ratio and shift the models move from (the resolver's base);
+  # k and theta of the data row are the live values with the steps applied
+  d["base_ratio"] = something(w.ratio, 1.0)
+  d["base_shift_deg"] = something(w.shift_degree, 0.0)
   return d
 end
 
@@ -939,15 +1090,52 @@ function _scf_table_point_dict(r::TapTablePoint)
   return pt
 end
 
+# The tap changer set an import stored on a branch for the tap estimation
+# (Branch.se_tap_changers) as a plain JSON object under the key
+# `estimation`: origin, neutral ratio and shift, and one object per changer
+# with every field that is set. Optional numbers that are `nothing` are left
+# out (JSON has no NaN); `x_curve` carries its form (without a curve the
+# form is not used and reads back as sin2). An empty changer list is
+# written: it declares "no tap changer", the branch is never released.
+function _scf_se_tap_changers_dict(set::SETapChangerSet, bid)
+  # the reader takes only the sets of an import (cgmes, powsybl)
+  set.origin in (:cgmes, :powsybl) || throw(ArgumentError("SCF: branch $(bid): a stored tap changer set has origin $(repr(set.origin)); only :cgmes and :powsybl sets are written."))
+  chs = Any[]
+  for ch in set.changers
+    c = Dict{String,Any}("name" => ch.name, "mrid" => ch.mrid, "kind" => String(ch.kind), "role" => String(ch.role), "side" => String(ch.side), "neutral" => ch.neutral, "low" => ch.low, "high" => ch.high, "step" => ch.step, "impedance" => String(ch.impedance))
+    ch.additive && (c["additive"] = true)
+    for (key, v) in (("du", ch.du), ("alpha_deg", ch.alpha_deg), ("dphi_deg", ch.dphi_deg), ("step_abs", ch.step_abs), ("outside_du", ch.outside_du))
+      v === nothing || (c[key] = v)
+    end
+    if ch.x_curve !== nothing
+      c["x_curve"] = Dict{String,Any}("x_min" => ch.x_curve[1], "x_max" => ch.x_curve[2], "a_max_deg" => ch.x_curve[3], "form" => String(ch.x_curve_form))
+    end
+    ch.rx_correction && (c["rx_correction"] = true)
+    ch.step_assumed && (c["step_assumed"] = true)
+    ch.table === nothing || (c["table"] = Any[Dict{String,Any}("step" => p.step, "ratio" => p.ratio, "angle_deg" => p.angle_deg, "r" => p.r, "x" => p.x, "g" => p.g, "b" => p.b) for p in ch.table])
+    push!(chs, c)
+  end
+  return Dict{String,Any}("origin" => String(set.origin), "ratio_n" => set.ratio_n, "shift_n_deg" => set.shift_n_deg, "changers" => chs)
+end
+
+# One entry per transformer branch with typed models (the typed dict) or a
+# stored tap changer set (key `estimation`, 0.60.0), or both. A branch with
+# neither has no entry. Sets derived on demand (origins typed and fields)
+# are never on the branch and are not written: they come back from the
+# typed block or the nameplate rows.
 function _scf_tap_changer_models(net::Net, ids::ScfIdMap)
   out = Dict{String,Any}()
   for i in eachindex(net.branchVec)
     br = net.branchVec[i]
     w = br.tap_winding
-    (w !== nothing && (w.taps !== nothing || w.phase_taps !== nothing)) || continue
+    typed = w !== nothing && (w.taps !== nothing || w.phase_taps !== nothing)
+    stored = br.se_tap_changers !== nothing && _scf_is_transformer(br)
+    (typed || stored) || continue
     id = get(ids.branch, i, nothing)
     id === nothing && continue
-    out[string(id)] = _scf_tap_model_dict(br, w)
+    d = typed ? _scf_tap_model_dict(br, w) : Dict{String,Any}()
+    stored && (d["estimation"] = _scf_se_tap_changers_dict(br.se_tap_changers, id))
+    out[string(id)] = d
   end
   return out
 end
@@ -959,27 +1147,46 @@ function _scf_tap_changers(net::Net, ids::ScfIdMap)
     id === nothing && continue
     br = net.branchVec[i]
     controllers = Vector{Any}()
+    # a Delta-u changer divides the live ratio, so with one present the
+    # ratio position comes from the split, not from tap_ratio
+    du_split = (br.has_phase_tap && br.phase_du_step > 0.0) ? _du_tap_split(br, br.tap_est_alpha_deg) : nothing
     if br.has_ratio_tap && br.tap_step > 0.0
-      # position on the fraction grid: r1 = base/current - 1 over tap_step
-      cur = br.tap_ratio == 0.0 ? br.ratio : br.tap_ratio
-      pos = cur == 0.0 ? 0 : Int(round((br.ratio / cur - 1.0) / br.tap_step, RoundNearestTiesAway))
-      push!(controllers, Dict{String,Any}(
-        "index" => 1,
-        "alpha_deg" => 0.0,
-        "step" => br.tap_step,
-        "pos" => pos,
-        "pos_min" => _scf_stable_step(Int(round((br.ratio / br.tap_max - 1.0) / br.tap_step, RoundNearestTiesAway)), br.ratio, br.tap_step),
-        "pos_max" => _scf_stable_step(Int(round((br.ratio / br.tap_min - 1.0) / br.tap_step, RoundNearestTiesAway)), br.ratio, br.tap_step),
-      ))
+      cur = du_split !== nothing ? du_split[1] : (br.tap_ratio == 0.0 ? br.ratio : br.tap_ratio)
+      if br.tap_ratio_grid === :linear && _tap_r1_model(br) === nothing
+        # a CGMES changer: positions on the grid of the branch, counted
+        # from ratio_base as the tap estimation reports them
+        # (_tap_r1_position); the reader rebuilds ratio + pos * step, which
+        # gives the position back without a tie, so no snap is needed.
+        # Written on the fraction grid, the live ratio came back wrong at
+        # second order in the step (3W fixture, 8 steps: 1.100 as 1.102).
+        lo, hi = _tap_r1_band(br)
+        push!(controllers, Dict{String,Any}(
+          "index" => 1,
+          "alpha_deg" => 0.0,
+          "step" => br.tap_step,
+          "pos" => cur == 0.0 ? 0 : Int(round(_tap_r1_position(br, br.ratio / cur - 1.0), RoundNearestTiesAway)),
+          "pos_min" => Int(round(lo, RoundNearestTiesAway)),
+          "pos_max" => Int(round(hi, RoundNearestTiesAway)),
+          "grid" => "linear",
+        ))
+      else
+        # position on the fraction grid: r1 = base/current - 1 over tap_step
+        pos = cur == 0.0 ? 0 : Int(round((br.ratio / cur - 1.0) / br.tap_step, RoundNearestTiesAway))
+        push!(controllers, Dict{String,Any}(
+          "index" => 1,
+          "alpha_deg" => 0.0,
+          "step" => br.tap_step,
+          "pos" => pos,
+          "pos_min" => _scf_stable_step(Int(round((br.ratio / br.tap_max - 1.0) / br.tap_step, RoundNearestTiesAway)), br.ratio, br.tap_step),
+          "pos_max" => _scf_stable_step(Int(round((br.ratio / br.tap_min - 1.0) / br.tap_step, RoundNearestTiesAway)), br.ratio, br.tap_step),
+        ))
+      end
     end
     if br.has_phase_tap
       if br.phase_du_step > 0.0
         # Delta-u phase shifter: the position lives on the additional-voltage
         # grid, the shift angle is a consequence (atan), not the grid
-        psi = deg2rad(br.tap_est_alpha_deg)
-        tbase = (br.ratio == 0.0 ? 1.0 : br.ratio) * cis(deg2rad(br.angle))
-        tlive = (br.tap_ratio == 0.0 ? abs(tbase) : br.tap_ratio) * cis(deg2rad(br.phase_shift_deg))
-        r2 = real((tbase / tlive - 1.0) * cis(-psi))
+        r2 = du_split[2]
         push!(controllers, Dict{String,Any}(
           "index" => 2,
           "alpha_deg" => br.tap_est_alpha_deg,
@@ -1006,6 +1213,24 @@ function _scf_tap_changers(net::Net, ids::ScfIdMap)
           "pos_max" => Int(round(br.phase_max_deg / br.phase_step_deg, RoundNearestTiesAway)),
         ))
       end
+      # a phase changer no nameplate row declared (the constructor grid of a
+      # MATPOWER branch, a CGMES phase range) is marked: the reader takes a
+      # phase controller as declared nameplate data, and the re-read branch
+      # would join the mass release of the tap estimation
+      if !br.phase_tap_declared && !isempty(controllers) && controllers[end]["index"] == 2
+        controllers[end]["declared"] = false
+      end
+    end
+    # the same for a ratio changer no nameplate row declared (the default
+    # ratio grid of a MATPOWER branch): without the mark the re-read branch
+    # counts as a case with tap changers (_case_has_tap_changers)
+    if !br.ratio_tap_declared && !isempty(controllers) && controllers[1]["index"] == 1
+      controllers[1]["declared"] = false
+    end
+    # a changer whose step was not transferred keeps its mark: the written
+    # pos is the assumed middle position, not a step of the source
+    for c in controllers
+      (c["index"] == 1 ? br.ratio_step_assumed : br.phase_step_assumed) && (c["step_assumed"] = true)
     end
     isempty(controllers) && continue
     row = Dict{String,Any}(
@@ -1084,7 +1309,10 @@ function _scf_extra(net::Net, ids::ScfIdMap)
     # a bus inherits the network's limits; only its own deviation is written
     (nd._vmin_pu === nothing || nd._vmin_pu == net.vmin_pu) || (d["vmin_pu"] = nd._vmin_pu)
     (nd._vmax_pu === nothing || nd._vmax_pu == net.vmax_pu) || (d["vmax_pu"] = nd._vmax_pu)
-    nd.comp.cTyp == AuxBus && (d["aux"] = true)
+    # the auxiliary role travels in roles.aux_nodes, the one channel the
+    # reader takes it from; no per-node flag here (it was written only for
+    # an explicit AuxBus type before every isAux build carried that type, and
+    # no reader looked at it)
     put(ids.node[i], d)
   end
   for i in eachindex(net.branchVec)
@@ -1101,6 +1329,10 @@ function _scf_extra(net::Net, ids::ScfIdMap)
     br.ratio == 0.0 || (meta["neutral_ratio"] = br.ratio)
     br.angle == 0.0 || (meta["neutral_shift_deg"] = br.angle)
     isempty(meta) || (d["meta"] = meta)
+    # the delivered values of a CGMES EquivalentBranch (export metadata and
+    # element-kind marker, see Net.equivalent_branch_metadata)
+    eb = get(net.equivalent_branch_metadata, Int(br.branchIdx), nothing)
+    eb === nothing || (d["equivalent_branch"] = Dict{String,Any}("r_ohm" => eb.r, "x_ohm" => eb.x, "r21_ohm" => eb.r21, "x21_ohm" => eb.x21, "vn_kv" => eb.vn_kV, "stamped" => eb.stamped))
     put(ids.branch[i], d)
   end
   for i in eachindex(net.linkVec)
@@ -1154,15 +1386,35 @@ function _scf_extra(net::Net, ids::ScfIdMap)
       ps.gencost.q === nothing || (gc["q"] = ps.gencost.q)
       d["gencost"] = gc
     end
+    # dynamic parameters (#506), written only where a unit carries them, so
+    # a network without them writes the bytes it wrote before
+    ps.dynamics === nothing || (d["dynamics"] = _scf_dynamics_dict(ps.dynamics))
     ps.isRegulated && (d["regulated"] = true)
     _scf_write_voltage_control!(d, ps, net.baseMVA)
     put(ids.prosumer[i], d)
   end
-  for i in eachindex(net.shuntVec)
+  # shunt_index is the rank among the WRITTEN shunts, which is the index
+  # the reader gives the shunt (and the one scenario patches resolve to);
+  # the net index would skip a controller-owned shunt left out above it
+  for (k, i) in enumerate(sort!(collect(keys(ids.shunt))))
     sh = net.shuntVec[i]
-    put(ids.shunt[i], Dict{String,Any}("name" => getCompName(sh.comp), "external_id" => sh.comp.cID, "shunt_index" => i))
+    put(ids.shunt[i], Dict{String,Any}("name" => getCompName(sh.comp), "external_id" => sh.comp.cID, "shunt_index" => k))
   end
   return extra
+end
+
+# extra.<machine>.dynamics: one key per DynamicData field under the field
+# name, a field at `nothing` left out, the unit type as its SCF spelling.
+# Fields with a numeric default are written even at the default, so the
+# block states the record as it is.
+function _scf_dynamics_dict(dd::DynamicData)::Dict{String,Any}
+  out = Dict{String,Any}()
+  for f in fieldnames(DynamicData)
+    v = getfield(dd, f)
+    v === nothing && continue
+    out[String(f)] = f === :unit_type ? dynamic_unit_type_name(v) : v
+  end
+  return out
 end
 
 ## --- assembly --------------------------------------------------------------
@@ -1176,21 +1428,28 @@ arguments). Pure: the network is not modified.
 function net_to_scf(
   net::Net;
   case_name::AbstractString = "",
-  f_nom::Float64 = 50.0,
+  f_nom::Float64 = net.nominal_frequency_hz,
   source_format::AbstractString = "",
   source_reference::AbstractString = "",
   intended_calculations::Vector{String} = String["power_flow"],
   notes::AbstractString = "",
-  contingencies::Union{Nothing,AbstractDict} = nothing,
   scenarios::Union{Nothing,AbstractDict} = nothing,
   short_circuit::Union{Nothing,AbstractDict} = nothing,
   include_start_state::Bool = false,
   measurement_provenance::AbstractDict = Dict{String,Any}(),
   strict_pgm::Bool = false,
   created_at::AbstractString = "",
+  units::Symbol = :si,
 )::Dict{String,Any}
+  units in (:si, :pu) || throw(ArgumentError("SCF export: units must be :si or :pu, got :$(units)."))
+  # the pu values live in the sparlectra block, which a strict PGM file drops
+  (units === :pu && strict_pgm) && throw(ArgumentError("SCF export: units = :pu needs the sparlectra block, which strict_pgm = true leaves out."))
+  # f_nom divides every line susceptance (c1 = b/(2*pi*f)): 0 gives NaN or
+  # Inf, a negative value a negative capacitance. The adapters pass their
+  # option here without going through the Net constructor check.
+  _check_nominal_frequency(f_nom, "SCF export (f_nom)")
   _scf_assert_base_impedances(net)
-  ids = scf_id_map(net)
+  ids = scf_id_map(net; controller_shunts = strict_pgm)
   next_id = Ref(isempty(ids.names) ? 0 : maximum(keys(ids.names)))
   data = Dict{String,Any}()
   nodes = _scf_nodes(net, ids)
@@ -1230,8 +1489,13 @@ function net_to_scf(
   isempty(source_reference) || (meta["source_reference"] = String(source_reference))
   isempty(notes) || (meta["notes"] = String(notes))
   isempty(created_at) || (meta["created_at"] = String(created_at))
+  # the CGMES mRID registry of an imported delivery: the reader restores it,
+  # so the extra records of a re-read keep their mRIDs and source_id_kind
+  # and the first export of a CGMES import is the fixed point of the writer
+  isempty(net.cgmes_ids) || (meta["cgmes_ids"] = Dict{String,Any}(String(k) => String(v) for (k, v) in net.cgmes_ids))
 
   spar = Dict{String,Any}("format_version" => SCF_FORMAT_VERSION, "meta" => meta, "roles" => _scf_roles(net, ids), "extra" => _scf_extra(net, ids))
+  units === :pu && _scf_write_pu_blocks!(spar, net, ids)
   components = Dict{String,Any}()
   taps = _scf_tap_changers(net, ids)
   isempty(taps) || (components["tap_changer"] = taps)
@@ -1280,10 +1544,6 @@ function net_to_scf(
   # deprecated precedence level directly below that file.
   # study definitions: what to compute, not what came out. The result
   # contract is untouched; these blocks only describe the study.
-  contingencies === nothing || (spar["contingencies"] = Dict{String,Any}(String(k) => v for (k, v) in contingencies))
-  # the scenario block: the scenario-aware path writes
-  # scenarios; the deprecated contingencies keyword keeps its historical
-  # emission for existing callers
   scenarios === nothing || (spar["scenarios"] = Dict{String,Any}(String(k) => v for (k, v) in scenarios))
   short_circuit === nothing || (spar["short_circuit"] = Dict{String,Any}(String(k) => v for (k, v) in short_circuit))
   if include_start_state
@@ -1315,10 +1575,17 @@ function net_to_scf(
     end
     haskey(spar, "measurements") && push!(dropped, "measurement rows")
     haskey(spar, "branch_shunt_split") && push!(dropped, "asymmetric branch shunt split")
-    haskey(spar, "tap_changer_models") && push!(dropped, "typed tap-changer models")
+    if haskey(spar, "tap_changer_models")
+      models = values(spar["tap_changer_models"])
+      any(d -> haskey(d, "ratio") || haskey(d, "phase"), models) && push!(dropped, "typed tap-changer models")
+      any(d -> haskey(d, "estimation"), models) && push!(dropped, "tap changer sets of the state estimation")
+    end
     any(ps -> has_qu_controller(ps) || has_pu_controller(ps), net.prosumpsVec) && push!(dropped, "voltage-dependent Q(U)/P(U) control")
     haskey(spar, "start_state") && push!(dropped, "start state")
-    (haskey(spar, "contingencies") || haskey(spar, "short_circuit")) && push!(dropped, "study definitions")
+    (haskey(spar, "scenarios") || haskey(spar, "short_circuit")) && push!(dropped, "study definitions")
+    # PGM has no frequency field: c1 is written with this value, and a
+    # reader of the strict file has to bring the same frequency itself
+    push!(dropped, "system frequency (f_nom = $(f_nom) Hz)")
     # g1 on a line row is the SCF extension for a conductance tan1 cannot
     # spell (b == 0); PGM's line has no such attribute, so a strict file
     # genuinely loses that conductance
@@ -1367,15 +1634,46 @@ function net_to_scf(
   return root
 end
 
+# units = :pu: the branch and shunt parameters as the net holds them, in the
+# pu block of each extra entry, and the declaration in meta. The data
+# section keeps the SI view; build_net reads the pu block instead of it.
+function _scf_write_pu_blocks!(spar::Dict{String,Any}, net::Net, ids::ScfIdMap)
+  spar["meta"]["units"] = "pu"
+  extra = spar["extra"]
+  for i in eachindex(net.branchVec)
+    id = get(ids.branch, i, nothing)
+    id === nothing && continue
+    br = net.branchVec[i]
+    # base impedance, the same quantity the SI rows carry
+    extra[string(id)]["pu"] = Dict{String,Any}("r_pu" => br.r_base_pu, "x_pu" => br.x_base_pu, "b_pu" => br.b_pu, "g_pu" => br.g_pu)
+  end
+  for (i, id) in ids.shunt
+    y = net.shuntVec[i].y_pu_shunt
+    extra[string(id)]["pu"] = Dict{String,Any}("g_pu" => real(y), "b_pu" => imag(y))
+  end
+  return nothing
+end
+
 # A case file must describe the EQUIPMENT, not a FACTS operating point: a
 # series-FACTS control run stamps its compensated impedance onto r_pu/x_pu
 # while r_base_pu/x_base_pu keep the physical value. Writing a compensated
 # net would silently misrepresent the network, so it is a hard error.
+# A typed winding sets r_pu/x_pu from its model at the live step (impedance
+# correction, reactance curve). The file carries the base and the model, and
+# the reader resolves the model values, so both the base pair (after
+# restoreBaseImpedances!, or the :off write-back of a tap estimation started
+# at a factor of 1) and the model pair describe the same equipment there.
 function _scf_assert_base_impedances(net::Net)
+  near(a, b) = isapprox(a, b; atol = 1e-12, rtol = 1e-9)
   for (i, br) in enumerate(net.branchVec)
-    if !isapprox(br.r_pu, br.r_base_pu; atol = 1e-12, rtol = 1e-9) || !isapprox(br.x_pu, br.x_base_pu; atol = 1e-12, rtol = 1e-9)
+    near(br.r_pu, br.r_base_pu) && near(br.x_pu, br.x_base_pu) && continue
+    res = (br.taps_derived && br.tap_winding !== nothing) ? resolve_winding_taps(br.tap_winding; tap_changer_model = br.tap_correction) : nothing
+    if res === nothing
       throw(ArgumentError("exportSCF: branch $(i) ($(getCompName(br.comp))) carries a FACTS-compensated impedance (r_pu/x_pu differ from r_base_pu/x_base_pu). A case file must describe the equipment, not an operating point; call restoreBaseImpedances!(net) before exporting."))
     end
+    x_model = res.x_alpha === nothing ? br.x_base_pu * res.rx_factor : res.x_alpha
+    near(br.r_pu, br.r_base_pu * res.rx_factor) && near(br.x_pu, x_model) && continue
+    throw(ArgumentError("exportSCF: branch $(i) ($(getCompName(br.comp))) has r_pu/x_pu that match neither r_base_pu/x_base_pu nor its typed tap changer model at the live step. A case file must describe the equipment, not an operating point; call restoreBaseImpedances!(net) before exporting."))
   end
   return nothing
 end
@@ -1385,8 +1683,8 @@ end
 
 Write `net` as a Sparlectra Case Format file (`.scf.json`, issue #342) and
 return the path. The `data` section is a valid power-grid-model input
-dataset in SI units; everything Sparlectra adds (slack roles, tap-changer
-cascade, names and source ids, measurement detail) lives under the
+dataset in SI units; everything Sparlectra adds (slack roles, tap changers
+and their sets, names and source ids, measurement detail) lives under the
 namespaced `sparlectra` key. Case-scope configuration travels in the case
 configuration file next to the case (`write_case_config`), not inside it.
 
@@ -1396,20 +1694,30 @@ network twice produces byte-identical files and Git diffs stay readable.
 Keyword arguments:
 - `case_name`, `source_format`, `source_reference`, `notes`: `meta` fields;
   `case_name` defaults to the network name.
-- `f_nom`: nominal frequency in Hz (default 50.0), needed for the line
-  capacitance conversion.
+- `f_nom`: system frequency in Hz, written as `meta.f_nom` and used to
+  turn the line susceptance into the capacitance `c1`; default
+  `net.nominal_frequency_hz`.
 - `intended_calculations`: the contract of the file (default
   `["power_flow"]`).
 - `measurement_provenance`: what is known about the measurement set (`noise`,
   `generator`, `seed`); it lands in `sparlectra.measurements.provenance` and
   is what tells a reader that a set is ideal rather than measured.
+- `scenarios`, `short_circuit`: study definitions written as the
+  `sparlectra.scenarios` and `sparlectra.short_circuit` blocks (the
+  document form of [`scenario_set_dict`](@ref) for scenarios).
 - `include_start_state`: write the current bus voltages as START values
   (never as results). Off by default, because a stale start state on an
   edited net is worse than none.
 - `strict_pgm`: write ONLY the power-grid-model input dataset, without the
   namespaced `sparlectra` block, for a consumer that reads PGM and nothing
-  else. Everything that block carries is then absent from the file; the
-  export names what it dropped in a warning. Off by default.
+  else. Everything that block carries is then absent from the file,
+  `meta.f_nom` included; the export names what it dropped in a warning.
+  Off by default.
+- `units`: `:si` (default) or `:pu`. With `:pu` the file declares
+  `meta.units = "pu"` and carries the branch and shunt parameters per unit
+  in the `pu` block of their `sparlectra.extra` entry, so a network that
+  was built from per-unit data (MATPOWER) reads back bit for bit. The
+  `data` section stays the SI view. Not combinable with `strict_pgm`.
 
 Throws an `ArgumentError` when the network carries FACTS-compensated
 impedances (call `restoreBaseImpedances!` first).

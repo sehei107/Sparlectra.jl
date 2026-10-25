@@ -44,7 +44,7 @@ function _synthetic_dtf_case(; kind::Char = 'T', g_s::Float64 = 4.0e-5, b_s::Flo
   )
 end
 
-function _synthetic_dtf_case_with_tap_control(; longitudinal_range_percent::Float64, actual_tap_step::Int, max_tap_step::Int, added_voltage_angle_deg::Float64 = 0.0)
+function _synthetic_dtf_case_with_tap_control(; longitudinal_range_percent::Float64, actual_tap_step::Union{Nothing,Int}, max_tap_step::Int, added_voltage_angle_deg::Float64 = 0.0)
   control = Sparlectra.DTFImporter.DTFTransformerControl(
     "", 1, "PV", "SLACK", "A", "", "PV", "SLACK",
     110.0, 110.0, longitudinal_range_percent, added_voltage_angle_deg, max_tap_step, actual_tap_step,
@@ -148,6 +148,25 @@ function run_dtf_importer_tests()
     @test get(net_corrected.matpower_branch_metadata, 1, nothing).tap_changer_model == :impedance_correction
     @test isapprox(get(net_corrected.matpower_branch_metadata, 1, nothing).tap_impedance_correction_factor, expected_factor; atol = 1e-12)
     @test get(net_ideal.matpower_branch_metadata, 1, nothing).tap_impedance_correction_factor == 1.0
+    # a control without its Stufe: the middle position,
+    # Stufe 0 of the symmetric band, so the branch keeps the base ratio as
+    # before (then without a model); the typed model sits on the winding,
+    # marked and named in one info line
+    nostep = _synthetic_dtf_case_with_tap_control(longitudinal_range_percent = 10.0, actual_tap_step = nothing, max_tap_step = 10)
+    net_nostep = @test_logs (:info, "DTF: tap changer T1A PV -> SLACK: step not transferred, middle position 0 assumed") match_mode = :any Sparlectra.DTFImporter.build_net(nostep)
+    bn = only(net_nostep.branchVec)
+    @test bn.phase_step_assumed && only(net_nostep.trafos).side1.phase_taps.step == 0
+    @test (bn.tap_ratio, bn.phase_shift_deg) == (1.0, 0.0)
+    @test !branch_ideal.phase_step_assumed
+    # with an added angle the step becomes a skew-angle tap:
+    # f = range% / 100 * step / max_step, then calcSkewAngleTap with that angle
+    skew_case = _synthetic_dtf_case_with_tap_control(longitudinal_range_percent = 12.0, actual_tap_step = 3, max_tap_step = 8, added_voltage_angle_deg = 15.0)
+    skew = Sparlectra.DTFImporter._dtf_effective_transformer_tap(skew_case, only(skew_case.branches), only(skew_case.transformer_controls), skew_case.buses[1], skew_case.buses[2])
+    skew_fraction = (12.0 / 100.0) * 3 / 8
+    skew_ref = Sparlectra.calcSkewAngleTap(tap_fraction = skew_fraction, skew_angle_deg = 15.0)
+    @test skew.model == :skew_angle
+    @test skew.tap_fraction == skew_fraction
+    @test (skew.shift_deg, skew.effective_complex, skew.ratio) == (skew_ref.effective_shift_deg, skew_ref.regulating_vector, skew_ref.effective_ratio)
   end)() end
 
   # The shipped demo deck: the text path of the importer on a file every
@@ -187,6 +206,15 @@ function run_dtf_importer_tests()
       run_sparlectra(casefile = deck)
     end
     @test run isa Sparlectra.SparlectraRunResult
+    # DTF states no frequency: the conversion writes the run's key as
+    # meta.f_nom (not the global configuration) and bases c1 on it
+    fcfg(f) = Sparlectra.SparlectraConfig(model = Sparlectra.ModelConfig(nominal_frequency_hz = f))
+    conv50 = Sparlectra.convert_case(Sparlectra.DTFAdapter(), case, Sparlectra.dtf_adapter_options(fcfg(50.0)))
+    conv60 = Sparlectra.convert_case(Sparlectra.DTFAdapter(), case, Sparlectra.dtf_adapter_options(fcfg(60.0)))
+    @test (conv50.sparlectra.meta["f_nom"], conv60.sparlectra.meta["f_nom"]) == (50.0, 60.0)
+    c1(conv) = [something(row.c1, 0.0) for row in conv.data.line]
+    @test count(>(0.0), c1(conv50)) > 0
+    @test all(isapprox.(c1(conv60), c1(conv50) .* (5 / 6); rtol = 1e-14))
   end)() end
 
   # The slack name of the size card is what follows its counts, not its
@@ -270,21 +298,6 @@ function run_dtf_importer_tests()
       end
     end
   end)() end
-
-  @testset "native DTF full local fixture" begin
-    if !isfile(DTF_FIXTURE)
-      @info "Skipping full FOR001 fixture validation; external reference network is not tracked. Place a local file at test/fixtures/dtf/FOR001.DAT or data/DTF/FOR001.DAT for manual validation."
-      @test_skip "FOR001 full reference fixture not available"
-      return
-    end
-    case = Sparlectra.DTFImporter.read_dtf(DTF_FIXTURE)
-    @test case.size.NGES == 13
-    @test length(case.branches) == 27
-    @test count(b -> b.kind == 'T', case.branches) == 5
-    net = Sparlectra.createNetFromDTFFile(DTF_FIXTURE)
-    @test length(net.branchVec) == 27
-    @test Sparlectra.bus_shunt_totals_pu(net).total_g_pu ≈ 0.0
-  end
 
   @testset "DTF persists the typed phase-tap model on the winding" begin
     # X(α)-coupling precondition: the transiently built PhaseTapChangerModel

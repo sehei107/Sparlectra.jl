@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@
 #          array-level Newton driver run_complex_nr_rectangular
 #
 
-# rectangular_network_solver.jl — Rectangular PF network-level orchestration and public entry glue
+# rectangular_network_solver.jl: Rectangular PF network-level orchestration and public entry glue
 #
 # Current split architecture:
 # - `runpf_rectangular!` is the network-integrated rectangular solver entry point.
@@ -160,7 +160,7 @@ function _print_rectangular_qlimit_summary(
     pv_violations = pv_violations,
     ref_violations = ref_violations,
     violating_hyst = count(r -> !r.in_return_band, rows),
-    switches = length(net.qLimitLog),
+    switches = qlimit_pv_to_pq_event_count(net),
     status = Symbol(lowercase(status_text)),
   )
 end
@@ -323,11 +323,6 @@ function runpf_rectangular!(
   trust_region_expand_threshold::Float64 = 0.75,
   trust_region_step_mode::Symbol = :scaled,
   opt_flatstart::Bool = net.flatstart,
-  # Same pattern as opt_flatstart: a configured run passes both values from
-  # its run configuration, so an auto-mode rewrite of the switching keys
-  # reaches the attempt; a config-less call keeps the network's stamp.
-  opt_cooldown_iters::Union{Nothing,Int} = nothing,
-  opt_q_hyst_pu::Union{Nothing,Float64} = nothing,
   pv_table_rows::Int = 30,
   lock_pv_to_pq_buses::AbstractVector{Int} = Int[],
   qlimit_mode::Symbol = :switch_to_pq,
@@ -343,6 +338,7 @@ function runpf_rectangular!(
   start_projection_requested_angle_mode::Symbol = :classic,
   start_projection_requested_voltage_mode::Symbol = :classic,
   start_projection_ratio_profile::Bool = false,
+  start_rotate_behind_pst::Bool = false,
   start_current_iteration_enabled::Bool = false,
   start_current_iteration_max_iter::Int = 10,
   start_current_iteration_tol::Float64 = 1.0e-3,
@@ -442,8 +438,6 @@ function runpf_rectangular!(
       trust_region_expand_threshold = trust_region_expand_threshold,
       trust_region_step_mode = trust_region_step_mode,
       opt_flatstart = opt_flatstart,
-    opt_cooldown_iters = opt_cooldown_iters,
-    opt_q_hyst_pu = opt_q_hyst_pu,
       pv_table_rows = pv_table_rows,
       qlimit_max_outer = qlimit_max_outer,
       start_projection = start_projection,
@@ -457,6 +451,7 @@ function runpf_rectangular!(
       start_projection_requested_angle_mode = start_projection_requested_angle_mode,
       start_projection_requested_voltage_mode = start_projection_requested_voltage_mode,
       start_projection_ratio_profile = start_projection_ratio_profile,
+      start_rotate_behind_pst = start_rotate_behind_pst,
       start_current_iteration_enabled = start_current_iteration_enabled,
       start_current_iteration_max_iter = start_current_iteration_max_iter,
       start_current_iteration_tol = start_current_iteration_tol,
@@ -542,7 +537,7 @@ function runpf_rectangular!(
 
   # 1) Initial complex voltages V0 and slack index
   V0, slack_idx = _perf_profile_time!(performance_profile, :solver_initial_voltage) do
-    initialVrect(net; flatstart = opt_flatstart)
+    initialVrect(net; flatstart = opt_flatstart, rotate_behind_pst = start_rotate_behind_pst)
   end
 
   # 2) Specified complex power injections S (p.u.). For Q(U)/P(U) controllers
@@ -600,13 +595,13 @@ function runpf_rectangular!(
   # the slack fix, so a star point next to the reference sees its setpoint.
   if opt_flatstart
     n_aux_start = _perf_profile_time!(performance_profile, :solver_aux_bus_flat_start) do
-      _aux_bus_flat_start!(V0, net, slack_idx)
+      _aux_bus_flat_start!(V0, net, slack_idx; rotate_behind_pst = start_rotate_behind_pst)
     end
     verbose > 0 && n_aux_start > 0 && @info "flat start: $(n_aux_start) auxiliary bus(es) start at the ratio of their lowest-impedance branch"
   end
 
   # Distributed slack (issue #192): discover participants on the FINAL bus
-  # types and freeze the alpha vector for the whole solve — later PV→PQ
+  # types and freeze the alpha vector for the whole solve: later PV→PQ
   # switching does not change participation. `nothing` (disabled, or ref_only
   # fallback with no valid participant) leaves the classical path untouched.
   dslack = if distributed_slack_enabled
@@ -615,7 +610,10 @@ function runpf_rectangular!(
     nothing
   end
 
-  set_phase("start_projection")
+  # The phase and its timing key exist only when the projection runs: a
+  # run-level flat start switches it off (_flatstart_profile_config), and its
+  # run.log must not show a start projection that did not run.
+  start_projection && set_phase("start_projection")
   # The projection's DC candidate solves the net's own DC model (Bbus plus
   # the phase-shift injections, assembled once here through assemble_dc_bbus,
   # the same model rundcpf! solves); without a net it would fall back to
@@ -632,14 +630,19 @@ function runpf_rectangular!(
   if verbose > 0 && wants_dc_candidate && projection_dc_model === nothing
     @info "start projection: DC candidate uses imag(Ybus) (an in-service branch has x_pu == 0, no DC model)"
   end
-  # The ratio-profile candidate (power_flow.start_mode.ratio_profile) belongs
-  # to a FLAT start only: there the flat magnitudes ignore the off-nominal
-  # transformer ratios, and the candidate scales them per voltage level. A
-  # start from stored voltages already carries its own magnitudes. The
-  # factors need the net's branches, so they are built here and handed to
-  # the projection; an empty vector means "no candidate" and leaves the
-  # selection exactly as before (the grid-bench adapter path runs with the
-  # projection off and never gets here with factors).
+  # The ratio-profile candidate (power_flow.start_mode.ratio_profile) is a
+  # candidate of the start projection on a FLAT seed: the flat magnitudes
+  # ignore the off-nominal transformer ratios, and the candidate scales them
+  # per voltage level. A start from stored voltages carries its own
+  # magnitudes. This is the one decision point: under a run-level flat start
+  # the projection is off (_flatstart_profile_config) and no candidate is
+  # built, so PQ buses start at 1.0 pu, PV and slack buses at their
+  # setpoints, every angle at 0, and only the auxiliary buses carry a ratio
+  # (_aux_bus_flat_start! above). The
+  # projection meets a flat seed in the rescue ladder's alternate start, in
+  # the auto mode and in direct keyword calls. The factors need the net's
+  # branches, so they are built here and handed to the projection; an empty
+  # vector means "no candidate".
   ratio_profile_factors = if start_projection && opt_flatstart && start_projection_ratio_profile
     _perf_profile_time!(performance_profile, :start_projection_ratio_profile) do
       _ratio_profile_factors(net, slack_idx)
@@ -647,7 +650,7 @@ function runpf_rectangular!(
   else
     Float64[]
   end
-  V0 = _perf_profile_time!(performance_profile, :start_projection) do
+  V0 = !start_projection ? V0 : _perf_profile_time!(performance_profile, :start_projection) do
     project_rectangular_start(
       Ybus,
       V0,
@@ -657,7 +660,7 @@ function runpf_rectangular!(
       slack_idx;
       dc_model = projection_dc_model,
       ratio_profile_factors = ratio_profile_factors,
-      enabled = start_projection,
+      enabled = true,
       try_dc_start = start_projection_try_dc_start,
       try_blend_scan = start_projection_try_blend_scan,
       branch_guard = start_projection_branch_guard,
@@ -713,7 +716,7 @@ function runpf_rectangular!(
 
   # Fixed-reference self-check support: record the full per-bus mismatch at
   # the exact start state Newton will see, after every start-value machine ran
-  # or was bypassed. Opt-in via the profile flag — normal runs pay nothing.
+  # or was bypassed. Opt-in via the profile flag, normal runs pay nothing.
   if performance_profile isa AbstractDict && get(performance_profile, :capture_initial_residual_rows, false) === true
     _perf_profile_time!(performance_profile, :initial_residual_capture) do
       _capture_initial_residual_rows!(performance_profile, Ybus, V0, S, bus_types, Vset, slack_idx, net)
@@ -758,9 +761,12 @@ function runpf_rectangular!(
   # the island then converges in 9 iterations with the guard on.
 
   guarded_qlimit_buses = Int[]
+  # narrow-range PV buses under narrow_range_mode = lock_pq: they stay PV
+  # and leave the PQ->PV release below, so a limit they reach locks them
+  qlimit_lock_on_hit_buses = Int[]
   if qlimits_enabled && qlimit_guard
     guarded_qlimit_buses = _perf_profile_time!(performance_profile, :qlimit_guard_preprocess) do
-      _apply_qlimit_guard_to_rectangular_active_set!(net, bus_types, S, build_qload_pu(net), qmin_pu, qmax_pu; min_q_range_pu = qlimit_guard_min_q_range_pu, zero_range_mode = qlimit_guard_zero_range_mode, narrow_range_mode = qlimit_guard_narrow_range_mode, log = qlimit_guard_log, verbose = verbose)
+      _apply_qlimit_guard_to_rectangular_active_set!(net, bus_types, S, build_qload_pu(net), qmin_pu, qmax_pu; min_q_range_pu = qlimit_guard_min_q_range_pu, zero_range_mode = qlimit_guard_zero_range_mode, narrow_range_mode = qlimit_guard_narrow_range_mode, log = qlimit_guard_log, verbose = verbose, lock_on_hit = qlimit_lock_on_hit_buses)
     end
     # V0 is still the start vector here (V = copy(V0) follows below), so
     # the corrected start reaches the first Newton iteration
@@ -789,6 +795,11 @@ function runpf_rectangular!(
     @inbounds for k in eachindex(mask)
       mask[k] = (bus_types[k] == :PV)
     end
+    # a narrow-range bus of the guard (lock_pq) is clamped for good at the
+    # first limit it reaches: without PV origin the release rule skips it
+    for bus in qlimit_lock_on_hit_buses
+      mask[bus] = false
+    end
     mask
   end
 
@@ -815,14 +826,17 @@ function runpf_rectangular!(
     end
   end
 
-  cooldown_iters = opt_cooldown_iters !== nothing ? opt_cooldown_iters : (hasfield(typeof(net), :cooldown_iters) ? net.cooldown_iters : 0)
-  q_hyst_pu      = opt_q_hyst_pu !== nothing ? opt_q_hyst_pu : (hasfield(typeof(net), :q_hyst_pu) ? net.q_hyst_pu : 0.0)
-  # voltage margin of the PQ->PV release (#375), stamped on the net from
-  # power_flow.qlimits.reenable_v_hyst_pu like the two settings above
-  reenable_v_hyst_pu = hasfield(typeof(net), :reenable_v_hyst_pu) ? net.reenable_v_hyst_pu : 1e-4
-  # size bound of the final Q-limit check, stamped from
-  # power_flow.qlimits.final_q_accept_pu; never below the hysteresis in use
-  final_q_accept_pu = max(hasfield(typeof(net), :final_q_accept_pu) ? net.final_q_accept_pu : 2 * q_hyst_pu, q_hyst_pu)
+  # The four Q-limit switching parameters come from the network only. A
+  # configured solve stamps them from its run configuration first
+  # (_apply_qlimit_net_parameters! in _runpf_config_once!), so an auto-mode
+  # rewrite of the keys reaches the attempt, and the classic outer loop and
+  # the final Q-limit check read the same values as the active set here.
+  cooldown_iters = net.cooldown_iters
+  q_hyst_pu = net.q_hyst_pu
+  # voltage margin of the PQ->PV release (#375)
+  reenable_v_hyst_pu = net.reenable_v_hyst_pu
+  # size bound of the final Q-limit check; never below the hysteresis in use
+  final_q_accept_pu = max(net.final_q_accept_pu, q_hyst_pu)
   allow_reenable = (cooldown_iters > 0) || (q_hyst_pu > 0.0)
   qlimit_mode in (:switch_to_pq, :adjust_vset) || error("Unsupported qlimit_mode=$(qlimit_mode). Supported: :switch_to_pq, :adjust_vset.")
   qlimit_max_outer > 0 || error("qlimit_max_outer must be > 0 (got $(qlimit_max_outer)).")
@@ -844,9 +858,23 @@ function runpf_rectangular!(
     println("Q-limit trace enabled for BUS_I values: ", [_qlimit_original_bus_id(net, bus) for bus in qlimit_trace_internal])
   end
 
+  # for the wrong-branch hint only (_wrong_branch_pst_start_hint): Newton
+  # starts without angles on a net with phase shifters while
+  # power_flow.start_mode.rotate_behind_pst is off. Tested on the final start
+  # vector, after the start projection, the current-iteration and APSLF
+  # starts and the Q-limit guard start, since each of them can replace the
+  # angles of initialVrect (the DC candidate carries the shift angles).
+  start_without_angles_behind_pst = !start_rotate_behind_pst && _has_in_service_phase_shift(net) && _start_without_angles(V0, slack_idx)
+
   # 5) NR-Loop
   V = copy(V0)
   history = Float64[]
+  # per iteration: the largest mismatch before the Q-limit handling switched
+  # a bus (history[end] is overwritten with the value after the switch) and
+  # whether it switched one; the reason of a run at max_iter is read from
+  # both (_max_iter_stop_reason)
+  pre_switch_history = Float64[]
+  type_switched = Bool[]
   step_diagnostics = NamedTuple[]
   merit_step_diagnostics = merit_enabled ? NamedTuple[] : nothing
   tr_radius_ref = trust_region_enabled ? Ref(trust_region_initial_radius) : nothing
@@ -1028,6 +1056,10 @@ function runpf_rectangular!(
         dPinj_dVm[k] = 0.0
         dQinj_dVm[k] = 0.0
       end
+      # the same for a Q-limit clamp (active set, guard, lock list, warm
+      # clamps): without this the regulating unit of a clamped bus was back
+      # at its scheduled Q each iteration
+      _reapply_qlimit_clamps!(S, dQinj_dVm, net, bus_types, V)
     end
 
     # Mismatch with current bus_types and (possibly) voltage-dependent S.
@@ -1042,6 +1074,8 @@ function runpf_rectangular!(
     sparlectra_check_abort()
     max_mis = maximum(abs.(F))
     push!(history, max_mis)
+    push!(pre_switch_history, max_mis)
+    push!(type_switched, false)
     if isfinite(max_mis)
       # Keep the best and the most recent finite state. A diverging run can
       # still be reported usefully ("best iterate was X at iteration k"), and
@@ -1122,7 +1156,7 @@ function runpf_rectangular!(
     converged_this_iter = qlimit_iter.converged_this_iter
     changed && (qlimit_active_set_changes += 1)
     reenabled && (qlimit_reenable_events += 1)
-    (changed || reenabled) && (qlimit_switch_iterations += 1)
+    (changed || reenabled) && (qlimit_switch_iterations += 1; type_switched[end] = true)
     # Converged only counts when the active set stayed put in the same
     # iteration: a small mismatch right after a PV<->PQ switch describes the
     # OLD equation system, not the one now in force.
@@ -1289,10 +1323,16 @@ function runpf_rectangular!(
   if verbose > 0 && jr_enabled
     println("Jacobian reuse: ", jr_reused_steps, " reused steps, ", jr_newton_steps - jr_reused_steps, " refactorisations, ", jr_discarded_steps, " reused steps discarded")
   end
+  # the loop used up max_iter (every other exit sets its own reason): the
+  # last iterations decide between iteration limit, type identification
+  # divergence and numerical divergence
+  if !converged && rejection_reason === :nr_mismatch_not_converged
+    rejection_reason = _max_iter_stop_reason(pre_switch_history, type_switched, tol)
+  end
 
   # The loop above can exit (converged break, non-converged break, or normal
   # exhaustion) while "q_limit_processing" or "newton_iteration" is still the
-  # active phase label — with no further set_phase() call afterward, all of
+  # active phase label: with no further set_phase() call afterward, all of
   # steps 6-8 below (voltage/injection writeback, Q-limit summary
   # finalization, wrong-branch checks, mismatch diagnostics) would otherwise
   # be misattributed to whichever phase happened to be active on the last
@@ -1446,6 +1486,8 @@ function runpf_rectangular!(
       (numerical_converged && !qlimits_enabled) ? :qlimits_disabled : :no_converged_solution;
       switch_counts = switch_counts_,
       max_switches = qlimit_guard_max_switches,
+      pre_switch_history = pre_switch_history,
+      type_switched = type_switched,
     )
     status_build_ = _merge_current_iteration_diagnostics(status_build_, performance_profile)
     status_build_ = _merge_merit_linesearch_diagnostics(status_build_, performance_profile, merit_step_diagnostics, merit_enabled)
@@ -1476,11 +1518,17 @@ function runpf_rectangular!(
     # it rates the core PF Jacobian without the appended lambda row and
     # column. See _make_rectangular_condest_thunk in condition_number.jl.
     status_build_ = merge(status_build_, (status = (; status_build_.status..., jacobian_condest = _make_rectangular_condest_thunk(Ybus, V, bus_types, Vset, slack_idx, net.isoNodes)),))
+    status_build_ = merge(status_build_, (status = (; status_build_.status..., start_without_angles_behind_pst = start_without_angles_behind_pst),))
     final_reason_ = status_build_.final_reason
     final_status_ = status_build_.final_status
     status_ = _store_and_print_rectangular_final_status!(net, status_build_.status, verbose)
     (switch_counts_, oscillating_buses_, max_switching_exceeded_, q_limit_active_set_ok_, converged_, rejection_reason_, final_reason_, final_status_, status_)
   end
+  # P(U)/Q(U) generation at the solved voltage onto the nodes, only when the
+  # solve converged and every final check accepted it. It runs after the
+  # Q-limit summary and the wrong-branch check, which read the injections,
+  # not these node values.
+  converged && _write_controlled_generation!(net)
   if verbose > 0
     qlimits_enabled && _print_qlimit_active_set_summary(stdout, status)
   end
@@ -1557,8 +1605,6 @@ function runpf_rectangular!(
   trust_region_expand_threshold::Float64 = 0.75,
   trust_region_step_mode::Symbol = :scaled,
   opt_flatstart::Bool = net.flatstart,
-  opt_cooldown_iters::Union{Nothing,Int} = nothing,
-  opt_q_hyst_pu::Union{Nothing,Float64} = nothing,
   pv_table_rows::Int = 30,
   validate_limits_after_pf::Bool = false,
   q_limit_violation_headroom::Float64 = 0.0,
@@ -1576,6 +1622,7 @@ function runpf_rectangular!(
   start_projection_requested_angle_mode::Symbol = :classic,
   start_projection_requested_voltage_mode::Symbol = :classic,
   start_projection_ratio_profile::Bool = false,
+  start_rotate_behind_pst::Bool = false,
   start_current_iteration_enabled::Bool = false,
   start_current_iteration_max_iter::Int = 10,
   start_current_iteration_tol::Float64 = 1.0e-3,
@@ -1631,110 +1678,111 @@ function runpf_rectangular!(
   distributed_slack_fallback::Symbol = :error,
   distributed_slack_weights::AbstractDict{String,Float64} = Dict{String,Float64}(),
 )
-  iters, erg = runpf_rectangular!(
-    net;
-    method = method,
+  # the solver options in one NamedTuple, built once and splatted into the
+  # keyword method; keys and order are those of the former explicit call
+  solver_opts = (;
+    method,
     maxiter = maxIte,
     tol = tolerance,
-    damp = damp,
-    autodamp = autodamp,
-    autodamp_min = autodamp_min,
-    newton_update = newton_update,
-    power_mode = power_mode,
-    power_mode_lu = power_mode_lu,
-    jacobian_reuse = jacobian_reuse,
-    jacobian_reuse_min_reduction = jacobian_reuse_min_reduction,
-    jacobian_reuse_max_steps = jacobian_reuse_max_steps,
-    qlimit_warm_clamps = qlimit_warm_clamps,
-    merit_enabled = merit_enabled,
-    merit_armijo_c1 = merit_armijo_c1,
-    merit_scale_p = merit_scale_p,
-    merit_scale_q = merit_scale_q,
-    merit_scale_v = merit_scale_v,
-    merit_fallback_max_mismatch = merit_fallback_max_mismatch,
-    trust_region_enabled = trust_region_enabled,
-    trust_region_initial_radius = trust_region_initial_radius,
-    trust_region_min_radius = trust_region_min_radius,
-    trust_region_max_radius = trust_region_max_radius,
-    trust_region_eta_accept = trust_region_eta_accept,
-    trust_region_shrink_factor = trust_region_shrink_factor,
-    trust_region_expand_factor = trust_region_expand_factor,
-    trust_region_expand_threshold = trust_region_expand_threshold,
-    trust_region_step_mode = trust_region_step_mode,
-    verbose = verbose,
-    opt_flatstart = opt_flatstart,
-    opt_cooldown_iters = opt_cooldown_iters,
-    opt_q_hyst_pu = opt_q_hyst_pu,
-    pv_table_rows = pv_table_rows,
-    lock_pv_to_pq_buses = lock_pv_to_pq_buses,
-    qlimit_mode = qlimit_mode,
-    qlimit_max_outer = qlimit_max_outer,
-    start_projection = start_projection,
-    start_projection_try_dc_start = start_projection_try_dc_start,
-    start_projection_try_blend_scan = start_projection_try_blend_scan,
-    start_projection_branch_guard = start_projection_branch_guard,
-    start_projection_measure_candidates = start_projection_measure_candidates,
-    start_projection_accept_unmeasured_dc_start = start_projection_accept_unmeasured_dc_start,
-    start_projection_blend_lambdas = start_projection_blend_lambdas,
-    start_projection_dc_angle_limit_deg = start_projection_dc_angle_limit_deg,
-    start_projection_requested_angle_mode = start_projection_requested_angle_mode,
-    start_projection_requested_voltage_mode = start_projection_requested_voltage_mode,
-    start_projection_ratio_profile = start_projection_ratio_profile,
-    start_current_iteration_enabled = start_current_iteration_enabled,
-    start_current_iteration_max_iter = start_current_iteration_max_iter,
-    start_current_iteration_tol = start_current_iteration_tol,
-    start_current_iteration_damping = start_current_iteration_damping,
-    start_current_iteration_accept_only_if_improved = start_current_iteration_accept_only_if_improved,
-    start_current_iteration_min_improvement_factor = start_current_iteration_min_improvement_factor,
-    start_current_iteration_vm_min_pu = start_current_iteration_vm_min_pu,
-    start_current_iteration_vm_max_pu = start_current_iteration_vm_max_pu,
-    start_current_iteration_max_angle_step_deg = start_current_iteration_max_angle_step_deg,
-    start_current_iteration_only_for_large_cases = start_current_iteration_only_for_large_cases,
-    apslf_start_enabled = apslf_start_enabled,
-    apslf_start_order = apslf_start_order,
-    qlimit_start_iter = qlimit_start_iter,
-    qlimit_start_mode = qlimit_start_mode,
-    qlimit_auto_q_delta_pu = qlimit_auto_q_delta_pu,
-    qlimit_trace_buses = qlimit_trace_buses,
-    qlimit_lock_reason = qlimit_lock_reason,
-    qlimit_guard = qlimit_guard,
-    qlimit_guard_min_q_range_pu = qlimit_guard_min_q_range_pu,
-    qlimit_guard_zero_range_mode = qlimit_guard_zero_range_mode,
-    qlimit_guard_narrow_range_mode = qlimit_guard_narrow_range_mode,
-    qlimit_guard_log = qlimit_guard_log,
-    qlimit_guard_max_switches = qlimit_guard_max_switches,
-    qlimit_guard_accept_bounded_violations = qlimit_guard_accept_bounded_violations,
-    qlimit_guard_max_remaining_violations = qlimit_guard_max_remaining_violations,
-    qlimit_guard_freeze_after_repeated_switching = qlimit_guard_freeze_after_repeated_switching,
-    qlimit_guard_violation_mode = qlimit_guard_violation_mode,
-    qlimit_guard_violation_threshold_pu = qlimit_guard_violation_threshold_pu,
-    qlimits_enabled = qlimits_enabled,
-    qlimit_enforcement_mode = qlimit_enforcement_mode,
-    wrong_branch_detection = wrong_branch_detection,
-    wrong_branch_rescue = wrong_branch_rescue,
-    wrong_branch_min_vm_pu = wrong_branch_min_vm_pu,
-    wrong_branch_max_vm_pu = wrong_branch_max_vm_pu,
-    wrong_branch_max_angle_spread_deg = wrong_branch_max_angle_spread_deg,
-    wrong_branch_max_branch_angle_deg = wrong_branch_max_branch_angle_deg,
-    wrong_branch_min_low_vm_count = wrong_branch_min_low_vm_count,
-    wrong_branch_min_vn_kV = wrong_branch_min_vn_kV,
-    wrong_branch_low_vm_share = wrong_branch_low_vm_share,
-    wrong_branch_max_bus_angle_deg = wrong_branch_max_bus_angle_deg,
-    wrong_branch_max_plain_steps = wrong_branch_max_plain_steps,
-    wrong_branch_collapse_vm_pu = wrong_branch_collapse_vm_pu,
-    wrong_branch_max_reference_branch_angle_deg = wrong_branch_max_reference_branch_angle_deg,
-    wrong_branch_rescue_max_attempts = wrong_branch_rescue_max_attempts,
-    rectangular_workspace_reuse = rectangular_workspace_reuse,
-    rectangular_preallocate_workspace = rectangular_preallocate_workspace,
-    rectangular_workspace_min_buses = rectangular_workspace_min_buses,
-    linear_solver = linear_solver,
-    performance_profile = performance_profile,
-    distributed_slack_enabled = distributed_slack_enabled,
-    distributed_slack_p_mode = distributed_slack_p_mode,
-    distributed_slack_respect_p_limits = distributed_slack_respect_p_limits,
-    distributed_slack_fallback = distributed_slack_fallback,
-    distributed_slack_weights = distributed_slack_weights,
+    damp,
+    autodamp,
+    autodamp_min,
+    newton_update,
+    power_mode,
+    power_mode_lu,
+    jacobian_reuse,
+    jacobian_reuse_min_reduction,
+    jacobian_reuse_max_steps,
+    qlimit_warm_clamps,
+    merit_enabled,
+    merit_armijo_c1,
+    merit_scale_p,
+    merit_scale_q,
+    merit_scale_v,
+    merit_fallback_max_mismatch,
+    trust_region_enabled,
+    trust_region_initial_radius,
+    trust_region_min_radius,
+    trust_region_max_radius,
+    trust_region_eta_accept,
+    trust_region_shrink_factor,
+    trust_region_expand_factor,
+    trust_region_expand_threshold,
+    trust_region_step_mode,
+    verbose,
+    opt_flatstart,
+    pv_table_rows,
+    lock_pv_to_pq_buses,
+    qlimit_mode,
+    qlimit_max_outer,
+    start_projection,
+    start_projection_try_dc_start,
+    start_projection_try_blend_scan,
+    start_projection_branch_guard,
+    start_projection_measure_candidates,
+    start_projection_accept_unmeasured_dc_start,
+    start_projection_blend_lambdas,
+    start_projection_dc_angle_limit_deg,
+    start_projection_requested_angle_mode,
+    start_projection_requested_voltage_mode,
+    start_projection_ratio_profile,
+    start_rotate_behind_pst,
+    start_current_iteration_enabled,
+    start_current_iteration_max_iter,
+    start_current_iteration_tol,
+    start_current_iteration_damping,
+    start_current_iteration_accept_only_if_improved,
+    start_current_iteration_min_improvement_factor,
+    start_current_iteration_vm_min_pu,
+    start_current_iteration_vm_max_pu,
+    start_current_iteration_max_angle_step_deg,
+    start_current_iteration_only_for_large_cases,
+    apslf_start_enabled,
+    apslf_start_order,
+    qlimit_start_iter,
+    qlimit_start_mode,
+    qlimit_auto_q_delta_pu,
+    qlimit_trace_buses,
+    qlimit_lock_reason,
+    qlimit_guard,
+    qlimit_guard_min_q_range_pu,
+    qlimit_guard_zero_range_mode,
+    qlimit_guard_narrow_range_mode,
+    qlimit_guard_log,
+    qlimit_guard_max_switches,
+    qlimit_guard_accept_bounded_violations,
+    qlimit_guard_max_remaining_violations,
+    qlimit_guard_freeze_after_repeated_switching,
+    qlimit_guard_violation_mode,
+    qlimit_guard_violation_threshold_pu,
+    qlimits_enabled,
+    qlimit_enforcement_mode,
+    wrong_branch_detection,
+    wrong_branch_rescue,
+    wrong_branch_min_vm_pu,
+    wrong_branch_max_vm_pu,
+    wrong_branch_max_angle_spread_deg,
+    wrong_branch_max_branch_angle_deg,
+    wrong_branch_min_low_vm_count,
+    wrong_branch_min_vn_kV,
+    wrong_branch_low_vm_share,
+    wrong_branch_max_bus_angle_deg,
+    wrong_branch_max_plain_steps,
+    wrong_branch_collapse_vm_pu,
+    wrong_branch_max_reference_branch_angle_deg,
+    wrong_branch_rescue_max_attempts,
+    rectangular_workspace_reuse,
+    rectangular_preallocate_workspace,
+    rectangular_workspace_min_buses,
+    linear_solver,
+    performance_profile,
+    distributed_slack_enabled,
+    distributed_slack_p_mode,
+    distributed_slack_respect_p_limits,
+    distributed_slack_fallback,
+    distributed_slack_weights,
   )
+  iters, erg = runpf_rectangular!(net; solver_opts...)
   return iters, erg
 end
 
@@ -1747,17 +1795,16 @@ end
 ## class of #456: configuration lost on the way to the solver).
 ## `qlimit_lock_reason` is the caller's (the auto mode passes its own); with
 ## Q limits ignored it is always :ignore_q_limits, as before.
+## The four switching parameters (cooldown, hysteresis, release voltage
+## margin, final-check bound) are NOT keywords: the solver reads them off the
+## network, which _runpf_config_once! stamps from its configuration and the
+## importer stamps from the configuration of the import (the contingency
+## service imports with its run configuration, so the batch engines see the
+## same values).
 function _qlimit_solver_kwargs(qlim::QLimitConfig; qlimit_lock_reason::Symbol = :manual)
   qlimit_disabled = qlim.ignore_q_limits
   qlimits_enabled = !qlimit_disabled
   return (;
-    # the run configuration decides the switching parameters here, exactly
-    # like the flat start: an auto-mode attempt that rewrites
-    # power_flow.qlimits.hysteresis_pu / cooldown_iters reaches the solver
-    # through its config, while the values stamped on the network at import
-    # stay the default for config-less calls
-    opt_cooldown_iters = qlim.cooldown_iters,
-    opt_q_hyst_pu = qlim.hysteresis_pu,
     # pass limit of the classic outer loop; only the classic modes read it
     # on this path (qlimit_mode stays :switch_to_pq, so the adjust_vset
     # step budget that shares the keyword is not reached from a config)
@@ -1789,6 +1836,11 @@ function _runpf_config_once!(net::Net, config::PowerFlowConfig; verbose::Int = 0
   start_ci = config.start_current_iteration
   start_apslf = config.apslf_start
   qlim = config.qlimits
+  # the run configuration owns the Q-limit switching parameters: stamp them
+  # before every solve (rescue variants and auto-mode attempts included), so
+  # a network imported with other values, or built by hand, runs with the
+  # configured ones on every enforcement mode
+  _apply_qlimit_net_parameters!(net, qlim)
   return runpf!(
     net,
     config.max_iter,
@@ -1851,6 +1903,7 @@ function _runpf_config_once!(net::Net, config::PowerFlowConfig; verbose::Int = 0
     start_projection_requested_angle_mode = start.angle_mode,
     start_projection_requested_voltage_mode = start.voltage_mode,
     start_projection_ratio_profile = start.ratio_profile,
+    start_rotate_behind_pst = start.rotate_behind_pst,
     start_current_iteration_enabled = start_ci.enabled,
     start_current_iteration_max_iter = start_ci.max_iter,
     start_current_iteration_tol = start_ci.tol,
@@ -1888,7 +1941,7 @@ end
 # --- AC rescue ladder and DC fallback (power_flow.rescue / power_flow.dc.fallback) ---
 
 # The retries must restart from the state the caller handed in, not from the
-# garbage a failed Newton run leaves behind — so the start voltages are
+# garbage a failed Newton run leaves behind, so the start voltages are
 # snapshotted before the first attempt and restored before every retry.
 _snapshot_start_voltages(net::Net) = (Union{Nothing,Float64}[n._vm_pu for n in net.nodeVec], Union{Nothing,Float64}[n._va_deg for n in net.nodeVec])
 
@@ -1905,15 +1958,15 @@ end
 Ordered rescue strategies for a non-converged AC solve. Each entry is a
 `(name, config)` pair derived from the failed run's configuration:
 
-1. `:alternate_start` — toggle the flat-start flag: a stalled imported start
+1. `:alternate_start`: toggle the flat-start flag: a stalled imported start
    often solves from flat, and a failed flat start may solve from the
    imported voltages.
-2. `:autodamp` — adaptive damping with the default floor (skipped when the
+2. `:autodamp`: adaptive damping with the default floor (skipped when the
    failed run already used autodamp; the competing trust-region step control
    is disabled for this attempt).
-3. `:dc_seed` — flat voltage magnitudes with DC-projected start angles via
+3. `:dc_seed`: flat voltage magnitudes with DC-projected start angles via
    the existing start-projection machinery.
-4. `:settled_qlimits` — the globalization package for large, Q-limit-noisy
+4. `:settled_qlimits`: the globalization package for large, Q-limit-noisy
    systems: Armijo merit line search, a low damping floor, and Q-limit
    switching held back until the reactive requests have settled
    (`qlimits.start_mode = :auto`). Measured on an 82000-bus case whose
@@ -2095,11 +2148,15 @@ function _runpf_with_config!(net::Net, config::PowerFlowConfig; verbose::Int = 0
       println("dc fallback: the DC power flow failed as well: ", sprint(showerror, err))
     end
     if dc_ok
-      println("dc fallback: AC did not converge — the net now carries the standalone DC solution (angles and branch P only, vm = 1 pu, no reactive results). The AC status stays non-converged.")
+      println("dc fallback: AC did not converge. The net now carries the standalone DC solution (angles and branch P only, vm = 1 pu, no reactive results). The AC status stays non-converged.")
       performance_profile isa AbstractDict && (performance_profile[:dc_fallback_applied] = true)
-      status = rectangular_pf_status(net)
-      status !== nothing && _set_rectangular_pf_status!(net, merge(status, (; dc_fallback_applied = true)))
     end
+    # The field is set whether the DC solve worked or not: the start voltages
+    # were restored above, so the net no longer holds the last Newton iterate
+    # and the Q-limit stability check must not read it as one
+    # (_qlimit_stability_diagnostics).
+    status = rectangular_pf_status(net)
+    status !== nothing && _set_rectangular_pf_status!(net, merge(status, (; dc_fallback_applied = dc_ok)))
     # Honest return: erg = 1 keeps every `erg == 0` reader truthful about the
     # AC solve; the DC state and the profile flag carry the fallback result.
     return (ite, 1)
@@ -2379,7 +2436,7 @@ function _merged_pf_net(net::Net)
   #
   # In practice both call sites (runpf!, _run_apslf_powerflow!) run
   # refreshBusTypesFromProsumers! right afterwards, which rebuilds slackVec from
-  # the — already remapped — prosumer bus indices and would mask a stale entry.
+  # the (already remapped) prosumer bus indices and would mask a stale entry.
   # Do not rely on that: _merged_pf_net is also called directly (tests,
   # diagnostics), and a future caller may skip the refresh.
   if !isempty(wnet.slackVec)
@@ -2412,7 +2469,187 @@ function _merged_pf_net(net::Net)
       wnet.hvdcLinks[i] = HvdcLink(l.name, fb, tb, l.from_prosumer, l.to_prosumer, l.status, l.source, l.kind, l.controller_name)
     end
   end
+  # The per-bus Q bands are derived from the units of each bus and the copy
+  # still holds those of the original buses: the representative kept the
+  # band of its own units, the members' bands sat on Isolated buses, and a
+  # voltage-controlled cluster clamped at the representative's limit alone.
+  # Rebuild them from the units now on the representative.
+  buildQLimits!(wnet)
   return wnet, reps, true
+end
+
+# Inverse of the injection sums in _merged_pf_net: hand the solved bus powers
+# of `wnet` back to the buses of `net` (the representative returns its sums
+# to the members, not only vm and va). A bus
+# outside every link cluster takes the solver's values as they are. In a
+# cluster every member keeps its own scheduled generation and load. The
+# solver wrote the representative's outcome as the generation of the
+# cluster (slack P and Q, PV Q, the clamp of a bus at a Q limit). Hence:
+#  - P of a cluster with a reference: the reference member gets the cluster
+#    generation minus the generation of the other members (their schedule,
+#    under a distributed slack plus their share of lambda_P);
+#  - Q of a cluster with a voltage-controlled or reference member: the
+#    members holding the voltage share the generator Q the other members do
+#    not schedule, each at the same relative position in its Q band (each at
+#    its own limit when the cluster is clamped), equally where a band is open
+#    or empty;
+#  - a Q-limit event of the representative goes to its voltage-controlled
+#    members, its log entries to the first of them, so result tables see the
+#    clamp as on a bus without link;
+#  - after a converged solve (`converged`), a member with a P(U) or Q(U)
+#    unit takes its generation at the solved voltage
+#    (_controlled_bus_generation) instead of the schedule: P at a member
+#    outside the references, Q at a member that does not hold the voltage.
+#    The solve ran these units on their characteristic, so the reference
+#    and the voltage-holding members get the cluster value minus that.
+#    Without it the original node kept the schedule while the report
+#    evaluated the characteristic (a Q(U) unit at a PQ member of a cluster
+#    in an island-wise solve).
+function _split_merged_bus_powers!(net::Net, wnet::Net, reps::Vector{Int}; converged::Bool = false)
+  n = length(net.nodeVec)
+  nodes = net.nodeVec
+  members = [Int[] for _ = 1:n]
+  for b = 1:n
+    push!(members[reps[b]], b)
+  end
+  # reference buses and buses held by a regulating or reference unit (the
+  # held set of _buildQLimits!), taken from the units like the bus types
+  is_ref = falses(n)
+  held = falses(n)
+  for ps in net.prosumpsVec
+    isGenerator(ps) || continue
+    b = getPosumerBusIndex(ps)
+    1 <= b <= n || continue
+    isSlack(ps) && (is_ref[b] = true)
+    (isSlack(ps) || isRegulating(ps)) && (held[b] = true)
+  end
+  val(x) = something(x, 0.0)
+  # distributed slack: a member outside the references delivers its
+  # schedule plus its share of lambda_P, and the solved cluster generation
+  # holds that share; the solver status is already on `net` here
+  _, ds_shares = _distributed_slack_bus_shares(net)
+  ds_dp(b) = get(ds_shares, b, (0.0, 0.0))[2]
+  # per-bus Q bands of the original net (MVAr), kept current by addProsumer!
+  bands = length(net.qmin_pu) == n && length(net.qmax_pu) == n
+  # bus that carries the Q-limit log entries of a representative
+  log_bus = collect(1:n)
+  # members' generation at the solved voltage; `net` holds the solved
+  # voltages already (_sync_merged_results_to_original! copies them first)
+  pc, qc, has_pc, has_qc = converged ? _controlled_bus_generation(net) : (Float64[], Float64[], falses(n), falses(n))
+  resetQLimitLog!(net)
+  for r = 1:n
+    M = members[r]
+    isempty(M) && continue
+    w = wnet.nodeVec[r]
+    side = get(wnet.qLimitEvents, r, nothing)
+    if length(M) == 1
+      # only values the solver changed; the merge wrote 0.0 where the bus
+      # had `nothing`
+      w._pƩGen === nothing || w._pƩGen == val(nodes[r]._pƩGen) || (nodes[r]._pƩGen = w._pƩGen)
+      w._qƩGen === nothing || w._qƩGen == val(nodes[r]._qƩGen) || (nodes[r]._qƩGen = w._qƩGen)
+      side === nothing || (net.qLimitEvents[r] = side)
+      continue
+    end
+    # an isolated cluster was not solved, its members keep their values
+    r in wnet.isoNodes && continue
+    for b in M
+      has_pc[b] && !is_ref[b] && (nodes[b]._pƩGen = pc[b])
+      has_qc[b] && !held[b] && (nodes[b]._qƩGen = qc[b])
+    end
+    if getNodeType(w) == Slack && w._pƩGen !== nothing
+      refs = filter(b -> is_ref[b], M)
+      isempty(refs) && (refs = [r])
+      others = sum((val(nodes[b]._pƩGen) + ds_dp(b) for b in M if !(b in refs)); init = 0.0)
+      # generation of each reference member (several share it equally)
+      gen = (w._pƩGen - others) / length(refs)
+      for b in refs
+        nodes[b]._pƩGen = gen
+      end
+    end
+    regs = filter(b -> held[b], M)
+    clamped = side !== nothing
+    if w._qƩGen !== nothing && !isempty(regs) && (clamped || getNodeType(w) in (Slack, PV))
+      # total generator Q of the cluster, then the part of the held members
+      total = w._qƩGen
+      q_held = total - sum((val(nodes[b]._qƩGen) for b in M if !held[b]); init = 0.0)
+      lo = bands ? [net.qmin_pu[b] * net.baseMVA for b in regs] : Float64[]
+      hi = bands ? [net.qmax_pu[b] * net.baseMVA for b in regs] : Float64[]
+      span = bands ? sum(hi .- lo) : 0.0
+      q = if bands && all(isfinite, lo) && all(isfinite, hi) && span > 0.0
+        lo .+ ((q_held - sum(lo)) / span) .* (hi .- lo)
+      else
+        fill(q_held / length(regs), length(regs))
+      end
+      for (b, qb) in zip(regs, q)
+        nodes[b]._qƩGen = qb
+        clamped && !is_ref[b] && (net.qLimitEvents[b] = side)
+      end
+      log_bus[r] = first(regs)
+    end
+  end
+  for ev in wnet.qLimitLog
+    push!(net.qLimitLog, QLimitEvent(iter = ev.iter, bus = log_bus[ev.bus], side = ev.side, kind = ev.kind))
+  end
+  isempty(wnet.totalBusPower) || setTotalBusPower!(net = net, p = last(wnet.totalBusPower)[1], q = last(wnet.totalBusPower)[2])
+  return nothing
+end
+
+# The Q-limit outcome of a solve on the merged copy `wnet`, handed to the
+# buses and units of `net`. The solve changes bus types (PV to PQ at a
+# reached limit, back to PV on a release, a new reference under the classic
+# modes) and, under the classic modes, the scheduled Q of a clamped unit
+# (rectangular_qlimit_outer_loop.jl). Both happened on the copy only: the
+# net kept the clamped bus as PV, and the result report took the Q of a PV
+# bus from the node, which the classic modes leave at the value of the
+# base solve. Every bus of a net with a closed link was affected, also one
+# outside every link cluster: sp_case60 (one coupler, at Neubach_110) with
+# a 4.0 .. 5.5 MVAr band at Birkkamp_110 ended PV with 7.258 MVAr in the
+# report under classic_simultaneous, where the voltages give 5.500 MVAr at
+# Qmax. The types start from the units, as runpf! types a net without
+# links, then take the type the solve gave the representative: a bus
+# outside every cluster takes it as it is, in a cluster the members that
+# hold the voltage turn PQ when the cluster ended PQ, and the first of them
+# becomes the reference when the cluster became one.
+function _sync_merged_qlimit_outcome!(net::Net, wnet::Net, reps::Vector{Int})
+  # _merged_pf_net moves the units of the copy onto the representatives
+  # and keeps their order, so the unit k of the copy is the unit k of the net
+  for (ps, wps) in zip(net.prosumpsVec, wnet.prosumpsVec)
+    ps.qVal == wps.qVal || (ps.qVal = wps.qVal)
+  end
+  refreshBusTypesFromProsumers!(net)
+  n = length(net.nodeVec)
+  nodes = net.nodeVec
+  held = falses(n)
+  for ps in net.prosumpsVec
+    isGenerator(ps) || continue
+    b = getPosumerBusIndex(ps)
+    1 <= b <= n || continue
+    (isSlack(ps) || isRegulating(ps)) && (held[b] = true)
+  end
+  members = [Int[] for _ = 1:n]
+  for b = 1:n
+    push!(members[reps[b]], b)
+  end
+  for r = 1:n
+    M = members[r]
+    isempty(M) && continue
+    wt = getNodeType(wnet.nodeVec[r])
+    # an isolated bus or cluster was not solved and keeps its type
+    wt in (Slack, PV, PQ) || continue
+    if length(M) == 1
+      nodes[r]._nodeType = wt
+      continue
+    end
+    regs = filter(b -> held[b], M)
+    if wt == PQ
+      for b in regs
+        getNodeType(nodes[b]) in (Slack, PV) && (nodes[b]._nodeType = PQ)
+      end
+    elseif wt == Slack && !any(b -> getNodeType(nodes[b]) == Slack, M)
+      nodes[isempty(regs) ? r : first(regs)]._nodeType = Slack
+    end
+  end
+  return nothing
 end
 
 """
@@ -2435,6 +2672,7 @@ Arguments:
 - `newton_update::Symbol`: how a Newton step is applied, `:polar` (default: magnitude times 1 + Re(dV/V), angle plus Im(dV/V); MATPOWER's update, keeps magnitudes in range on the large rotations of a flat start) or `:rectangular` (V + dV, the update up to 0.20.5)
 - `power_mode::Bool`: keep the Ybus, the symbolic LU analysis and the work arrays on the net between solves, for repeated solves of one network (default `false`)
 - `linear_solver::Symbol`: sparse linear-algebra backend for the Newton step, `:umfpack_reuse` (default: symbolic-analysis reuse across iterations via `lu!`) or `:umfpack` (full analysis every iteration, the historical path)
+- `start_rotate_behind_pst::Bool`: on a flat start (and a stored start without angles), start a bus that the reference reaches only across phase shifters at the slack angle plus the shift sum of a path with the fewest shifters (key `power_flow.start_mode.rotate_behind_pst`, default `false`)
 - `qlimit_start_iter::Int`: first Newton iteration where PV→PQ Q-limit switching may run in `:iteration` mode
 - `qlimit_start_mode::Symbol`: `:iteration`, `:auto`, or `:iteration_or_auto` start criterion for PV→PQ switching
 - `qlimit_auto_q_delta_pu::Float64`: PV reactive-power request change threshold for automatic switching start
@@ -2480,8 +2718,6 @@ function runpf!(
   trust_region_expand_threshold::Float64 = 0.75,
   trust_region_step_mode::Symbol = :scaled,
   opt_flatstart::Bool = net.flatstart,
-  opt_cooldown_iters::Union{Nothing,Int} = nothing,
-  opt_q_hyst_pu::Union{Nothing,Float64} = nothing,
   pv_table_rows::Int = 30,
   validate_limits_after_pf::Bool = false,
   q_limit_violation_headroom::Float64 = 0.0,
@@ -2502,6 +2738,7 @@ function runpf!(
   start_projection_requested_angle_mode::Symbol = :classic,
   start_projection_requested_voltage_mode::Symbol = :classic,
   start_projection_ratio_profile::Bool = false,
+  start_rotate_behind_pst::Bool = false,
   start_current_iteration_enabled::Bool = false,
   start_current_iteration_max_iter::Int = 10,
   start_current_iteration_tol::Float64 = 1.0e-3,
@@ -2585,23 +2822,27 @@ function runpf!(
   # the island branch, next to the non-island call site) therefore made every
   # island-wise run with an active link merge die with an UndefVarError, after
   # all islands had already converged.
-  function _sync_merged_results_to_original!()
-    # Only solved voltage state is back-propagated bus-wise: wnet holds the
-    # contracted topology, so every original bus reads its value from the
-    # representative of its link cluster. All buses of a cluster are electrically
-    # the same node, hence they legitimately share vm/va.
+  function _sync_merged_results_to_original!(converged::Bool)
+    # wnet holds the contracted topology, so every original bus reads its
+    # voltage from the representative of its link cluster. All buses of a
+    # cluster are electrically the same node, hence they legitimately share
+    # vm/va.
     for i in eachindex(net.nodeVec)
       src = wnet.nodeVec[reps[i]]
       net.nodeVec[i]._vm_pu = src._vm_pu
       net.nodeVec[i]._va_deg = src._va_deg
     end
+    # the bus powers go back split over the members (slack P, PV/slack Q,
+    # Q-limit events, total bus power)
+    _split_merged_bus_powers!(net, wnet, reps; converged = converged)
+    # bus types and the clamped Q schedules of the classic modes
+    _sync_merged_qlimit_outcome!(net, wnet, reps)
     # Shunt powers depend on the bus voltage and were computed on the merged net,
     # where they sit on the representative. Recompute them on the original net so
     # reporting attributes them to the bus the user actually modelled.
     updateShuntPowers!(net = net)
   end
 
-  has_vdep_control = has_voltage_dependent_control(wnet)
   # An island always finds itself a reference:
   # one that lost its slack borrows a PV bus, and one without any
   # voltage-controlled unit takes its strongest generating unit, whatever
@@ -2613,8 +2854,114 @@ function runpf!(
   # (single- and multi-island): a second reference would otherwise surface
   # later as the generic unsupported-bus-type abort in the mismatch assembly
   _validate_single_reference_per_island!(wnet, island_report)
+  # The solver options in one NamedTuple, built once here and splatted into
+  # the three runpf_rectangular! calls below (island, merged, plain), so an
+  # option is forwarded to every path by one entry (#456: an option missing
+  # from a call ran on the callee's default without any message). The island
+  # call overrides four of them. Keys and order are those of the former
+  # explicit calls.
+  solver_opts = (;
+    damp,
+    autodamp,
+    autodamp_min,
+    newton_update,
+    power_mode,
+    power_mode_lu,
+    jacobian_reuse,
+    jacobian_reuse_min_reduction,
+    jacobian_reuse_max_steps,
+    qlimit_warm_clamps,
+    merit_enabled,
+    merit_armijo_c1,
+    merit_scale_p,
+    merit_scale_q,
+    merit_scale_v,
+    merit_fallback_max_mismatch,
+    trust_region_enabled,
+    trust_region_initial_radius,
+    trust_region_min_radius,
+    trust_region_max_radius,
+    trust_region_eta_accept,
+    trust_region_shrink_factor,
+    trust_region_expand_factor,
+    trust_region_expand_threshold,
+    trust_region_step_mode,
+    wrong_branch_detection,
+    wrong_branch_rescue,
+    wrong_branch_min_vm_pu,
+    wrong_branch_max_vm_pu,
+    wrong_branch_max_angle_spread_deg,
+    wrong_branch_max_branch_angle_deg,
+    wrong_branch_min_low_vm_count,
+    wrong_branch_min_vn_kV,
+    wrong_branch_low_vm_share,
+    wrong_branch_max_bus_angle_deg,
+    wrong_branch_max_plain_steps,
+    wrong_branch_collapse_vm_pu,
+    wrong_branch_max_reference_branch_angle_deg,
+    wrong_branch_rescue_max_attempts,
+    opt_flatstart,
+    pv_table_rows,
+    lock_pv_to_pq_buses,
+    qlimit_mode,
+    qlimit_max_outer,
+    start_projection,
+    start_projection_try_dc_start,
+    start_projection_try_blend_scan,
+    start_projection_branch_guard,
+    start_projection_measure_candidates,
+    start_projection_accept_unmeasured_dc_start,
+    start_projection_blend_lambdas,
+    start_projection_dc_angle_limit_deg,
+    start_projection_requested_angle_mode,
+    start_projection_requested_voltage_mode,
+    start_projection_ratio_profile,
+    start_rotate_behind_pst,
+    start_current_iteration_enabled,
+    start_current_iteration_max_iter,
+    start_current_iteration_tol,
+    start_current_iteration_damping,
+    start_current_iteration_accept_only_if_improved,
+    start_current_iteration_min_improvement_factor,
+    start_current_iteration_vm_min_pu,
+    start_current_iteration_vm_max_pu,
+    start_current_iteration_max_angle_step_deg,
+    start_current_iteration_only_for_large_cases,
+    apslf_start_enabled,
+    apslf_start_order,
+    qlimit_start_iter,
+    qlimit_start_mode,
+    qlimit_auto_q_delta_pu,
+    qlimit_trace_buses,
+    qlimit_lock_reason,
+    qlimit_guard,
+    qlimit_guard_min_q_range_pu,
+    qlimit_guard_zero_range_mode,
+    qlimit_guard_narrow_range_mode,
+    qlimit_guard_log,
+    qlimit_guard_max_switches,
+    qlimit_guard_accept_bounded_violations,
+    qlimit_guard_max_remaining_violations,
+    qlimit_guard_freeze_after_repeated_switching,
+    qlimit_guard_violation_mode,
+    qlimit_guard_violation_threshold_pu,
+    qlimits_enabled,
+    qlimit_enforcement_mode,
+    rectangular_workspace_reuse,
+    rectangular_preallocate_workspace,
+    rectangular_workspace_min_buses,
+    linear_solver,
+    distributed_slack_enabled,
+    distributed_slack_p_mode,
+    distributed_slack_respect_p_limits,
+    distributed_slack_fallback,
+    distributed_slack_weights,
+    performance_profile,
+  )
+
   if length(island_report.rows) > 1 && any(row -> row.n_branch > 0, island_report.rows)
-    _print_ac_island_summary(island_report)
+    # a run prints the table once itself (_execute_sparlectra_powerflow!)
+    verbose > 0 && _print_ac_island_summary(island_report)
     # the artifact goes into the run's output directory only; without one
     # (library calls, N-1 and scenario workers) nothing is written: the
     # former fallback tempdir() was one fixed path every solve overwrote
@@ -2672,104 +3019,13 @@ function runpf!(
           maxIte,
           tolerance,
           verbose;
-          damp = damp,
-          autodamp = autodamp,
-          autodamp_min = autodamp_min,
-          newton_update = newton_update,
-          power_mode = power_mode,
-          power_mode_lu = power_mode_lu,
-          jacobian_reuse = jacobian_reuse,
-          jacobian_reuse_min_reduction = jacobian_reuse_min_reduction,
-          jacobian_reuse_max_steps = jacobian_reuse_max_steps,
-          qlimit_warm_clamps = qlimit_warm_clamps,
-          merit_enabled = merit_enabled,
-          merit_armijo_c1 = merit_armijo_c1,
-          merit_scale_p = merit_scale_p,
-          merit_scale_q = merit_scale_q,
-          merit_scale_v = merit_scale_v,
-          merit_fallback_max_mismatch = merit_fallback_max_mismatch,
-          trust_region_enabled = trust_region_enabled,
-          trust_region_initial_radius = trust_region_initial_radius,
-          trust_region_min_radius = trust_region_min_radius,
-          trust_region_max_radius = trust_region_max_radius,
-          trust_region_eta_accept = trust_region_eta_accept,
-          trust_region_shrink_factor = trust_region_shrink_factor,
-          trust_region_expand_factor = trust_region_expand_factor,
-          trust_region_expand_threshold = trust_region_expand_threshold,
-          trust_region_step_mode = trust_region_step_mode,
-          wrong_branch_detection = wrong_branch_detection,
+          solver_opts...,
+          # an island solve runs without the wrong-branch rescue
           wrong_branch_rescue = false,
-          wrong_branch_min_vm_pu = wrong_branch_min_vm_pu,
-          wrong_branch_max_vm_pu = wrong_branch_max_vm_pu,
-          wrong_branch_max_angle_spread_deg = wrong_branch_max_angle_spread_deg,
-          wrong_branch_max_branch_angle_deg = wrong_branch_max_branch_angle_deg,
-          wrong_branch_min_low_vm_count = wrong_branch_min_low_vm_count,
-          wrong_branch_min_vn_kV = wrong_branch_min_vn_kV,
-          wrong_branch_low_vm_share = wrong_branch_low_vm_share,
-          wrong_branch_max_bus_angle_deg = wrong_branch_max_bus_angle_deg,
-          wrong_branch_max_plain_steps = wrong_branch_max_plain_steps,
-          wrong_branch_collapse_vm_pu = wrong_branch_collapse_vm_pu,
-          wrong_branch_max_reference_branch_angle_deg = wrong_branch_max_reference_branch_angle_deg,
           wrong_branch_rescue_max_attempts = 0,
-          opt_flatstart = opt_flatstart,
-    opt_cooldown_iters = opt_cooldown_iters,
-    opt_q_hyst_pu = opt_q_hyst_pu,
-          pv_table_rows = pv_table_rows,
           # internal positions of the whole net -> positions in this island
           # (the island renumbers its buses 1..n_island)
           lock_pv_to_pq_buses = _island_local_buses(row, lock_pv_to_pq_buses),
-          qlimit_mode = qlimit_mode,
-          qlimit_max_outer = qlimit_max_outer,
-          start_projection = start_projection,
-          start_projection_try_dc_start = start_projection_try_dc_start,
-          start_projection_try_blend_scan = start_projection_try_blend_scan,
-          start_projection_branch_guard = start_projection_branch_guard,
-          start_projection_measure_candidates = start_projection_measure_candidates,
-          start_projection_accept_unmeasured_dc_start = start_projection_accept_unmeasured_dc_start,
-          start_projection_blend_lambdas = start_projection_blend_lambdas,
-          start_projection_dc_angle_limit_deg = start_projection_dc_angle_limit_deg,
-          start_projection_requested_angle_mode = start_projection_requested_angle_mode,
-          start_projection_requested_voltage_mode = start_projection_requested_voltage_mode,
-          start_projection_ratio_profile = start_projection_ratio_profile,
-          start_current_iteration_enabled = start_current_iteration_enabled,
-          start_current_iteration_max_iter = start_current_iteration_max_iter,
-          start_current_iteration_tol = start_current_iteration_tol,
-          start_current_iteration_damping = start_current_iteration_damping,
-          start_current_iteration_accept_only_if_improved = start_current_iteration_accept_only_if_improved,
-          start_current_iteration_min_improvement_factor = start_current_iteration_min_improvement_factor,
-          start_current_iteration_vm_min_pu = start_current_iteration_vm_min_pu,
-          start_current_iteration_vm_max_pu = start_current_iteration_vm_max_pu,
-          start_current_iteration_max_angle_step_deg = start_current_iteration_max_angle_step_deg,
-          start_current_iteration_only_for_large_cases = start_current_iteration_only_for_large_cases,
-          apslf_start_enabled = apslf_start_enabled,
-          apslf_start_order = apslf_start_order,
-          qlimit_start_iter = qlimit_start_iter,
-          qlimit_start_mode = qlimit_start_mode,
-          qlimit_auto_q_delta_pu = qlimit_auto_q_delta_pu,
-          qlimit_trace_buses = qlimit_trace_buses,
-          qlimit_lock_reason = qlimit_lock_reason,
-          qlimit_guard = qlimit_guard,
-          qlimit_guard_min_q_range_pu = qlimit_guard_min_q_range_pu,
-          qlimit_guard_zero_range_mode = qlimit_guard_zero_range_mode,
-          qlimit_guard_narrow_range_mode = qlimit_guard_narrow_range_mode,
-          qlimit_guard_log = qlimit_guard_log,
-          qlimit_guard_max_switches = qlimit_guard_max_switches,
-          qlimit_guard_accept_bounded_violations = qlimit_guard_accept_bounded_violations,
-          qlimit_guard_max_remaining_violations = qlimit_guard_max_remaining_violations,
-          qlimit_guard_freeze_after_repeated_switching = qlimit_guard_freeze_after_repeated_switching,
-          qlimit_guard_violation_mode = qlimit_guard_violation_mode,
-          qlimit_guard_violation_threshold_pu = qlimit_guard_violation_threshold_pu,
-          qlimits_enabled = qlimits_enabled,
-          qlimit_enforcement_mode = qlimit_enforcement_mode,
-          rectangular_workspace_reuse = rectangular_workspace_reuse,
-          rectangular_preallocate_workspace = rectangular_preallocate_workspace,
-          rectangular_workspace_min_buses = rectangular_workspace_min_buses,
-          linear_solver = linear_solver,
-          distributed_slack_enabled = distributed_slack_enabled,
-          distributed_slack_p_mode = distributed_slack_p_mode,
-          distributed_slack_respect_p_limits = distributed_slack_respect_p_limits,
-          distributed_slack_fallback = distributed_slack_fallback,
-          distributed_slack_weights = distributed_slack_weights,
           performance_profile = worker_profile,
         )
         if status == 0
@@ -2830,6 +3086,7 @@ function runpf!(
       success_status = merge(island_rect_status === nothing ? NamedTuple() : island_rect_status, (; island_id = row.island_id, iterations = res.it, status = :converged, reason = :none, stage = :post_solve_validation, exception_type = "", exception_message = "", stacktrace_top = ""))
       island_statuses[Int(row.island_id)] = success_status
       _sync_island_solution!(wnet, res.inet, row)
+      _sync_island_qlimit_outcome!(wnet, res.inet, row)
       return nothing
     end
 
@@ -2960,6 +3217,12 @@ function runpf!(
     # power; per-island values remain in the per-island statuses.
     ds_islands = [st for st in values(island_statuses) if hasproperty(st, :distributed_slack_active) && st.distributed_slack_active]
     if any(st -> hasproperty(st, :distributed_slack_active), values(island_statuses))
+      # the participation tables carry island bus and unit numbers; the
+      # aggregate holds all of them in the numbering of the net, so the
+      # result tables put each share on its own bus and unit (the base
+      # status alone put one island's shares on buses 1, 2, ... of the net)
+      island_row = Dict(Int(r.island_id) => r for r in island_report.rows)
+      ds_participation = reduce(vcat, (_island_participation_to_net(st.distributed_slack_participation, island_row[Int(st.island_id)].buses, _island_prosumer_indices(wnet, Set(island_row[Int(st.island_id)].buses))) for st in ds_islands); init = NamedTuple[])
       aggregate_status = merge(
         aggregate_status,
         (;
@@ -2969,6 +3232,7 @@ function runpf!(
           distributed_slack_participants = isempty(ds_islands) ? 0 : sum(st.distributed_slack_participants for st in ds_islands),
           distributed_slack_dropped = isempty(ds_islands) ? 0 : sum(st.distributed_slack_dropped for st in ds_islands),
           distributed_slack_p_limit_violations = isempty(ds_islands) ? 0 : sum(st.distributed_slack_p_limit_violations for st in ds_islands),
+          distributed_slack_participation = ds_participation,
         ),
       )
     end
@@ -2997,7 +3261,8 @@ function runpf!(
       performance_profile[:post_merge_mismatch_status] = :not_applicable
     end
     if has_merges
-      _sync_merged_results_to_original!()
+      # every island converged here
+      _sync_merged_results_to_original!(true)
     elseif wnet !== net
       for i in eachindex(net.nodeVec)
         net.nodeVec[i]._vm_pu = wnet.nodeVec[i]._vm_pu
@@ -3009,217 +3274,21 @@ function runpf!(
 
   if method === :rectangular
     if has_merges
-      has_vdep_control && error("runpf!: voltage-dependent injections, including P(U)/Q(U) controllers and bus_shunt_model=voltage_dependent_injection, are not supported with active-link merge handling in rectangular mode. Disable merges or use a topology without internal isolated buses.")
+      # P(U)/Q(U) units and voltage-dependent shunts solve on the merged
+      # copy like on any net: the merge moves them onto the representative,
+      # whose voltage they read (buildControlledSVec, the bus of a unit and
+      # sh.busIdx). The refusal that stood here came with the P(U)/Q(U)
+      # controllers (00fd7d9a), when a merged net fell back to the polar
+      # full solver, which had no voltage-dependent terms. 890aa2ce moved
+      # merged nets onto the rectangular solver, which builds those terms,
+      # and kept the refusal; the island-wise solve of a merged net already
+      # ran them.
       # the merged working copy is fresh in every solve: it takes the LU memo
       # of the caller's network (see the island path)
       power_mode && _share_power_mode_lu_memo!(wnet, _power_cache!(net).lu_memo, 0)
-      iters, erg = runpf_rectangular!(
-        wnet,
-        maxIte,
-        tolerance,
-        verbose;
-        damp = damp,
-        autodamp = autodamp,
-        autodamp_min = autodamp_min,
-        newton_update = newton_update,
-        power_mode = power_mode,
-        power_mode_lu = power_mode_lu,
-        jacobian_reuse = jacobian_reuse,
-        jacobian_reuse_min_reduction = jacobian_reuse_min_reduction,
-        jacobian_reuse_max_steps = jacobian_reuse_max_steps,
-        qlimit_warm_clamps = qlimit_warm_clamps,
-        merit_enabled = merit_enabled,
-        merit_armijo_c1 = merit_armijo_c1,
-        merit_scale_p = merit_scale_p,
-        merit_scale_q = merit_scale_q,
-        merit_scale_v = merit_scale_v,
-        merit_fallback_max_mismatch = merit_fallback_max_mismatch,
-        trust_region_enabled = trust_region_enabled,
-        trust_region_initial_radius = trust_region_initial_radius,
-        trust_region_min_radius = trust_region_min_radius,
-        trust_region_max_radius = trust_region_max_radius,
-        trust_region_eta_accept = trust_region_eta_accept,
-        trust_region_shrink_factor = trust_region_shrink_factor,
-        trust_region_expand_factor = trust_region_expand_factor,
-        trust_region_expand_threshold = trust_region_expand_threshold,
-        trust_region_step_mode = trust_region_step_mode,
-        wrong_branch_detection = wrong_branch_detection,
-        wrong_branch_rescue = wrong_branch_rescue,
-        wrong_branch_min_vm_pu = wrong_branch_min_vm_pu,
-        wrong_branch_max_vm_pu = wrong_branch_max_vm_pu,
-        wrong_branch_max_angle_spread_deg = wrong_branch_max_angle_spread_deg,
-        wrong_branch_max_branch_angle_deg = wrong_branch_max_branch_angle_deg,
-        wrong_branch_min_low_vm_count = wrong_branch_min_low_vm_count,
-        wrong_branch_min_vn_kV = wrong_branch_min_vn_kV,
-        wrong_branch_low_vm_share = wrong_branch_low_vm_share,
-        wrong_branch_max_bus_angle_deg = wrong_branch_max_bus_angle_deg,
-        wrong_branch_max_plain_steps = wrong_branch_max_plain_steps,
-        wrong_branch_collapse_vm_pu = wrong_branch_collapse_vm_pu,
-        wrong_branch_max_reference_branch_angle_deg = wrong_branch_max_reference_branch_angle_deg,
-        wrong_branch_rescue_max_attempts = wrong_branch_rescue_max_attempts,
-        opt_flatstart = opt_flatstart,
-    opt_cooldown_iters = opt_cooldown_iters,
-    opt_q_hyst_pu = opt_q_hyst_pu,
-        pv_table_rows = pv_table_rows,
-        lock_pv_to_pq_buses = lock_pv_to_pq_buses,
-        qlimit_mode = qlimit_mode,
-        qlimit_max_outer = qlimit_max_outer,
-        start_projection = start_projection,
-        start_projection_try_dc_start = start_projection_try_dc_start,
-        start_projection_try_blend_scan = start_projection_try_blend_scan,
-        start_projection_branch_guard = start_projection_branch_guard,
-        start_projection_measure_candidates = start_projection_measure_candidates,
-        start_projection_accept_unmeasured_dc_start = start_projection_accept_unmeasured_dc_start,
-        start_projection_blend_lambdas = start_projection_blend_lambdas,
-        start_projection_dc_angle_limit_deg = start_projection_dc_angle_limit_deg,
-        start_projection_requested_angle_mode = start_projection_requested_angle_mode,
-        start_projection_requested_voltage_mode = start_projection_requested_voltage_mode,
-        start_projection_ratio_profile = start_projection_ratio_profile,
-        start_current_iteration_enabled = start_current_iteration_enabled,
-        start_current_iteration_max_iter = start_current_iteration_max_iter,
-        start_current_iteration_tol = start_current_iteration_tol,
-        start_current_iteration_damping = start_current_iteration_damping,
-        start_current_iteration_accept_only_if_improved = start_current_iteration_accept_only_if_improved,
-        start_current_iteration_min_improvement_factor = start_current_iteration_min_improvement_factor,
-        start_current_iteration_vm_min_pu = start_current_iteration_vm_min_pu,
-        start_current_iteration_vm_max_pu = start_current_iteration_vm_max_pu,
-        start_current_iteration_max_angle_step_deg = start_current_iteration_max_angle_step_deg,
-        start_current_iteration_only_for_large_cases = start_current_iteration_only_for_large_cases,
-        apslf_start_enabled = apslf_start_enabled,
-        apslf_start_order = apslf_start_order,
-        qlimit_start_iter = qlimit_start_iter,
-        qlimit_start_mode = qlimit_start_mode,
-        qlimit_auto_q_delta_pu = qlimit_auto_q_delta_pu,
-        qlimit_trace_buses = qlimit_trace_buses,
-        qlimit_lock_reason = qlimit_lock_reason,
-        qlimit_guard = qlimit_guard,
-        qlimit_guard_min_q_range_pu = qlimit_guard_min_q_range_pu,
-        qlimit_guard_zero_range_mode = qlimit_guard_zero_range_mode,
-        qlimit_guard_narrow_range_mode = qlimit_guard_narrow_range_mode,
-        qlimit_guard_log = qlimit_guard_log,
-        qlimit_guard_max_switches = qlimit_guard_max_switches,
-        qlimit_guard_accept_bounded_violations = qlimit_guard_accept_bounded_violations,
-        qlimit_guard_max_remaining_violations = qlimit_guard_max_remaining_violations,
-        qlimit_guard_freeze_after_repeated_switching = qlimit_guard_freeze_after_repeated_switching,
-        qlimit_guard_violation_mode = qlimit_guard_violation_mode,
-        qlimit_guard_violation_threshold_pu = qlimit_guard_violation_threshold_pu,
-        qlimits_enabled = qlimits_enabled,
-        qlimit_enforcement_mode = qlimit_enforcement_mode,
-        rectangular_workspace_reuse = rectangular_workspace_reuse,
-        rectangular_preallocate_workspace = rectangular_preallocate_workspace,
-        rectangular_workspace_min_buses = rectangular_workspace_min_buses,
-        linear_solver = linear_solver,
-        distributed_slack_enabled = distributed_slack_enabled,
-        distributed_slack_p_mode = distributed_slack_p_mode,
-        distributed_slack_respect_p_limits = distributed_slack_respect_p_limits,
-        distributed_slack_fallback = distributed_slack_fallback,
-        distributed_slack_weights = distributed_slack_weights,
-        performance_profile = performance_profile,
-      )
+      iters, erg = runpf_rectangular!(wnet, maxIte, tolerance, verbose; solver_opts...)
     else
-      iters, erg = runpf_rectangular!(
-        wnet,
-        maxIte,
-        tolerance,
-        verbose;
-        damp = damp,
-        autodamp = autodamp,
-        autodamp_min = autodamp_min,
-        newton_update = newton_update,
-        power_mode = power_mode,
-        power_mode_lu = power_mode_lu,
-        jacobian_reuse = jacobian_reuse,
-        jacobian_reuse_min_reduction = jacobian_reuse_min_reduction,
-        jacobian_reuse_max_steps = jacobian_reuse_max_steps,
-        qlimit_warm_clamps = qlimit_warm_clamps,
-        merit_enabled = merit_enabled,
-        merit_armijo_c1 = merit_armijo_c1,
-        merit_scale_p = merit_scale_p,
-        merit_scale_q = merit_scale_q,
-        merit_scale_v = merit_scale_v,
-        merit_fallback_max_mismatch = merit_fallback_max_mismatch,
-        trust_region_enabled = trust_region_enabled,
-        trust_region_initial_radius = trust_region_initial_radius,
-        trust_region_min_radius = trust_region_min_radius,
-        trust_region_max_radius = trust_region_max_radius,
-        trust_region_eta_accept = trust_region_eta_accept,
-        trust_region_shrink_factor = trust_region_shrink_factor,
-        trust_region_expand_factor = trust_region_expand_factor,
-        trust_region_expand_threshold = trust_region_expand_threshold,
-        trust_region_step_mode = trust_region_step_mode,
-        wrong_branch_detection = wrong_branch_detection,
-        wrong_branch_rescue = wrong_branch_rescue,
-        wrong_branch_min_vm_pu = wrong_branch_min_vm_pu,
-        wrong_branch_max_vm_pu = wrong_branch_max_vm_pu,
-        wrong_branch_max_angle_spread_deg = wrong_branch_max_angle_spread_deg,
-        wrong_branch_max_branch_angle_deg = wrong_branch_max_branch_angle_deg,
-        wrong_branch_min_low_vm_count = wrong_branch_min_low_vm_count,
-        wrong_branch_min_vn_kV = wrong_branch_min_vn_kV,
-        wrong_branch_low_vm_share = wrong_branch_low_vm_share,
-        wrong_branch_max_bus_angle_deg = wrong_branch_max_bus_angle_deg,
-        wrong_branch_max_plain_steps = wrong_branch_max_plain_steps,
-        wrong_branch_collapse_vm_pu = wrong_branch_collapse_vm_pu,
-        wrong_branch_max_reference_branch_angle_deg = wrong_branch_max_reference_branch_angle_deg,
-        wrong_branch_rescue_max_attempts = wrong_branch_rescue_max_attempts,
-        opt_flatstart = opt_flatstart,
-    opt_cooldown_iters = opt_cooldown_iters,
-    opt_q_hyst_pu = opt_q_hyst_pu,
-        pv_table_rows = pv_table_rows,
-        lock_pv_to_pq_buses = lock_pv_to_pq_buses,
-        qlimit_mode = qlimit_mode,
-        qlimit_max_outer = qlimit_max_outer,
-        start_projection = start_projection,
-        start_projection_try_dc_start = start_projection_try_dc_start,
-        start_projection_try_blend_scan = start_projection_try_blend_scan,
-        start_projection_branch_guard = start_projection_branch_guard,
-        start_projection_measure_candidates = start_projection_measure_candidates,
-        start_projection_accept_unmeasured_dc_start = start_projection_accept_unmeasured_dc_start,
-        start_projection_blend_lambdas = start_projection_blend_lambdas,
-        start_projection_dc_angle_limit_deg = start_projection_dc_angle_limit_deg,
-        start_projection_requested_angle_mode = start_projection_requested_angle_mode,
-        start_projection_requested_voltage_mode = start_projection_requested_voltage_mode,
-        start_projection_ratio_profile = start_projection_ratio_profile,
-        start_current_iteration_enabled = start_current_iteration_enabled,
-        start_current_iteration_max_iter = start_current_iteration_max_iter,
-        start_current_iteration_tol = start_current_iteration_tol,
-        start_current_iteration_damping = start_current_iteration_damping,
-        start_current_iteration_accept_only_if_improved = start_current_iteration_accept_only_if_improved,
-        start_current_iteration_min_improvement_factor = start_current_iteration_min_improvement_factor,
-        start_current_iteration_vm_min_pu = start_current_iteration_vm_min_pu,
-        start_current_iteration_vm_max_pu = start_current_iteration_vm_max_pu,
-        start_current_iteration_max_angle_step_deg = start_current_iteration_max_angle_step_deg,
-        start_current_iteration_only_for_large_cases = start_current_iteration_only_for_large_cases,
-        apslf_start_enabled = apslf_start_enabled,
-        apslf_start_order = apslf_start_order,
-        qlimit_start_iter = qlimit_start_iter,
-        qlimit_start_mode = qlimit_start_mode,
-        qlimit_auto_q_delta_pu = qlimit_auto_q_delta_pu,
-        qlimit_trace_buses = qlimit_trace_buses,
-        qlimit_lock_reason = qlimit_lock_reason,
-        qlimit_guard = qlimit_guard,
-        qlimit_guard_min_q_range_pu = qlimit_guard_min_q_range_pu,
-        qlimit_guard_zero_range_mode = qlimit_guard_zero_range_mode,
-        qlimit_guard_narrow_range_mode = qlimit_guard_narrow_range_mode,
-        qlimit_guard_log = qlimit_guard_log,
-        qlimit_guard_max_switches = qlimit_guard_max_switches,
-        qlimit_guard_accept_bounded_violations = qlimit_guard_accept_bounded_violations,
-        qlimit_guard_max_remaining_violations = qlimit_guard_max_remaining_violations,
-        qlimit_guard_freeze_after_repeated_switching = qlimit_guard_freeze_after_repeated_switching,
-        qlimit_guard_violation_mode = qlimit_guard_violation_mode,
-        qlimit_guard_violation_threshold_pu = qlimit_guard_violation_threshold_pu,
-        qlimits_enabled = qlimits_enabled,
-        qlimit_enforcement_mode = qlimit_enforcement_mode,
-        rectangular_workspace_reuse = rectangular_workspace_reuse,
-        rectangular_preallocate_workspace = rectangular_preallocate_workspace,
-        rectangular_workspace_min_buses = rectangular_workspace_min_buses,
-        linear_solver = linear_solver,
-        distributed_slack_enabled = distributed_slack_enabled,
-        distributed_slack_p_mode = distributed_slack_p_mode,
-        distributed_slack_respect_p_limits = distributed_slack_respect_p_limits,
-        distributed_slack_fallback = distributed_slack_fallback,
-        distributed_slack_weights = distributed_slack_weights,
-        performance_profile = performance_profile,
-      )
+      iters, erg = runpf_rectangular!(wnet, maxIte, tolerance, verbose; solver_opts...)
     end
     rect_status = rectangular_pf_status(wnet)
     if rect_status !== nothing
@@ -3231,8 +3300,12 @@ function runpf!(
       end
       _set_rectangular_pf_status!(net, rect_status)
     end
-    if erg == 0 && has_merges
-      _sync_merged_results_to_original!()
+    # also after a failed solve: the unmerged path leaves the last iterate
+    # on the net, and the merged one has to do the same, or the net keeps
+    # its start voltages and an empty Q-limit log (sp_case60 with a closed
+    # coupler: the log of a run stopped at max_iter was empty)
+    if has_merges && (erg == 0 || rect_status !== nothing)
+      _sync_merged_results_to_original!(erg == 0)
     end
     if validate_limits_after_pf && (verbose > 0)
       printFinalLimitValidation(has_merges ? net : wnet; q_headroom = q_limit_violation_headroom)

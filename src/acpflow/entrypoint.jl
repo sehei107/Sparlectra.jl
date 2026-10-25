@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -83,6 +83,9 @@ function _run_sparlectra(; net::Union{Nothing,Net} = nothing, casefile::Union{No
   net !== nothing && path !== nothing && throw(ArgumentError("run_sparlectra: path is only valid with casefile."))
   cfg = config === nothing ? active_sparlectra_config() : config
   _maybe_print_startup_latency_hint(cfg)
+  # a flat start is a flat start: no projection, no DC seed, no stored
+  # voltages (the service applied this in import_case already; idempotent)
+  cfg, _ = _flatstart_profile_config(cfg)
   if net === nothing
     import_ctx = _import_sparlectra_context(casefile::String, path, cfg; performance_profile = performance_profile)
     run_net = import_ctx.net
@@ -92,7 +95,7 @@ function _run_sparlectra(; net::Union{Nothing,Net} = nothing, casefile::Union{No
     run_cfg = cfg
   end
   # power_flow.external_grid (issue #299): convert the marked slack into a
-  # non-ideal source before solving. Idempotent — CGMES runs may have applied
+  # non-ideal source before solving. Idempotent: CGMES runs may have applied
   # it already in the API layer (with delivery-declared Sk''/RX values).
   # the net's own feeder data wins in :auto mode (a CGMES ExternalNetworkInjection
   # or a case file's PGM `source` with sk/rx_ratio); without any, the config numbers apply
@@ -115,6 +118,9 @@ end
 # A CGMES delivery declares it, and so does a case file whose PGM `source`
 # states `sk`/`rx_ratio` - PGM models a source as a voltage source BEHIND
 # that impedance, so the numbers belong to the model, not to the metadata.
+# A slack made of a CGMES EquivalentInjection (an X-node holding the SV angle
+# reference) declares its feeder through its internal impedance r + jx
+# (_ei_record_sk_rx); the SCF reader keeps that record for such a source.
 # Returns nothing when the slack bus carries no usable declaration.
 function _declared_slack_feeder(net::Net, shortcircuit)::Union{Nothing,NamedTuple}
   isempty(net.slackVec) && return nothing
@@ -131,6 +137,11 @@ function _declared_slack_feeder(net::Net, shortcircuit)::Union{Nothing,NamedTupl
     rx = f.maxR1ToX1Ratio
     rxv = (rx === nothing || !isfinite(Float64(rx)) || Float64(rx) < 0.0) ? 0.1 : Float64(rx)
     return (sk_MVA = sk, rx = rxv)
+  end
+  for e in shortcircuit.equivalent_injections
+    (e.bus !== nothing && String(e.bus) == slack) || continue
+    f = _ei_record_sk_rx(e, vn)
+    f === nothing || return f
   end
   return nothing
 end

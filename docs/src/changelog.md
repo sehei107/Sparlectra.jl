@@ -1,3 +1,136 @@
+# Version 0.60.0 - 2026-10-25
+
+Quasi-stationary time series (QSTS) and tap estimation per tap changer.
+
+## Breaking
+- SCF 1.3: files written by 0.60.0 (including the shipped cases) cannot be read by 0.50.0. 0.60.0 still reads 1.0 to 1.2.
+- Tap estimation is on by default (`state_estimation.tap_estimation.enabled`). SE results change on cases with tap changers. A failed run falls back to the run without it.
+- `se_tap_estimates.csv`: one row per tap changer with `status` and `reason`; columns renamed to `step_transferred`, `step_estimated`, `step_estimated_raw`, new column `notice`; `frozen_reason` removed.
+
+## Added
+- QSTS on SCF time series and CGMES snapshot series, with event lists and a chart per element in the Web UI. See [QSTS](qsts.md).
+- Tap estimation per tap changer from CGMES, PowSyBl, SCF or DTF changer data. A changer the measurements cannot see keeps its step and names the reason.
+- Link flow measurements as WLS rows; a wrong coupler meter is eliminated like a branch flow.
+- Range check of voltage measurements: 0 kV at a dead bus takes the bus out, an implausible value at a live bus is replaced by the imported voltage with a wider sigma.
+- Zero injections: `state_estimation.zero_injection_sigma_mva` (default 1e-3), condition number in the report, multipliers per bus under `constraint`.
+- Start ladder `state_estimation.start_ladder` (default on): if the flat start does not converge, the estimate restarts from the voltages stored in the case.
+- Warning for a mesh without an active power measurement (a second converged solution can exist).
+- Demo case `sp_case6tap`: ratio and phase tap changer on one transformer, three controllers. See [Demo cases](demo_cases.md).
+- Measurement generator rounds values to a resolution per quantity (`resolution_u_kv`, `resolution_p_mw`, `resolution_q_mvar`, `resolution_i_a`, `resolution_angle_deg`, default 0 = off).
+
+## Changed
+- Tap estimation releases only transformers with a declared tap changer model; a plain MATPOWER transformer keeps its ratio.
+- MATPOWER import: a branch with TAP 1, no shift and the same nominal voltage at both ends is a line.
+- A tap estimate far outside the band keeps the transferred step, status `out_of_range`.
+- `state_estimation.max_eliminations` default 5 (was 3).
+- SCF import keeps branch and appliance names from the file.
+- CGMES slack follows the SV angle reference also at an EquivalentInjection; a grid-following unit is not chosen as island slack.
+- Q-limit guard: a machine with a narrow Q band stays PV inside its band (`narrow_range_mode: prefer_pq` restores the old behaviour).
+- Web UI: an abort stops the state estimation within seconds.
+- MATPOWER import: the missing `bus_name` warning (with `matpower_import.apply_bus_names`) comes once per case, not on every import.
+
+## Fixed
+- CGMES import: P limits of injections, transformer magnetizing split, phase tap changer reactance with `xMin`/`xMax`, choice among boundary sets.
+- Reports: bus powers of coupler clusters, distributed slack shares, coupler flows next to a bus shunt.
+- State estimation: warm start, write-back and reported angles keep the model slack angle; the estimate is unchanged.
+- State estimation: a busbar fed only through couplers keeps its zero-injection and voltage rows and no longer splits into two islands.
+- State estimation: when the check withdraws one tap changer of a transformer, the other one is estimated again.
+- APSLF: injections from generators and loads as in the Newton solver, reactive limits compared in the same terms. A run that leaves a voltage-regulated machine outside its Q band fails its limit status and names the buses; before it was reported as converged.
+- Web UI: update check without the GitHub API, sysimage rebuild, window position on a missing monitor.
+
+# Version 0.50.0 - 2026-10-18
+
+Measurement table for the state estimation, `addACLine!` in physical units.
+
+## Breaking
+- `addACLine!` takes totals in ohm and siemens, `addACLinePerKm!` takes per-km values and the system frequency; `paramsBasedOnLength` is removed. Lines built from `c_nf_per_km` had their charging Z_base times too small and give other results now. See Migrating from 0.42 in the documentation.
+- A YAML root key with a dot (`power_flow.max_iter: 3`) is rejected; use the nested form.
+- SCF 1.2: current sensors in A, measurement rows follow the measurement table; measurement CSV v1 files are refused with the converter named.
+## Added
+- Zero injections as equality constraints in the state estimation (`state_estimation.zero_injection: constraint`): exact, without the conditioning cost of a tiny sigma. See [State Estimation](state_estimation.md).
+- Measurement table for the state estimation, addressed by CGMES mRID or element name, with pseudo measurements and sigma per voltage level (editable in the Web UI).
+- System frequency per network (`model.nominal_frequency_hz`, default 50 Hz), selectable in the Web UI; enters lines built from per-km capacitance and SCF `c1`, cases in ohm, siemens or per unit are unaffected.
+- Web UI CSV view sorts text columns and hides columns and rows.
+- Web UI: Check for updates in the Info panel; a copy made by the one-line install installs the new release after a confirm and keeps the old copy as Sparlectra.old.
+- Web UI case options follow the case format; the system frequency shows for every format and is greyed where it has no effect.
+- CGMES PowerElectronicsConnection (wind, solar, battery converters) is imported as PQ or voltage-regulating injection (`cgmes_import.map_power_electronics`, default off), exported as EquivalentInjection, and fed into the short circuit as a current source from `maxIFault`.
+- CGMES bank regulators are imported as shunt controllers (`cgmes_import.shunt_control`, default off).
+- Controller priority: a controller of lower rank waits until the higher ranks are in their band or at a limit. Tap controllers get a control range inside the physical tap range.
+## Changed
+- The measurement table is the one measurement format: the Web UI generator and the shipped sets use it, `convertMeasurementsV1` converts old files.
+- Zero injection rows at passive buses are added in every SE path (`state_estimation.zero_injection`, default `on`).
+- Shipped demo cases rebuilt; transformer magnetizing from the nameplate is now in the files, so their results change (losses 2 to 4 percent).
+- Test suite rebuilt around reference solutions: `fast` checks known networks against MATPOWER headers, ENTSO-E state variables, hand calculations and OpenLoadFlow in under 30 s; pinned regression tests run in the new `legacy` profile; `adapters` is split into `cgmes` and `formats`.
+- An SE run writes its measurements as a table with `measurements_verdict.csv` next to it; `se_bad_data.csv` is gone.
+- A bus built with `addBus!` keeps its `busName` as node name; auxiliary buses are marked by type and listed in `mpc.sparlectra.aux_buses`.
+## Fixed
+- Generated measurement sets at buses joined by closed couplers carried the coupler flow in their injections.
+- Tap positions of CGMES tap changers in SE, SCF, MATPOWER and scenarios.
+- Exports: MATPOWER lines, ratio-1 transformers and the voltage setpoints of an unsolved net, SCF shunt measurements and SVC shunts.
+- The short-circuit page claimed breaking and thermal currents were computed; only Ik'', ip and κ are.
+- MATPOWER export writes the tap ratio in effect, so other tools solve the same network; files of earlier versions read as before (#513).
+- The topology hypothesis test uses the settings of the run it tests; a MATPOWER model-only export keeps three-winding star points auxiliary.
+
+# Version 0.42.0 - 2026-10-16
+
+CSV view in the Web UI and CGMES import fixes.
+## Added
+- Web UI CSV view: significant digits (default 5), power columns in W, kW or MW, and rows sorted by a numeric column, largest first.
+## Fixed
+- CGMES import: three-winding legs with negative r are kept; magnetizing of three-winding transformers sits at the star point; a leg with an open side terminal stays in the model; network injection P limits are read as delivered; every tap changer carries its range, table and per-step impedance; active power limits of 9999 MW and above are placeholders and no longer win slack choices or distributed-slack weights.
+- Distributed slack: `Pg` is the schedule, `Pg eff` the delivered generation; units receive their share; island participation in network numbers.
+- Export and Web UI: no tap row at ratio 1 in the MATPOWER export; CSV export reported as skipped where no detailed CSV exists; a start from a second checkout keeps the sysimage of the other one.
+## Changed
+- Tap data is set on every imported tap changer, also one the import does not regulate; results change where a controller configured later stepped on the default grid.
+
+# Version 0.41.0 - 2026-10-16
+
+CGMES import corrections and solver fixes.
+## Fixed
+- CGMES import: tap tables, the impedance side of tapped windings, three-winding star points, equivalent branches, magnetizing admittance, `controlEnabled` and islands without a source or reference follow the delivery, so operational models solve to their state variables.
+- Solver and controllers: Q-limit clamps with Q(U) and P(U) controllers, the tap probe on networks with several islands, parallel settings in `run_control!`, slack power at closed links, isolated buses that were retyped after every solve, and the reported generator output of slack and PV buses with their own load.
+- N-1 and short circuit: closed switch groups count as one node, so load behind a switch is shed with its group and the short circuit includes sources on coupled sections; a placeholder rated power no longer makes a machine an ideal source.
+## Deprecated
+- `addACLine!` with `c_nf_per_km` reads the susceptance as per unit and warns; the call changes in 0.50.0.
+
+Breaking only for positional construction of `CGMESImportResult`. Additive fields and keywords, see the release notes.
+
+# Version 0.40.1 - 2026-10-13
+
+## Fixed
+- Changelog wording.
+
+# Version 0.40.0 - 2026-10-12
+
+## Added
+- Correlated contingency events for SCF cases (`contingency.events.*`) and N-2 branch pairs (`contingency.pairs.*`).
+- `kind` and `elements` in contingency results and CSV; SCF cases show the names from the case file.
+## Changed
+- Breaking: `ContingencyCase.element` is now `elements`.
+- Saved configuration strings (paths, patterns, quotes) read back unchanged.
+## Removed
+- Breaking: `retry_flat_start` and the `sparlectra.contingencies` block of SCF files.
+## Fixed
+- Two generator outages in one scenario removed the wrong second unit.
+
+# Version 0.32.1 - 2026-10-10
+
+Documentation pass and three numerical fixes.
+## Added
+- Web UI: position and size is now stored
+## Fixed
+- Web UI: the DC solver selection on the Settings page is applied
+- UPFC full model: the shunt converter now supplies the active power the series converter exchanges with the line (the balance had the wrong sign).
+- Transformers from nameplate data carry their magnetizing branch and the resistance from the short-circuit loss; both were off by unit factors or dropped.
+- State estimation: a J below the band no longer triggers the sequential elimination.
+
+# Version 0.32.0 - 2026-10-09
+
+CSV format from the regional settings, Web UI start without a sysimage.
+## Changed
+- The CSV format follows the regional settings of the machine by default (`output.csv_format = auto`, Windows and Linux): a decimal comma writes `excel_de`, a decimal point `excel_us`. Every Web UI configuration starts the release with `auto` once; a format chosen afterwards stays.
+- Web UI without a sysimage: the start page is compiled once with the package, so the window shows it within seconds.
+
 # Version 0.31.3 - 2026-10-07
 
 Rescued power flows say so.
@@ -854,7 +987,7 @@ IEC 60909 short-circuit stage (#277), CGMES export.
 
 ## Improved
 
-- `compareWithSV` removes the median angle offset before judging deltas — an IGM cut from a CGM keeps the global angle reference (a real 50Hertz delivery: ~27° on every bus, meaning nothing). Offset is reported separately.
+- `compareWithSV` removes the median angle offset before judging deltas: an IGM cut from a CGM keeps the global angle reference (a real delivery: ~27° on every bus, meaning nothing). Offset is reported separately.
 - Start scripts `start_webui.sh/.bat` and `install_webui.sh/.bat` in the repo root.
 - SVC-style voltage control via `addShuntVoltageControl!`; at the MVAr limit the device clamps to constant B (Q then follows V²). `controllableElements(net)` lists all controllers in one vocabulary.
 - PSTs update X(α) on tap moves when the winding carries reactance data. Fixed along the way: DTF importer dropped the phase-tap model, and the phase-probe compared stale flows against themselves.

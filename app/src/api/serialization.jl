@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -158,11 +158,11 @@ function _yaml_scalar(value)::String
   value isa Bool && return value ? "true" : "false"
   value isa Integer && return string(value)
   value isa AbstractFloat && return isfinite(value) ? string(value) : "null"
-  value isa Symbol && return String(value)
-  text = string(value)
-  isempty(text) && return "\"\""
-  occursin(r"[:#\[\]{},&*!|>'\"%@`]|^[-?]|\s$|^\s", text) && return string('"', replace(text, "\\" => "\\\\", "\"" => "\\\""), '"')
-  return text
+  # strings and symbols follow the library's one quoting rule, so the
+  # configuration reader gives back exactly what was written (Windows paths,
+  # regular expressions, quotes)
+  value isa Symbol && return yaml_string_text(String(value))
+  return yaml_string_text(string(value))
 end
 
 function _write_yaml(io::IO, value; indent::Int = 0)
@@ -170,16 +170,18 @@ function _write_yaml(io::IO, value; indent::Int = 0)
   if value isa AbstractDict
     for key in sort!(collect(keys(value)); by = string)
       item = value[key]
+      # bare or quoted as the reader reads it back (_yaml_key_text)
+      ktext = _yaml_key_text(key)
       if item isa AbstractDict
-        println(io, prefix, key, ":")
+        println(io, prefix, ktext, ":")
         _write_yaml(io, item; indent = indent + 2)
       elseif item isa AbstractVector && all(entry -> !(entry isa AbstractDict || entry isa AbstractVector), item)
-        println(io, prefix, key, ": [", join((_yaml_scalar(entry) for entry in item), ", "), "]")
+        println(io, prefix, ktext, ": [", join((_yaml_scalar(entry) for entry in item), ", "), "]")
       elseif item isa AbstractVector
-        println(io, prefix, key, ":")
+        println(io, prefix, ktext, ":")
         _write_yaml(io, item; indent = indent + 2)
       else
-        println(io, prefix, key, ": ", _yaml_scalar(item))
+        println(io, prefix, ktext, ": ", _yaml_scalar(item))
       end
     end
   elseif value isa AbstractVector

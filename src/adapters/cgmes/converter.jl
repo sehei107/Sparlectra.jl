@@ -32,15 +32,30 @@ struct CGMESAdapter <: FormatAdapter end
 
 The adapter-scope options of the CGMES conversion:
 the `cgmes_import` configuration surface plus the run kind the start-value
-decision may depend on.
+decision may depend on, and the system frequency `f_nom` in Hz the
+conversion writes into the case (`model.nominal_frequency_hz`; the CGMES
+deliveries tested state none).
 """
 Base.@kwdef struct CGMESAdapterOptions
   start_values::Symbol = :auto
   require_boundary::Bool = true
   infer_base_voltages::Bool = false
   hvdc_mode::Symbol = :injections
+  # EnergySource objects as PQ injections (cgmes_import.map_energy_source)
+  map_energy_source::Bool = false
+  # PowerElectronicsConnection objects as injections
+  # (cgmes_import.map_power_electronics)
+  map_power_electronics::Bool = false
+  # bank regulators from the delivery (cgmes_import.shunt_control)
+  shunt_control::Bool = false
+  # the DY profile onto the machines (cgmes_import.read_dynamics)
+  read_dynamics::Bool = false
+  # EquivalentInjections on the SV angle reference or a boundary node as
+  # sources (cgmes_import.equivalent_injection_as_source)
+  equivalent_injection_as_source::Bool = false
   run_kind::Symbol = :powerflow
   name::String = ""
+  f_nom::Float64 = model_config().nominal_frequency_hz
 end
 
 detect(::Type{CGMESAdapter}, path::AbstractString)::Bool = begin
@@ -59,11 +74,11 @@ The CGMES importer of the adapter contract: the
 delivery builds natively through importCGMES. The method maps the
 adapter options that the importer consumes; the SV start-value
 decision and the run-kind gating live in the config-rich service
-layer (_import_cgmes carries the thirteen cgmes_import values), which
+layer (_import_cgmes carries the seventeen cgmes_import values), which
 stays the path the services use.
 """
 function import_net(::CGMESAdapter, path::AbstractString, opts::CGMESAdapterOptions; config::SparlectraConfig = active_sparlectra_config())::Net
-  net = createNetFromCGMES(path = String(path), require_boundary = opts.require_boundary, infer_base_voltages = opts.infer_base_voltages, hvdc_mode = opts.hvdc_mode, bus_shunt_model = config.model.bus_shunt_model, name = isempty(opts.name) ? basename(String(path)) : opts.name)
+  net = createNetFromCGMES(path = String(path), require_boundary = opts.require_boundary, infer_base_voltages = opts.infer_base_voltages, hvdc_mode = opts.hvdc_mode, map_energy_source = opts.map_energy_source, map_power_electronics = opts.map_power_electronics, shunt_control = opts.shunt_control, read_dynamics = opts.read_dynamics, equivalent_injection_as_source = opts.equivalent_injection_as_source, bus_shunt_model = config.model.bus_shunt_model, name = isempty(opts.name) ? basename(String(path)) : opts.name)
   _apply_config_net_parameters!(net, config)
   return net
 end
@@ -80,8 +95,14 @@ function cgmes_adapter_options(cfg::SparlectraConfig; run_kind::Symbol = :powerf
     require_boundary = cg.require_boundary,
     infer_base_voltages = cg.infer_base_voltages,
     hvdc_mode = cg.hvdc_mode,
+    map_energy_source = cg.map_energy_source,
+    map_power_electronics = cg.map_power_electronics,
+    shunt_control = cg.shunt_control,
+    read_dynamics = cg.read_dynamics,
+    equivalent_injection_as_source = cg.equivalent_injection_as_source,
     run_kind = run_kind,
     name = String(name),
+    f_nom = cfg.model.nominal_frequency_hz,
   )
 end
 
@@ -112,10 +133,18 @@ function convert_case(::CGMESAdapter, source::AbstractString, opts::CGMESAdapter
       "require_boundary" => opts.require_boundary,
       "infer_base_voltages" => opts.infer_base_voltages,
       "hvdc_mode" => String(opts.hvdc_mode),
+      "map_energy_source" => opts.map_energy_source,
+      "map_power_electronics" => opts.map_power_electronics,
+      "shunt_control" => opts.shunt_control,
+      "read_dynamics" => opts.read_dynamics,
+      "equivalent_injection_as_source" => opts.equivalent_injection_as_source,
     ),
+    # the conversion builds under its own configuration: without the
+    # frequency here the net (and meta.f_nom, c1) would take the default
+    "model" => Dict{String,Any}("nominal_frequency_hz" => opts.f_nom),
   )
   cfg = load_sparlectra_config(DEFAULT_SPARLECTRA_CONFIG_PATH; reload = true, overrides = overrides)
   cg = _import_cgmes(String(source), cfg; name = isempty(opts.name) ? basename(String(source)) : opts.name, run_kind = opts.run_kind)
-  case = net_to_scfcase(cg.result.net; source_format = "cgmes", source_reference = basename(String(source)), include_start_state = true)
+  case = net_to_scfcase(cg.result.net; f_nom = opts.f_nom, source_format = "cgmes", source_reference = basename(String(source)), include_start_state = true)
   return cgmes_enrich_case!(case, cg.result.net)
 end

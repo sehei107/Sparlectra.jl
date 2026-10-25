@@ -23,10 +23,11 @@
 #          it (0.10.0 -> 0.11.0 was the first occurrence). Split the claim
 #          instead: the fresh file names the CURRENT version, and
 #          everything apart from that stamp is byte for byte. Both callers
-#          use these helpers so they cannot drift apart.
+#          use these helpers so they cannot drift apart. Also the bitwise
+#          net comparison the apply!/restore! tests share.
 
-"The provenance stamp an SCF file carries, whatever release wrote it."
-const SCF_PROVENANCE_STAMP = r"\"created_by\": \"Sparlectra [^\"]*\""
+"The provenance stamp an SCF file carries, whatever release or hand wrote it (sp_case6tap is hand-written)."
+const SCF_PROVENANCE_STAMP = r"\"created_by\": \"[^\"]*\""
 
 "An SCF document with its provenance stamp neutralized, for byte comparison."
 scf_without_stamp(text::AbstractString) = replace(String(text), SCF_PROVENANCE_STAMP => "\"created_by\": \"<provenance stamp>\"")
@@ -139,6 +140,8 @@ const _SCF_RT_ALLOWED = Dict{Symbol,Dict{Symbol,String}}(
     :busOriginalNameDict => "source-format naming aid; the reference names are compared directly",
     :busOrigIdxDict => "source-format index aid; the bus order is compared directly",
     :cgmes_ids => "CGMES mRIDs travel in `external_id` and are compared through the names",
+    :_frequency_from_case => "where the frequency came from, not the frequency: the SCF file states the key value as meta.f_nom, the direct MATPOWER import takes the key itself; nominal_frequency_hz is compared",
+    :_frequency_used => "whether a capacitance was converted: the SI file carries c1 where the MATPOWER source carried b in pu; the susceptances themselves are compared",
   ),
   :branch => Dict{Symbol,String}(
     :tap_min => "the regulation band snaps to the step grid; documented tolerance of less than one step",
@@ -190,4 +193,30 @@ function scf_roundtrip_field_diffs(a, b)
     end
   end
   return msgs
+end
+
+# Bitwise comparison of two nets after apply! and restore! (the QSTS rows of
+# test_scenarios.jl, the steps of test_scf_series.jl): every scalar,
+# real-vector or immutable field of every node, branch, prosumer, shunt and
+# tap controller with isequal (0.0 and -0.0 differ), plus the net vectors the
+# ops and the refresh write. The tap controllers sit on the transformer windings, which
+# scf_roundtrip_field_diffs compares by count only.
+function _qsts_bitwise_diffs(a::Sparlectra.Net, b::Sparlectra.Net)::Vector{String}
+  out = String[]
+  compared(x) = x isa Number || x isa Symbol || x isa AbstractString || x isa Enum || x === nothing || x isa AbstractVector{<:Real} || !ismutable(x)
+  for (kind, va, vb) in (("node", a.nodeVec, b.nodeVec), ("branch", a.branchVec, b.branchVec), ("prosumer", a.prosumpsVec, b.prosumpsVec), ("shunt", a.shuntVec, b.shuntVec), ("tap_controller", Sparlectra._tap_controllers(a), Sparlectra._tap_controllers(b)))
+    if length(va) != length(vb)
+      push!(out, string(kind, ": ", length(va), " vs ", length(vb)))
+      continue
+    end
+    for i in eachindex(va), f in fieldnames(typeof(va[i]))
+      x = getfield(va[i], f)
+      y = getfield(vb[i], f)
+      (compared(x) || compared(y)) && !isequal(x, y) && push!(out, string(kind, " ", i, ".", f, ": ", x, " vs ", y))
+    end
+  end
+  for f in (:isoNodes, :slackVec, :qmin_pu, :qmax_pu)
+    isequal(getfield(a, f), getfield(b, f)) || push!(out, string("net.", f, ": ", getfield(a, f), " vs ", getfield(b, f)))
+  end
+  return out
 end

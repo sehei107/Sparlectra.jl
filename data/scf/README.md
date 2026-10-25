@@ -15,25 +15,27 @@ The cases carry invented PLACE names as reference names
 named by their endpoints (`Ostheim_Neuwiese_1`/`_2` for a double circuit;
 sp_case60's deliberate same-name pair carries the bare corridor name on
 BOTH legs), and transformers by their station plus both voltage levels
-(`Moorau_110_20`, role suffix `_PST` where needed). The short
-technical handle (`H1`, `A12`, `MC9`) stays as `external_id`, so every
-shipped file demonstrates the format's name-vs-external_id channel. The
-two small cases use hand-picked names, sp_case60 and sp_case188 draw
-from the deterministic prefix-root pool in the builder; all names are
-deliberately compact (5 to 9 characters a place) and ASCII only, because
-they travel through ids, CSVs and JSON.
+(`Moorau_110_20`, role suffix `_PST` where needed; sp_case6tap names
+them `T<n>_<from>_<to>`, `T1_Nordwerk_Kreuzau`, after the labels of its
+single-line diagram). The short technical handle (`H1`, `A12`, `MC9`)
+stays as `external_id`, so every shipped file demonstrates the format's
+name-vs-external_id channel. The three small cases use hand-picked
+names, sp_case60 and sp_case188 draw from the deterministic prefix-root
+pool in the builder; all names are deliberately compact (5 to 9
+characters a place) and ASCII only, because they travel through ids,
+CSVs and JSON.
 
 Each `sp_case*` ships as four files: the case itself (`.scf.json`, with
 roles, human component names, a solved `start_state`, a scenarios block,
 short-circuit study buses, and its measurements), a noisy measurement CSV
 (seed in the file header), a bad-data variant with one deliberately gross
 reading for the diagnostics demo, and a tracked reference fixture under
-`test/fixtures/demo_cases/`. The fast-profile group `demo_cases` runs all
-five run kinds (power flow, N-1, scenarios, state estimation, short
-circuit) against those fixtures, so the cases are regression fixtures,
-not decoration. A fresh install can run every run kind on them without
+`test/fixtures/demo_cases/`, written by `tools/build_demo_cases.jl`. The
+`extd` group `demo_cases` runs the power flow, the state estimation and the
+declared controllers on every case. A fresh install can run every run kind on them without
 downloading anything; new tests should use them instead of downloaded
-cases.
+cases. `sp_case6tap` is the exception: written by hand, one measurement table
+without a bad-data variant, no start state, no fixture (see its section).
 
 ## sp_case5 (5 buses, the hand-checkable entry)
 
@@ -46,6 +48,27 @@ parallel path (`line_Borntal_Lindhof_out`: 122 percent), the
 transformer outage islands the 20 kV load. Reference: 0.94 MW losses,
 SE J 37.1 at dof 26.
 
+## sp_case6tap (6 buses, tap control and tap estimation)
+
+Hand-written test net with its single-line diagram
+`sp_case6tap_single_line.svg`. Two 220 kV buses (slack `Nordwerk_220`,
+PV machine `Suedfeld_220`) feed the meshed 110 kV buses `Kreuzau_110`,
+`Mittelbach_110` and `Ostheim_110` through two coupling transformers that
+close a loop; `T3_Mittelbach_Lindenau` (110/20 kV) feeds `Lindenau_20`.
+`T1_Nordwerk_Kreuzau` carries a ratio changer (+-12 steps of 1.25
+percent) and a phase changer (+-20 steps of 1 degree),
+`T2_Suedfeld_Ostheim` a ratio changer +-12 steps of 1.25 percent without
+a controller, T3 a ratio changer of the same grid. Controllers: the T1
+ratio changer holds `Kreuzau_110` at 1.00 pu, the T3 ratio changer
+`Lindenau_20` at 1.00 pu (deadband 0.01 pu each), the T1 phase changer
+holds 60 MW over T1 (deadband 4 MW). All taps start at position 0. With
+the controllers the power flow settles at T1 ratio position 0, phase
+position -1, T3 position -3: `Kreuzau_110` 1.008 pu, `Lindenau_20`
+0.993 pu, 62.1 MW over T1. The measurement table `sp_case6tap.measurements.csv`
+(seed 20261024) is taken from that settled state, so its tap steps differ
+from the steps in the case file and the tap estimation has work to do. No
+case configuration file.
+
 ## sp_case14 (14 buses, the regulated feeder)
 
 Meshed 110 kV level (ring, two chords, the double circuit
@@ -56,6 +79,8 @@ in 5 outer iterations), a fixed-tap transformer one step off neutral,
 and a capacitive shunt. Three N-1 outages island the load-only feeder
 (14 of 17 converge). The fixture carries the controller PARAMETERS next
 to the result numbers. Reference: 1.68 MW losses, SE J 78.4 at dof 83.
+
+The QSTS example series `sp_case14_day.qsts.zip` and its control file live in `data/qsts`.
 
 ## sp_case60 (60 buses, the feature-dense operated grid)
 

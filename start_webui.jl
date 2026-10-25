@@ -18,6 +18,11 @@
 #          macOS and Windows go through exactly the same code: check for a
 #          usable sysimage (tools/sysimage_launcher.jl), offer to build one
 #          when it is missing or outdated, then relaunch through the image.
+#          Started from a terminal, it then asks GitHub for a newer release
+#          and offers to install it (an installed copy only); only an answer
+#          y or yes installs. `--no-update-check` or SPARLECTRA_UPDATE_CHECK=0
+#          skips the check for unattended starts, and so does
+#          JULIA_PKG_OFFLINE=true.
 
 # --- sysimage handling ------------------------------------------------------
 # This runs BEFORE `using Sparlectra`, deliberately: the launcher module sits
@@ -25,7 +30,7 @@
 # no package load. Julia can only take an image at process start (-J), so a
 # process that wants one has to start itself again.
 include(joinpath(@__DIR__, "tools", "sysimage_launcher.jl"))
-using .SysimageLauncher: handle_sysimage, prepare_environments, repair_environment, ENV_ONLY_FLAG
+using .SysimageLauncher: handle_sysimage, console_answer, prepare_environments, repair_environment, running_on_sysimage, warm_webui_page, ENV_ONLY_FLAG
 
 const _SPARLECTRA_LIBRARY_DIR = abspath(@__DIR__)
 const _SPARLECTRA_APP_DIR = abspath(joinpath(@__DIR__, "app"))
@@ -73,25 +78,66 @@ if _ENV_ONLY
   exit(0)
 end
 
-function main()
-  # No warm-up: either this process runs on the sysimage, where the code is
-  # already compiled, or the user chose to compile on first use and was told
-  # so. A hidden warm-up run on top of that only delayed the first page.
-  server = SparlectraApp.start_sparlectra_webui(open_browser = true)
-  # nothing = a Sparlectra Web UI already runs on the port; it was opened in
-  # the browser instead, so there is no new server task to wait on.
-  server === nothing && return nothing
+# --- update check -----------------------------------------------------------
+# After the sysimage decision, because the check lives in SparlectraApp: on a
+# sysimage it runs in the relaunched process, whose id the updater waits for.
+# Only an installed copy is offered the install, and only an explicit yes
+# installs. When the updater runs, this process ends without a server; the
+# updater starts the new version. The question reads the console through
+# console_answer like the sysimage question, so a reader left over from that
+# question after its timeout takes the answer to this one instead of racing
+# with a second reader for the same line.
+function offer_update()
+  ask = prompt -> console_answer(prompt; seconds = SparlectraApp.WEBUI_CONSOLE_UPDATE_ANSWER_SECONDS)
+  SparlectraApp.webui_console_update_offer(; ask) === :started && exit(0)
+  return nothing
+end
+Base.invokelatest(Base.invokelatest(getfield, @__MODULE__, :offer_update))
 
+function main()
+  # On a sysimage the pages are compiled already and the window opens at
+  # once. Without one, the package image of the application carries the
+  # compiled start page (app/src/precompile.jl); the launcher starts the
+  # server without a window, renders the start page once through the
+  # server's own routing call (same runtime, same argument types as a GET
+  # request, so the window's request finds everything ready) and opens the
+  # window when the page is ready, a few seconds later.
+  on_sysimage = running_on_sysimage()
+  server = SparlectraApp.start_sparlectra_webui(open_browser = on_sysimage)
+  # nothing = a Sparlectra Web UI already runs on the port; on a sysimage it
+  # was opened in the browser already, without one it is opened here (that
+  # instance compiled its pages long ago); no new server task to wait on.
+  if server === nothing
+    on_sysimage || SparlectraApp._webui_open_browser("http://127.0.0.1:8080/powerflow")
+    return nothing
+  end
+  # A script run ends the process on SIGINT by default: Julia prints the
+  # signal and a native backtrace, and no handler below ever runs. With this
+  # switch Ctrl+C arrives as an InterruptException in this task, and the
+  # server stops through the same path as Stop Web UI (reason :ctrl_c).
+  Base.exit_on_sigint(false)
+  try
+    if !on_sysimage
+      # the request line split into SubStrings like the server reads it, so
+      # the call meets the code the package image compiled for a real GET
+      warm_webui_page(() -> SparlectraApp.route_sparlectra_webui(split("GET /powerflow")..., Dict{String,String}(); output_root = abspath(SparlectraApp.default_webui_output_root()), runtime = server.runtime).status == 200)
+      SparlectraApp._webui_open_browser(server.url)
+    end
+    SparlectraApp._wait_sparlectra_webui(server)
+  catch err
+    # Ctrl+C during the warmup or the browser start, before the wait
+    err isa InterruptException || rethrow()
+    SparlectraApp._webui_request_shutdown!(server.runtime; reason = :ctrl_c)
+  end
+  # The accept loop aborts running jobs and prints "Sparlectra Web UI
+  # stopped by Ctrl+C." when it ends; the process waits for that line. A
+  # second Ctrl+C while running jobs are aborted ends the wait at once.
   try
     wait(server.task)
   catch err
-    if err isa InterruptException
-      @info "Ctrl+C received; closing Sparlectra Web UI."
-      close(server)
-      return nothing
-    end
-    rethrow()
+    err isa InterruptException || rethrow()
   end
+  return nothing
 end
 
 # VS Code's inline eval runs the whole file as one world age. Since Julia

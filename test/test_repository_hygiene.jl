@@ -19,6 +19,7 @@
 #          reference page or on the explicit exclusion list below
 using Test
 using Unicode
+import SHA
 
 const _HYGIENE_ROOTS = ("docs/src", "src", "test", "examples")
 const _HYGIENE_EXCLUDED_PARTS = Set(["docs/build", "examples/_out", "results", "coverage", ".git", ".julia", "node_modules"])
@@ -67,6 +68,28 @@ function _hygiene_normalize(value::AbstractString)::String
     return lowercase(Unicode.normalize(String(value), :NFC))
 end
 
+# A name that must not appear in the repository, stored only as SHA-256 of
+# its normalized spellings so this file does not carry it either. Every
+# window of 7 or 8 characters that starts with "sch" is hashed and compared.
+const _HYGIENE_FORBIDDEN_SHA256 = Set([
+    "f894e2aef608cf5635b2559c69844e9ee620a270e0df1ae9a25f6017416b7d9a",
+    "2c43dcd8d59a7558af96a78da634bfb2dbd93fef82124b7109a7a48d73f8fa5c",
+    "9bf59152a9eaa11a7b5fe14456b279a33fdf0b1277e8b190de15622242d09f20",
+])
+
+function _hygiene_forbidden_hit(text::AbstractString)::Bool
+    chars = collect(text)
+    n = length(chars)
+    for i in 1:(n - 6)
+        (chars[i] == 's' && chars[i + 1] == 'c' && chars[i + 2] == 'h') || continue
+        for len in (7, 8)
+            i + len - 1 <= n || continue
+            bytes2hex(SHA.sha256(String(chars[i:(i + len - 1)]))) in _HYGIENE_FORBIDDEN_SHA256 && return true
+        end
+    end
+    return false
+end
+
 function _bounded_hygiene_failure(hits::Vector{String}; limit::Int=20)::String
     shown = first(hits, min(limit, length(hits)))
     lines = ["repository hygiene found $(length(hits)) forbidden terminology hit(s):"]
@@ -89,10 +112,12 @@ const _REFERENCE_PAGE_EXCLUDED_SRC = Set([
     "app/src/webui/forms.jl",
     "app/src/webui/handlers.jl",
     "app/src/webui/help_excerpts.jl",  # generated from docs/src by tools/generate_webui_help_excerpts.jl
+    "app/src/webui/help_math.jl",
     "app/src/webui/operations.jl",
     "app/src/webui/options.jl",
     "app/src/webui/routes.jl",
     "app/src/webui/sysimage.jl",
+    "app/src/webui/update.jl",
     "app/src/webui/views.jl",
     "app/src/webui/webui.jl",
 ])
@@ -150,11 +175,6 @@ end
 function run_repository_hygiene_tests()
     @testset "repository hygiene" begin (function ()
         repo = _repository_root()
-        forbidden_terms = _hygiene_normalize.(String[
-            "sch"*"ae"*"fer",
-            "sch"*"ä"*"fer",
-            "sch"*"a"*"fer",
-        ])
         hits = String[]
         for rel in _tracked_hygiene_files(repo)
             rel == "test/test_repository_hygiene.jl" && continue
@@ -162,10 +182,8 @@ function run_repository_hygiene_tests()
             # a tracked path can be absent from the worktree (staged rename or
             # delete); an absent file has no content to scan, its path is checked
             text = isfile(joinpath(repo, rel)) ? _hygiene_normalize(read(joinpath(repo, rel), String)) : ""
-            for term in forbidden_terms
-                occursin(term, normalized_rel) && push!(hits, "$(rel): path contains forbidden token")
-                occursin(term, text) && push!(hits, "$(rel): content contains forbidden token")
-            end
+            _hygiene_forbidden_hit(normalized_rel) && push!(hits, "$(rel): path contains forbidden token")
+            _hygiene_forbidden_hit(text) && push!(hits, "$(rel): content contains forbidden token")
         end
         if !isempty(hits)
             error(_bounded_hygiene_failure(hits))
@@ -206,5 +224,31 @@ function run_repository_hygiene_tests()
             @test Base.invokelatest(checker, repo) == true
         end
         @test true
+    end)() end
+    # an own testset, so an error in the checks above does not skip these
+    @testset "Web UI layering and demo case files" begin (function ()
+        repo = _repository_root()
+        # layering: the Web UI reaches the solver only through the service
+        # layer, so no file under app/src/webui calls a power-flow entry point
+        webui_src = filter(f -> endswith(f, ".jl"), split(chomp(read(`git -C $repo ls-files app/src/webui`, String)), "\n"))
+        solver_calls = ["run" * "pf!", "run" * "pf_rectangular!", "run_complex_nr_" * "rectangular"]
+        layering = String[f for f in webui_src if any(name -> occursin(name, read(joinpath(repo, f), String)), solver_calls)]
+        @test isempty(layering)
+        # the shipped demo cases: provenance in the file, a case config that
+        # pins the tolerance (machine-neutral), the bad-data twin, and the
+        # size budget (420 kB per bundle since the place names, 900 kB total)
+        scf_dir = joinpath(repo, "data", "scf")
+        for name in ("sp_case5", "sp_case14", "sp_case60", "sp_case188")
+          scf_path = joinpath(scf_dir, "$(name).scf.json")
+          @test isfile(scf_path)
+          @test occursin("Self-built Sparlectra demo network", read(scf_path, String))
+          @test occursin("scope: case", read(Sparlectra.case_config_path(scf_path), String))
+          @test Sparlectra.load_case_config(scf_path)["power_flow.tol"] == 1.0e-8
+          bundle = filter(f -> startswith(f, name), readdir(scf_dir))
+          @test sum(filesize(joinpath(scf_dir, f)) for f in bundle) < 420_000
+          baddata = joinpath(scf_dir, "$(name).measurements.baddata.csv")
+          @test isfile(baddata) && occursin("baddata", read(baddata, String))
+        end
+        @test sum(filesize(joinpath(scf_dir, f)) for f in filter(f -> startswith(f, "sp_case"), readdir(scf_dir))) < 900_000
     end)() end
 end

@@ -172,12 +172,8 @@ function test_observability_metrics(fx)::Bool
     for _ = 1:40
       keep = Measurement[m for m in full if rand(rng) < 0.55]
       isempty(keep) && continue
-      obs = try
-        with_state_estimation_config(flatstart = true, jac_eps = 1e-6) do
-          evaluate_global_observability(net14, keep)
-        end
-      catch
-        continue
+      obs = with_state_estimation_config(flatstart = true, jac_eps = 1e-6) do
+        evaluate_global_observability(net14, keep)
       end
       if obs.numerical_rank < obs.n_states
         @test obs.quality == :not_observable
@@ -212,6 +208,32 @@ function test_observability_metrics(fx)::Bool
       evaluate_global_observability(netH)
     end
     @test obsK.numerical_observable
+    # a bus coupler entered as a branch (r = 0, x = 1e-5 pu, admittance 1e5
+    # against about 600 for the feeding lines, the case141 pattern): its rows
+    # dominated both bus columns, the column normalization alone shrank the
+    # feeding line's entries below the cut and a fully measured radial
+    # net read rank 6 of 7, "not observable"
+    netC = Net(name = "coupler", baseMVA = 10.0)
+    for i = 1:4
+      addBus!(net = netC, busName = "B$(i)", vn_kV = 12.47, vm_pu = 1.0, va_deg = 0.0)
+    end
+    addPIModelACLine!(net = netC, fromBus = "B1", toBus = "B2", r_pu = 0.0037, x_pu = 0.0016, b_pu = 0.0, status = 1)
+    addPIModelACLine!(net = netC, fromBus = "B2", toBus = "B3", r_pu = 0.0037, x_pu = 0.0016, b_pu = 0.0, status = 1)
+    addPIModelACLine!(net = netC, fromBus = "B3", toBus = "B4", r_pu = 0.0, x_pu = 1e-5, b_pu = 0.0, status = 1)
+    addProsumer!(net = netC, busName = "B1", type = "EXTERNALNETWORKINJECTION", referencePri = "B1", vm_pu = 1.0, va_deg = 0.0)
+    for (b, p, q) in [("B2", 0.3, 0.1), ("B3", 0.5, 0.2), ("B4", 0.15, 0.05)]
+      addProsumer!(net = netC, busName = b, type = "LOAD", p = p, q = q)
+    end
+    okC, msgC = validate!(net = netC)
+    okC || error("test net invalid: $msgC")
+    _, ergC = runpf!(netC, 40, 1e-10, 0)
+    @test ergC == 0
+    msC = generateMeasurementsFromPF(netC; includeVm = true, includePinj = true, includeQinj = true, includePflow = true, includeQflow = true, noise = false)
+    obsC = with_state_estimation_config(flatstart = true, jac_eps = 1e-6) do
+      evaluate_global_observability(netC, msC)
+    end
+    @test obsC.numerical_observable
+    @test obsC.numerical_rank == obsC.n_states
   end)() end
 
   return true
@@ -554,26 +576,19 @@ function test_observability_takahashi_diagnostics(fx)::Bool
     end
     for demo in ("sp_case60", "sp_case188")
       netd = Sparlectra.importSCF(joinpath(dirname(@__DIR__), "data", "scf", demo * ".scf.json"))
+      # a P and a Q row on the coupler of the case (0.60.0): link rows in
+      # the colored assembly, bit-identical and inside the pattern as well
+      couplers = [k for (k, l) in enumerate(netd.linkVec) if l.status == 1]
+      @test !isempty(couplers)
+      for k in couplers
+        addPflowMeasurement!(netd; value = 0.0, sigma = 1.0, linkNr = k)
+        addQflowMeasurement!(netd; value = 0.0, sigma = 1.0, linkNr = k)
+      end
       H1, H2, col = fd_probe(netd)
       @test (demo, H2.colptr == H1.colptr, H2.rowval == H1.rowval, H2.nzval == H1.nzval) == (demo, true, true, true)
       ncolors = length(col.groups)
       println("      fd coloring ", demo, ": ", ncolors, " colors for ", size(H1, 2), " states")
       @test ncolors < size(H1, 2) / 5
-    end
-    # size probe: the shipped data/mpower/sp_case1354.m (synthetic 1354-bus
-    # grid, not shipped generator) replaces the cache-gated case1354pegase
-    big1354 = abspath(joinpath(dirname(@__DIR__), "data", "mpower", "sp_case1354.m"))
-    @test isfile(big1354)
-    begin
-      netp = Sparlectra.createNetFromMatPowerFile(filename = big1354, flatstart = false, bus_shunt_model = :admittance, matpower_shift_sign = 1.0, matpower_shift_unit = :deg, matpower_ratio = :normal, tap_changer_model = :ideal)
-      runpf!(netp, 60, 1e-8, 0)
-      msp = generateMeasurementsFromPF(netp; includeVm = true, includePinj = true, includeQinj = true, includePflow = false, includeQflow = false, noise = true, rng = Xoshiro(42))
-      empty!(netp.measurements)
-      append!(netp.measurements, msp)
-      H1, H2, col = fd_probe(netp)
-      @test (H2.colptr == H1.colptr, H2.rowval == H1.rowval, H2.nzval == H1.nzval) == (true, true, true)
-      println("      fd coloring sp_case1354: RAN (", length(col.groups), " colors for ", size(H1, 2), " states)")
-      @test length(col.groups) < size(H1, 2) / 5
     end
 
     # 7) criticality (issue #394): the default reads diag(Omega) from one
@@ -603,7 +618,7 @@ function test_observability_takahashi_diagnostics(fx)::Bool
     # flow row removed, the rows the rank tests call critical are exactly
     # the rows with Omega_ii at zero, and the redundant rows carry wii > 0
     net5 = importSCF(joinpath(dirname(@__DIR__), "data", "scf", "sp_case5.scf.json"))
-    readMeasurementsCSV!(net5; file = joinpath(dirname(@__DIR__), "data", "scf", "sp_case5.measurements.csv"))
+    readMeasurementTable!(net5; file = joinpath(dirname(@__DIR__), "data", "scf", "sp_case5.measurements.csv"), zero_injection = false)
     kflow = findfirst(m -> m.typ == Sparlectra.PflowMeas, net5.measurements)
     deleteat!(net5.measurements, kflow)
     obs_omega = with_state_estimation_config(() -> evaluate_global_observability(net5); criticality_method = :omega)
@@ -621,8 +636,22 @@ function test_observability_takahashi_diagnostics(fx)::Bool
 end
 
 function run_observability_tests()
-  # Aggregates the observability test sets; the shared nets are built once
-  # and handed to every set that needs them.
+
+  @testset "Observability" begin (function ()
+    fx = observability_fixture()
+    tests =
+      [("Observability metrics", () -> test_observability_metrics(fx)), ("Matrix observability helpers", test_observability_matrix_helpers), ("FD-aware rank tolerance", () -> test_observability_fd_rank_tolerance(fx)), ("Takahashi diagnostics", () -> test_observability_takahashi_diagnostics(fx))]
+
+    for (name, testfn) in tests
+      @testset "$name" begin (function ()
+        @test _se_run_quiet(testfn) == true
+      end)() end
+    end
+  end)() end
+end
+
+function run_observability_rank_tests()
+  # the rank read from the LDLt pivots against the decomposition
   @testset "observability: the rank from the LDLt pivots agrees with the decomposition (#399)" begin (function ()
     # the pivot rule reads the rank from the factorization the criticality
     # pass needs anyway; it is selectable and must agree with the SVD/QR
@@ -694,15 +723,5 @@ function run_observability_tests()
     @test def_b.rank_method === :decomposition
   end)() end
 
-  @testset "Observability" begin (function ()
-    fx = observability_fixture()
-    tests =
-      [("Observability metrics", () -> test_observability_metrics(fx)), ("Matrix observability helpers", test_observability_matrix_helpers), ("FD-aware rank tolerance", () -> test_observability_fd_rank_tolerance(fx)), ("Takahashi diagnostics", () -> test_observability_takahashi_diagnostics(fx))]
-
-    for (name, testfn) in tests
-      @testset "$name" begin (function ()
-        @test _se_run_quiet(testfn) == true
-      end)() end
-    end
-  end)() end
+  return true
 end

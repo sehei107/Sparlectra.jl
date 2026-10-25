@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,8 +32,7 @@ Characteristic `y = f(u)` of a Q(U) or P(U) controller, given by ordered
 `:spline` (natural cubic spline) or `:polynomial` (Newton form through the
 points); `make_characteristic` builds one from engineering units. Outside
 the point range, values are clamped to the edge points and the derivative
-is `0.0`. Known as `PiecewiseLinearCharacteristic` before 0.17.0; that name
-stays as an alias for one minor release.
+is `0.0`.
 """
 struct VoltageCharacteristic
   points::Vector{Tuple{Float64,Float64}}
@@ -69,10 +68,6 @@ struct VoltageCharacteristic
     end
   end
 end
-
-# the name the type carried while it held straight segments only; kept as
-# an alias for one minor release so existing scripts keep running
-const PiecewiseLinearCharacteristic = VoltageCharacteristic
 
 function _natural_spline_second_derivatives(points::Vector{Tuple{Float64,Float64}})
   n = length(points)
@@ -389,6 +384,9 @@ A mutable structure representing a prosumer in a power system. A prosumer is an 
 - `gencost::Union{Nothing,GenCost}`: MATPOWER generator cost rows of a
   generating unit ([`GenCost`](@ref)), kept for the export; no calculation
   reads it. `nothing` when the source has none.
+- `dynamics::Union{Nothing,DynamicData}`: dynamic parameters of the unit
+  ([`DynamicData`](@ref)): inertia, damping, droop, reserves, unit type. No
+  calculation reads them. `nothing` when the source has none.
 
 # Constructors
 - `ProSumer(comp::AbstractComponent, busIdx::Int, pGen::Float64, qGen::Float64, pLoad::Float64, qLoad::Float64, status::Int)`: Creates a new `ProSumer` instance.
@@ -429,7 +427,7 @@ mutable struct ProSumer
   # Filled by the importers (MATPOWER gen `APF`, CGMES `GeneratingUnit.normalPF`)
   # or set explicitly; `nothing` means "no factor known". Carrying the value has
   # NO effect on the power flow unless power_flow.distributed_slack selects the
-  # `imported` mode — importing must never change results by itself.
+  # `imported` mode: importing must never change results by itself.
   participationFactor::Union{Nothing,Float64}
   # Reference priority (0.30.2), CGMES `referencePriority` semantics: 0 = no
   # stated preference, 1 = the strongest candidate, larger = weaker. It is a
@@ -441,6 +439,10 @@ mutable struct ProSumer
   # MATPOWER mpc.gencost rows of this unit (0.30.3, #471): carried for the
   # MATPOWER and SCF export only, never read by a calculation (no OPF)
   gencost::Union{Nothing,GenCost}
+  # dynamic parameters (#506 part 1): filled by SCF and the CGMES DY import,
+  # never read by a calculation; the CGMES island slack choice reads the
+  # unit type only. An adapter without such data leaves it at nothing.
+  dynamics::Union{Nothing,DynamicData}
   qGenRepl::Union{Nothing,Float64}
   pRes::Union{Nothing,Float64}
   qRes::Union{Nothing,Float64}
@@ -474,6 +476,7 @@ mutable struct ProSumer
     participationFactor::Union{Nothing,Float64} = nothing,
     referencePriority::Integer = 0,
     gencost::Union{Nothing,GenCost} = nothing,
+    dynamics::Union{Nothing,DynamicData} = nothing,
   )
     referencePriority >= 0 || throw(ArgumentError("ProSumer: referencePriority must be >= 0 (0 = no preference, 1 = strongest), got $(referencePriority)"))
     if participationFactor !== nothing
@@ -489,7 +492,7 @@ mutable struct ProSumer
       va_deg = 0.0
     end
 
-    new(comp, ratedS, ratedU, qPercent, p, q, maxP, minP, maxQ, minQ, ratedPowerFactor, referencePri, vm_pu, va_deg, vstep_pu, tap_steps_down, tap_steps_up, vset_adjust, isRegulated, type, isAPUNode, quController, puController, participationFactor, Int(referencePriority), gencost, nothing, nothing, nothing)
+    new(comp, ratedS, ratedU, qPercent, p, q, maxP, minP, maxQ, minQ, ratedPowerFactor, referencePri, vm_pu, va_deg, vstep_pu, tap_steps_down, tap_steps_up, vset_adjust, isRegulated, type, isAPUNode, quController, puController, participationFactor, Int(referencePriority), gencost, dynamics, nothing, nothing, nothing)
   end
 
   function Base.show(io::IO, prosumption::ProSumer)
@@ -571,6 +574,9 @@ mutable struct ProSumer
     end
     if !isnothing(prosumption.puController)
       print(io, "puController: yes, ")
+    end
+    if !isnothing(prosumption.dynamics)
+      print(io, "dynamics: ", dynamic_unit_type_name(prosumption.dynamics.unit_type), ", ")
     end
 
     if (!isnothing(prosumption.qGenRepl))
@@ -724,7 +730,7 @@ Map a component type (Generator, EnergyConsumer, ...) onto the coarse
 Injection/Consumption class.
 """
 function toProSumptionType(o::ComponentTyp)::ProSumptionType
-  if o == Generator || o == ExternalNetworkInjection || o == SynchronousMachine || o == StaticVarCompensator
+  if o == Generator || o == ExternalNetworkInjection || o == SynchronousMachine || o == StaticVarCompensator || o == PowerElectronicsConnection
     return Injection
   elseif o == AsynchronousMachine || o == Load || o == EnergyConsumer
     return Consumption
@@ -735,7 +741,7 @@ end
 
 function toProSumptionType(o::String)::ProSumptionType
   val = uppercase(o)
-  if val == "GENERATOR" || val == "EXTERNALNETWORKINJECTION" || val == "SYNCHRONOUSMACHINE" || val == "STATICVARCOMPENSATOR"
+  if val == "GENERATOR" || val == "EXTERNALNETWORKINJECTION" || val == "SYNCHRONOUSMACHINE" || val == "STATICVARCOMPENSATOR" || val == "POWERELECTRONICSCONNECTION"
     return Injection
   elseif val == "ASYNCHRONOUSMACHINE" || val == "LOAD" || val == "ENERGYCONSUMER"
     return Consumption

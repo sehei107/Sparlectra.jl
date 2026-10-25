@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -73,8 +73,18 @@ function _start_guarded_buses_from_fixed_injection!(V0::AbstractVector{ComplexF6
   return sweeps
 end
 
-function _apply_qlimit_guard_to_rectangular_active_set!(net::Net, bus_types::Vector{Symbol}, S::Vector{ComplexF64}, Qload_pu::Vector{Float64}, qmin_pu::AbstractVector, qmax_pu::AbstractVector; min_q_range_pu::Float64, zero_range_mode::Symbol, narrow_range_mode::Symbol, log::Bool, verbose::Int)
-  # Guard runs once before NR to lock obviously problematic narrow-Q PV buses.
+# Guard runs once before NR. A zero range (Qmin == Qmax) runs as PQ at that
+# Q. A narrow range under :prefer_pq runs as PQ at the middle of the band
+# from the start. Under :lock_pq (the default) the machine stays PV while
+# its Q lies inside the band; the bus goes into `lock_on_hit`, and the
+# caller takes it out of the PQ->PV release, so the first limit it reaches
+# in the active set clamps it at that limit for the rest of the solve. A
+# machine inside its band does not oscillate, and running it as PQ at the
+# band middle took its voltage control and changed its Q without a reason
+# (sp_case60 with two 40 MW machines in a 0.015 pu band: the active set did
+# not converge in 80 iterations with the band-middle lock, 5 without the
+# guard). Returns the buses converted to PQ before the solve.
+function _apply_qlimit_guard_to_rectangular_active_set!(net::Net, bus_types::Vector{Symbol}, S::Vector{ComplexF64}, Qload_pu::Vector{Float64}, qmin_pu::AbstractVector, qmax_pu::AbstractVector; min_q_range_pu::Float64, zero_range_mode::Symbol, narrow_range_mode::Symbol, log::Bool, verbose::Int, lock_on_hit::Vector{Int} = Int[])
   min_q_range_pu >= 0.0 || error("qlimit_guard_min_q_range_pu must be >= 0 (got $(min_q_range_pu)).")
   zero_range_mode in (:lock_pq, :prefer_pq, :delayed_switch, :ignore) || error("Unsupported qlimit_guard_zero_range_mode=$(zero_range_mode). Supported: :lock_pq, :prefer_pq, :delayed_switch, :ignore.")
   narrow_range_mode in (:lock_pq, :prefer_pq, :delayed_switch, :ignore) || error("Unsupported qlimit_guard_narrow_range_mode=$(narrow_range_mode). Supported: :lock_pq, :prefer_pq, :delayed_switch, :ignore.")
@@ -89,8 +99,13 @@ function _apply_qlimit_guard_to_rectangular_active_set!(net::Net, bus_types::Vec
     isfinite(qmin) && isfinite(qmax) || continue
     qrange = abs(qmax - qmin)
     qrange < min_q_range_pu || continue
-    mode = qrange <= eps(Float64) ? zero_range_mode : narrow_range_mode
+    zero_range = qrange <= eps(Float64)
+    mode = zero_range ? zero_range_mode : narrow_range_mode
     mode in (:lock_pq, :prefer_pq) || continue
+    if !zero_range && mode === :lock_pq
+      push!(lock_on_hit, bus)
+      continue
+    end
 
     qclamp = 0.5 * (qmin + qmax)
     bus_types[bus] = :PQ
@@ -104,6 +119,9 @@ function _apply_qlimit_guard_to_rectangular_active_set!(net::Net, bus_types::Vec
   if log && verbose > 0 && !isempty(guarded)
     @printf("Q-limit guard: locked %d narrow-range PV bus(es) as PQ before rectangular NR.\n", length(guarded))
   end
+  if log && verbose > 0 && !isempty(lock_on_hit)
+    @printf("Q-limit guard: %d narrow-range PV bus(es) stay PV inside their band and lock at the first limit they reach.\n", length(lock_on_hit))
+  end
   return guarded
 end
 
@@ -113,8 +131,10 @@ end
 Run the PV buses listed in `power_flow.qlimits.lock_pv_to_pq_buses` (internal
 bus positions) as PQ from the start of the solve. Each listed bus that is PV
 in `bus_types` becomes PQ with its scheduled reactive generation (the sum of
-the generator `qVal` at the bus) clamped into the bus's `[qmin, qmax]`, so the
-run cannot end with a reactive violation at a bus it was told not to regulate.
+the generator `qVal` at the bus, a Q(U) unit that follows its characteristic
+at its Q at the held voltage, as in the bus Q band) clamped into the bus's
+`[qmin, qmax]`, so the run cannot end with a reactive violation at a bus it
+was told not to regulate.
 Listed buses that are not PV (slack, PQ, already reclassified by the guard)
 and positions outside the network are left alone.
 
@@ -135,17 +155,39 @@ function _lock_listed_pv_buses_as_pq!(net::Net, bus_types::Vector{Symbol}, S::Ve
   # puts into S; only the generator part is replaced below, so loads and any
   # voltage-dependent shunt injection already in S stay untouched
   qgen_sched = zeros(Float64, nb)
+  # the same schedule in the terms of the bus Q band: a Q(U) unit that
+  # follows its characteristic counts with its Q at the held voltage, as in
+  # _buildQLimits!. The lock value is compared with the band and kept in
+  # node._qƩGen, which _reapply_qlimit_clamps! reads in band terms; with the
+  # unit's qVal there, the regulating unit ran off its schedule by
+  # qVal - Q(Vset) of the Q(U) unit.
+  qgen_band = zeros(Float64, nb)
+  held = falses(nb)
   for ps in net.prosumpsVec
     isGenerator(ps) || continue
     bus = getPosumerBusIndex(ps)
     (1 <= bus <= nb) || continue
-    qgen_sched[bus] += something(ps.qVal, 0.0) / net.baseMVA
+    (isRegulating(ps) || isSlack(ps)) && (held[bus] = true)
+  end
+  vheld = nothing
+  for ps in net.prosumpsVec
+    isGenerator(ps) || continue
+    bus = getPosumerBusIndex(ps)
+    (1 <= bus <= nb) || continue
+    q_sched = something(ps.qVal, 0.0) / net.baseMVA
+    qgen_sched[bus] += q_sched
+    if _qband_follows_characteristic(ps, held[bus])
+      vheld === nothing && (vheld = _bus_voltage_setpoints_from_prosumers(net))
+      qgen_band[bus] += first(evaluate_controller(ps.quController, vheld[bus]))
+    else
+      qgen_band[bus] += q_sched
+    end
   end
   for bus in unique(buses)
     (1 <= bus <= nb && bus_types[bus] == :PV) || continue
     qmin = bus <= length(qmin_pu) ? Float64(qmin_pu[bus]) : -Inf
     qmax = bus <= length(qmax_pu) ? Float64(qmax_pu[bus]) : Inf
-    q = qgen_sched[bus]
+    q = qgen_band[bus]
     side = q >= 0.0 ? :max : :min
     if isfinite(qmax) && q > qmax
       q, side = qmax, :max

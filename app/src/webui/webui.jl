@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -128,7 +128,7 @@ function _git_head_commit_sha(root::AbstractString)::Union{String,Nothing}
   packed = joinpath(common, "packed-refs")
   isfile(packed) || return nothing
   # open(...) do closes the handle on every exit path. eachline(path) would
-  # keep the file open until GC after the early return below — on Windows the
+  # keep the file open until GC after the early return below: on Windows the
   # still-open packed-refs then blocks directory removal (EBUSY, issue #290
   # test cleanup) and every banner-SHA resolution leaks one descriptor.
   return open(packed) do io
@@ -151,9 +151,11 @@ include("options.jl")
 include("forms.jl")
 include("docs.jl")
 include("help_excerpts.jl")  # generated from docs/src by tools/generate_webui_help_excerpts.jl
+include("help_math.jl")  # formulas of the help texts as HTML text
 include("operations.jl")
 include("views.jl")
 include("handlers.jl")
+include("update.jl")
 include("routes.jl")
 
 mutable struct SparlectraWebUIServer
@@ -292,9 +294,118 @@ function _webui_windows_browser_candidates(environment)::Vector{String}
   return candidates
 end
 
-const _WEBUI_APP_WINDOW_SIZE = "1500,950"
+# Geometry of the --app window: the configured size (webui.window_width,
+# webui.window_height) and the position Stop Web UI saved at the last stop
+# (nothing = the browser places the window). Set from the runtime's
+# configuration file when the server starts; the default serves headless
+# renders and start_webui.jl's open after the warm-up.
+const _WEBUI_DEFAULT_WINDOW_GEOMETRY = (width = 1500, height = 950, x = nothing, y = nothing)
+const _WEBUI_WINDOW_GEOMETRY = Ref{NamedTuple{(:width, :height, :x, :y),Tuple{Int,Int,Union{Nothing,Int},Union{Nothing,Int}}}}(_WEBUI_DEFAULT_WINDOW_GEOMETRY)
 
-function _webui_app_window_command(url::String; platform::Symbol = _webui_platform(), executable_lookup = Sys.which, path_exists = ispath, environment = ENV)::Union{Cmd,Nothing}
+# The window geometry a configuration file holds; a file that cannot be
+# loaded yields the default (the configuration pages report the error).
+function _webui_window_geometry(config_file::AbstractString)
+  isfile(config_file) || return _WEBUI_DEFAULT_WINDOW_GEOMETRY
+  try
+    webui = load_sparlectra_config(config_file; reload = true).webui
+    return (width = webui.window_width, height = webui.window_height, x = webui.window_x, y = webui.window_y)
+  catch err
+    @debug "webui.window_* not read" config_file exception = err
+    return _WEBUI_DEFAULT_WINDOW_GEOMETRY
+  end
+end
+
+# Monitors of the desktop as (x, y, width, height) rectangles, for the check
+# that a saved window position is still on a screen. Windows asks
+# System.Windows.Forms.Screen through PowerShell, Linux xrandr (X11 and
+# XWayland). nothing when the platform has no probe or the probe fails: the
+# position is then used as saved, as before.
+function _webui_monitor_rects(platform::Symbol = _webui_platform(); executable_lookup = Sys.which)::Union{Nothing,Vector{NTuple{4,Int}}}
+  if platform == :windows
+    exe = executable_lookup("powershell")
+    exe === nothing && return nothing
+    script = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { \$b = \$_.Bounds; '{0} {1} {2} {3}' -f \$b.X, \$b.Y, \$b.Width, \$b.Height }"
+    cmd, parse = `$(exe) -NoProfile -NonInteractive -Command $(script)`, _webui_parse_powershell_screens
+  elseif platform == :linux
+    exe = executable_lookup("xrandr")
+    exe === nothing && return nothing
+    cmd, parse = `$(exe) --listactivemonitors`, _webui_parse_xrandr_monitors
+  else
+    return nothing
+  end
+  out = try
+    read(pipeline(cmd; stderr = devnull), String)
+  catch err
+    # the probe exits non-zero (no display, PowerShell policy) or cannot start
+    (err isa ProcessFailedException || err isa Base.IOError) || rethrow()
+    @debug "monitor probe failed, the saved window position is used as is" exception = err
+    return nothing
+  end
+  rects = parse(out)
+  return isempty(rects) ? nothing : rects
+end
+
+# "x y width height" per line, as the PowerShell probe prints the bounds
+function _webui_parse_powershell_screens(out::AbstractString)::Vector{NTuple{4,Int}}
+  rects = NTuple{4,Int}[]
+  for line in eachline(IOBuffer(out))
+    v = tryparse.(Int, split(strip(line)))
+    (length(v) == 4 && all(!isnothing, v)) && push!(rects, (v[1], v[2], v[3], v[4]))
+  end
+  return rects
+end
+
+# xrandr --listactivemonitors: " 0: +*DP-1 2560/597x1440/336+0+0  DP-1"
+function _webui_parse_xrandr_monitors(out::AbstractString)::Vector{NTuple{4,Int}}
+  rects = NTuple{4,Int}[]
+  for m in eachmatch(r"(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)", out)
+    w, h, x, y = parse.(Int, m.captures)
+    push!(rects, (x, y, w, h))
+  end
+  return rects
+end
+
+# The saved geometry without its position when the position is on no
+# monitor (a monitor of the last session is gone): the browser then opens
+# the window on the main monitor. The test point is a spot of the title bar
+# (60 px right, 20 px down from the corner), so a window that hangs over a
+# screen edge but can still be grabbed keeps its place. rects = nothing
+# (unknown layout) keeps the position.
+function _webui_visible_geometry(geometry, rects)
+  (geometry.x === nothing || geometry.y === nothing || rects === nothing) && return geometry
+  px, py = geometry.x + 60, geometry.y + 20
+  any(r -> r[1] <= px < r[1] + r[3] && r[2] <= py < r[2] + r[4], rects) && return geometry
+  @info "Web UI: the saved window position ($(geometry.x), $(geometry.y)) is on no connected monitor; the window opens on the main monitor"
+  return (width = geometry.width, height = geometry.height, x = nothing, y = nothing)
+end
+
+# Browser profile of the app window, beside the runs (<state>/webui/browser).
+# Set when the server starts; empty = no own profile (headless renders).
+const _WEBUI_BROWSER_PROFILE_DIR = Ref{String}("")
+
+# Chromium flags for the app window (Chromium 153, KDE, Wayland):
+# - --window-size/--window-position act only in a NEW browser process; with
+#   the user's Chromium already running the call is handed to it and both
+#   flags are ignored. An own --user-data-dir makes the app window its own
+#   process.
+# - Under Wayland a window can neither read (screenX/Y always 0) nor set its
+#   position; through XWayland (--ozone-platform=x11) both work.
+# The position only when both coordinates are set (the browser places the
+# window otherwise).
+function _webui_window_arguments(geometry; profile_dir::AbstractString = _WEBUI_BROWSER_PROFILE_DIR[], platform::Symbol = _webui_platform(), environment = ENV)::Vector{String}
+  arguments = ["--window-size=$(geometry.width),$(geometry.height)"]
+  if geometry.x !== nothing && geometry.y !== nothing
+    push!(arguments, "--window-position=$(geometry.x),$(geometry.y)")
+  end
+  if !isempty(profile_dir)
+    append!(arguments, ["--user-data-dir=$(profile_dir)", "--no-first-run", "--no-default-browser-check"])
+  end
+  platform == :linux && !isempty(get(environment, "WAYLAND_DISPLAY", "")) && push!(arguments, "--ozone-platform=x11")
+  return arguments
+end
+
+function _webui_app_window_command(url::String; geometry = _WEBUI_WINDOW_GEOMETRY[], profile_dir::AbstractString = _WEBUI_BROWSER_PROFILE_DIR[], platform::Symbol = _webui_platform(), executable_lookup = Sys.which, path_exists = ispath, environment = ENV)::Union{Cmd,Nothing}
+  window = _webui_window_arguments(geometry; profile_dir, platform, environment)
   if platform == :macos
     applications = (
       "/Applications/Microsoft Edge.app",
@@ -304,7 +415,7 @@ function _webui_app_window_command(url::String; platform::Symbol = _webui_platfo
     )
     application = findfirst(path_exists, applications)
     application === nothing && return nothing
-    return `open -na $(applications[application]) --args --app=$url --window-size=$(_WEBUI_APP_WINDOW_SIZE)`
+    return `open -na $(applications[application]) --args --app=$url $window`
   end
 
   candidates = platform == :windows ? _webui_windows_browser_candidates(environment) : String[
@@ -318,7 +429,7 @@ function _webui_app_window_command(url::String; platform::Symbol = _webui_platfo
   ]
   executable = _webui_first_executable(candidates; executable_lookup, path_exists)
   executable === nothing && return nothing
-  return `$executable --app=$url --window-size=$(_WEBUI_APP_WINDOW_SIZE)`
+  return `$executable --app=$url $window`
 end
 
 ## Open the URL with whatever the SYSTEM has registered as the default
@@ -360,14 +471,14 @@ function _webui_generic_open_command(url::String; platform::Symbol = _webui_plat
   return nothing
 end
 
-function _webui_browser_open_command(url::String; platform::Symbol = _webui_platform(), executable_lookup = Sys.which, path_exists = ispath, environment = ENV)::Union{Tuple{Cmd,Symbol},Nothing}
-  app_command = _webui_app_window_command(url; platform, executable_lookup, path_exists, environment)
+function _webui_browser_open_command(url::String; geometry = _WEBUI_WINDOW_GEOMETRY[], platform::Symbol = _webui_platform(), executable_lookup = Sys.which, path_exists = ispath, environment = ENV)::Union{Tuple{Cmd,Symbol},Nothing}
+  app_command = _webui_app_window_command(url; geometry, platform, executable_lookup, path_exists, environment)
   app_command === nothing || return (app_command, :app_window)
   return _webui_generic_open_command(url; platform, executable_lookup)
 end
 
-function _webui_app_command(url::String; platform::Symbol = _webui_platform(), executable_lookup = Sys.which, path_exists = ispath, environment = ENV)::Union{Cmd,Nothing}
-  selected = _webui_browser_open_command(url; platform, executable_lookup, path_exists, environment)
+function _webui_app_command(url::String; geometry = _WEBUI_WINDOW_GEOMETRY[], platform::Symbol = _webui_platform(), executable_lookup = Sys.which, path_exists = ispath, environment = ENV)::Union{Cmd,Nothing}
+  selected = _webui_browser_open_command(url; geometry, platform, executable_lookup, path_exists, environment)
   selected === nothing && return nothing
   return selected[1]
 end
@@ -403,8 +514,8 @@ function _webui_port_holds_sparlectra(host_string::AbstractString, port::Integer
   end
 end
 
-function _webui_open_browser(url::String)
-  selected = _webui_browser_open_command(url)
+function _webui_open_browser(url::String; geometry = _WEBUI_WINDOW_GEOMETRY[])
+  selected = _webui_browser_open_command(url; geometry)
   if selected === nothing
     @info "Selected Web UI browser-opening strategy" strategy = "manual_only" url
     @warn "Could not find an app-capable browser; open the Web UI URL manually" url
@@ -450,6 +561,7 @@ function _webui_shutdown_reason_text(reason::Union{Symbol,Nothing})::String
   reason === :server_closed && return " by server close"
   reason === :process_exit && return " by process exit"
   reason === :hard_reset && return " after hard reset"
+  reason === :update_install && return " to install an update"
   return ""
 end
 
@@ -485,12 +597,74 @@ function _webui_request_shutdown!(runtime::_SparlectraWebUIRuntime; reason::Unio
   return nothing
 end
 
+# Window geometry a Stop Web UI click sends: the outer size and the screen
+# position of the app window, plus the hidden flag of the page. A minimized
+# window is not saved (document.hidden; Chromium on Windows also parks a
+# minimized window at -32000,-32000), nor are values no screen can show.
+# The size must be sane too: 200 px up to 16000 px (an 8K wall), a position
+# within +-16000 px (negative is a monitor left of or above the primary one).
+const _WEBUI_WINDOW_SIZE_RANGE = 200:16000
+const _WEBUI_WINDOW_POSITION_RANGE = -16000:16000
+
+function _webui_window_geometry_from_form(form::AbstractDict)
+  field(name) = strip(String(get(form, name, "")))
+  any(isempty(field(name)) for name in ("window_width", "window_height", "window_x", "window_y")) && return (status = "skipped", reason = "no_geometry")
+  field("window_hidden") == "1" && return (status = "skipped", reason = "window_minimized")
+  parsed = Dict{String,Int}()
+  for name in ("window_width", "window_height", "window_x", "window_y")
+    value = tryparse(Int, field(name))
+    value === nothing && return (status = "skipped", reason = "not_a_number", field = name, value = field(name))
+    parsed[name] = value
+  end
+  for name in ("window_width", "window_height")
+    parsed[name] in _WEBUI_WINDOW_SIZE_RANGE || return (status = "skipped", reason = "size_out_of_range", field = name, value = parsed[name])
+  end
+  for name in ("window_x", "window_y")
+    parsed[name] in _WEBUI_WINDOW_POSITION_RANGE || return (status = "skipped", reason = "position_out_of_range", field = name, value = parsed[name])
+  end
+  return (status = "ok", reason = "", width = parsed["window_width"], height = parsed["window_height"], x = parsed["window_x"], y = parsed["window_y"])
+end
+
+"""
+    _webui_save_window_geometry!(config_file, form) -> NamedTuple
+
+Write the app window geometry a Stop Web UI click sends (`window_width`,
+`window_height`, `window_x`, `window_y`, `window_hidden`) into
+`webui.window_*` of `config_file`, so the next start opens the window
+where it was. Returns `status` (`saved`, `skipped`, `failed`) and a
+`reason`; the four keys count as user keys afterwards. Nothing is written
+for a minimized window, for values outside the plausible ranges, for a
+missing file or for the packaged template.
+"""
+function _webui_save_window_geometry!(config_file::AbstractString, form::AbstractDict)
+  geometry = _webui_window_geometry_from_form(form)
+  geometry.status == "ok" || return geometry
+  isfile(config_file) || return (status = "skipped", reason = "config_file_missing")
+  _webui_is_packaged_template(config_file) && return (status = "skipped", reason = "packaged_template")
+  updates = Dict{String,Any}("webui" => Dict{String,Any}("window_width" => geometry.width, "window_height" => geometry.height, "window_x" => geometry.x, "window_y" => geometry.y))
+  try
+    _write_yaml_file(config_file, _merge_config_overrides(load_yaml_dict(config_file), updates))
+    _webui_record_user_keys!(config_file, ("webui.window_width", "webui.window_height", "webui.window_x", "webui.window_y"))
+  catch err
+    return (status = "failed", reason = sprint(showerror, err))
+  end
+  return (status = "saved", reason = "", width = geometry.width, height = geometry.height, x = geometry.x, y = geometry.y)
+end
+
 
 # Default values that changed between releases: a provisioned file that
 # still carries the old default never had that key touched by the user and
 # follows the new one. Read only when no template copy exists yet (a file
 # provisioned before the copy was introduced); afterwards the copy decides.
 const _WEBUI_DEFAULT_MIGRATIONS = [("power_flow.linear_solver", "umfpack", "umfpack_reuse"), ("state_estimation.report_residual_correlation", false, true), ("state_estimation.update_shunts", false, true)]
+
+# One-time resets (release, key, value): unlike a migration, a reset sets the
+# key whatever it holds, a value the user saved included, so every
+# installation starts the release from the same state (0.32.0: the CSV
+# format is `auto` everywhere, a user who wants another format sets it
+# again). Each reset applies once per configuration file and is recorded
+# in `<file>.resets.txt`; a value the user sets afterwards stays.
+const _WEBUI_ONE_TIME_RESETS = [("0.32.0", "output.csv_format", "auto")]
 
 """
     _webui_follow_template_defaults!(configuration) -> Vector{String}
@@ -510,7 +684,10 @@ outside the Web UI and equal to the old default cannot be told apart and
 follows. Keys the template gained are added. The template copy is then
 replaced by the current template. Without a copy (a file provisioned
 before this existed) only the known default migrations apply, under the
-same user-key rule. Returns one `(key, old, new)` entry per changed key;
+same user-key rule. Last, every one-time reset of `_WEBUI_ONE_TIME_RESETS`
+not yet recorded in `<file>.resets.txt` sets its key regardless of the
+value or the user-key record, and is recorded, so it never applies twice.
+Returns one `(key, old, new)` entry per changed key;
 a change writes a backup `<file>.template-follow.bak` first, and the
 caller reports the entries at start.
 """
@@ -554,11 +731,27 @@ function _webui_follow_template_defaults!(configuration::AbstractString)::Vector
     _dotted_config_set!(user, key, new_value)
     push!(changed, (key = key, old = nothing, new = new_value))
   end
+  applied_resets = _webui_applied_resets(configuration)
+  new_resets = String[]
+  for (release, key, value) in _WEBUI_ONE_TIME_RESETS
+    reset_id = string(release, " ", key)
+    reset_id in applied_resets && continue
+    push!(new_resets, reset_id)
+    # read from `user`, not `user_flat`: the template follow above may have
+    # moved the key already, and the report must not name it twice
+    old_value = _dotted_config_value(user, key)
+    old_value == value && continue
+    _dotted_config_set!(user, key, value)
+    filter!(c -> c.key != key, changed)
+    push!(changed, (key = key, old = old_value, new = value))
+  end
   if !isempty(changed)
     cp(configuration, string(configuration, ".template-follow.bak"); force = true)
     _write_yaml_file(configuration, user)
     sort!(changed; by = c -> c.key)
   end
+  # recorded after the file is written: a crash before leaves the reset due
+  isempty(new_resets) || _webui_record_resets!(configuration, new_resets)
   isfile(template_copy) && read(template_copy, String) == read(DEFAULT_SPARLECTRA_CONFIG_PATH, String) || cp(DEFAULT_SPARLECTRA_CONFIG_PATH, template_copy; force = true)
   return changed
 end
@@ -592,6 +785,23 @@ function _webui_record_user_keys!(config_file::AbstractString, keys)
   return nothing
 end
 
+# The one-time resets already applied to a configuration file:
+# `<file>.resets.txt`, one "<release> <key>" per line (see
+# `_WEBUI_ONE_TIME_RESETS`). A missing file means none applied yet.
+_webui_resets_path(config_file::AbstractString) = string(config_file, ".resets.txt")
+
+function _webui_applied_resets(config_file::AbstractString)::Set{String}
+  path = _webui_resets_path(config_file)
+  isfile(path) || return Set{String}()
+  return Set{String}(strip(l) for l in readlines(path) if !isempty(strip(l)))
+end
+
+function _webui_record_resets!(config_file::AbstractString, reset_ids)
+  merged = union(_webui_applied_resets(config_file), Set{String}(String(r) for r in reset_ids))
+  write(_webui_resets_path(config_file), join(sort!(collect(merged)), "\n") * "\n")
+  return nothing
+end
+
 function _provision_webui_runtime!(root::AbstractString, config_file::Union{Nothing,AbstractString})
   configuration = config_file === nothing ? default_webui_config_path(root) : abspath(config_file)
   case_directory = default_webui_case_cache_dir(root)
@@ -606,7 +816,7 @@ function _provision_webui_runtime!(root::AbstractString, config_file::Union{Noth
     source = joinpath(_WEBUI_PACKAGE_ROOT, "data", "webui", warmup_name)
     isfile(source) || continue
     destination = joinpath(case_directory, basename(source))
-    isfile(destination) || cp(source, destination)
+    _webui_stage_shipped_file!(dst -> cp(source, dst), () -> "", destination)
   end
   return (config_file = configuration, case_directory, operation_log, template_followed)
 end
@@ -638,7 +848,7 @@ still raises the explicit `ArgumentError`. Browser-process
 lifetime is not used for automatic shutdown by default because common browsers
 may return a short-lived launcher process instead of a reliably owned window.
 """
-function start_sparlectra_webui(; host::AbstractString = "127.0.0.1", port::Integer = 8080, output_root::Union{Nothing,AbstractString} = nothing, config_file::Union{Nothing,AbstractString} = nothing, open_browser::Bool = false, shutdown_on_browser_close::Bool = false, auto_shutdown_on_browser_close::Union{Nothing,Bool} = nothing, browser_heartbeat_timeout_seconds::Real = 15.0, _test_runner = start_powerflow_run, _lifecycle_io::IO = stdout, _browser_opener = _webui_open_browser)::Union{Nothing,SparlectraWebUIServer}
+function start_sparlectra_webui(; host::AbstractString = "127.0.0.1", port::Integer = 8080, output_root::Union{Nothing,AbstractString} = nothing, config_file::Union{Nothing,AbstractString} = nothing, open_browser::Bool = false, shutdown_on_browser_close::Bool = false, auto_shutdown_on_browser_close::Union{Nothing,Bool} = nothing, browser_heartbeat_timeout_seconds::Real = 15.0, _test_runner = start_powerflow_run, _lifecycle_io::IO = stdout, _browser_opener = _webui_open_browser, _refresh_shipped_cases::Bool = true)::Union{Nothing,SparlectraWebUIServer}
   host_string = String(host)
   host_string in ("127.0.0.1", "localhost", "::1") || (err = ArgumentError("Sparlectra Web UI only accepts loopback hosts: 127.0.0.1, localhost, or ::1."); _webui_startup_failure!(_lifecycle_io, err, catch_backtrace(); phase = "validate_arguments"); throw(err))
   1 <= port <= 65535 || (err = ArgumentError("Web UI port must be between 1 and 65535."); _webui_startup_failure!(_lifecycle_io, err, catch_backtrace(); phase = "validate_arguments"); throw(err))
@@ -653,6 +863,13 @@ function start_sparlectra_webui(; host::AbstractString = "127.0.0.1", port::Inte
     _webui_startup_failure!(_lifecycle_io, wrapped, catch_backtrace(); phase = "provision_runtime")
     throw(wrapped)
   end
+  # the app window opens with the size and position of the last stop, in its
+  # own browser profile (see _webui_window_arguments)
+  # a position on a monitor that is gone is dropped (_webui_visible_geometry);
+  # the monitors are probed only when a position was saved
+  saved = _webui_window_geometry(paths.config_file)
+  _WEBUI_WINDOW_GEOMETRY[] = saved.x === nothing ? saved : _webui_visible_geometry(saved, _webui_monitor_rects())
+  _WEBUI_BROWSER_PROFILE_DIR[] = joinpath(dirname(root), "browser")
   # Prune once at startup so normal requests keep append-only operation logging
   # unless a size safety cap is reached later. The retention comes from the
   # configuration (webui.operation_log_retention_days, default 10 days); the
@@ -692,11 +909,11 @@ function start_sparlectra_webui(; host::AbstractString = "127.0.0.1", port::Inte
       # The raw libuv IOError ("listen: address already in use (EADDRINUSE)")
       # gives no hint about *why*. The most common cause is a Sparlectra Web
       # UI already running (an earlier start in this session, or another
-      # Julia process) — probe for it and, instead of aborting, hand the
+      # Julia process), probe for it and, instead of aborting, hand the
       # user the running instance.
       if _webui_port_holds_sparlectra(host_string, port)
         url = "http://$(host_string == "localhost" ? "127.0.0.1" : host_string):$(Int(port))/powerflow"
-        @info "Sparlectra Web UI is already running at $(url) — opening it instead of starting a second instance. To restart it, stop the running server first (close(server), the Stop Web UI button, or end its Julia process)."
+        @info "Sparlectra Web UI is already running at $(url), opening it instead of starting a second instance. To restart it, stop the running server first (close(server), the Stop Web UI button, or end its Julia process)."
         _webui_startup_log(_lifecycle_io, "webui_existing_instance_opened"; operation_log = paths.operation_log, status = "reused", host = host_string, port = Int(port))
         open_browser && _browser_opener(url)
         return nothing
@@ -709,6 +926,31 @@ function start_sparlectra_webui(; host::AbstractString = "127.0.0.1", port::Inte
     rethrow()
   end
   _webui_startup_log(_lifecycle_io, "webui_server_bound"; operation_log = paths.operation_log, status = "bound", host = host_string, port = Int(port))
+  # Copies of shipped case files that still hold an earlier version follow
+  # the package (a rebuilt demo case reaches an existing case directory);
+  # copies the user changed stay. Only the instance that holds the port does
+  # this; it runs after the bind because a second start that only opens the
+  # running instance is recognized by the failing bind. The expected
+  # failures are a case directory that cannot be read or written
+  # (IOError, SystemError), a second instance working on the same files
+  # (ArgumentError from mv or cp) and a damaged hash list: none of them may
+  # stop the start, each is named in the log. Any other error closes the
+  # port again and is reported as a failed start.
+  refreshed = NamedTuple{(:file, :kept_as),Tuple{String,String}}[]
+  if _refresh_shipped_cases
+    try
+      refreshed = _webui_refresh_shipped_copies!(_webui_application_root(), paths.case_directory, paths.operation_log)
+    catch err
+      if _webui_expected_copy_failure(err) || err isa _WebUIShippedHashesDamaged
+        @warn "Could not refresh the shipped case files in $(paths.case_directory)" exception = err
+        record_webui_operation!(paths.operation_log, "shipped_case_refresh_failed"; route = "/powerflow", method = "START", status = "failed", user_action = false, message = sprint(showerror, err))
+      else
+        close(listener)
+        _webui_startup_failure!(_lifecycle_io, err, catch_backtrace(); operation_log = paths.operation_log, phase = "refresh_shipped_cases")
+        rethrow()
+      end
+    end
+  end
   effective_shutdown_on_browser_close = auto_shutdown_on_browser_close === nothing ? shutdown_on_browser_close : Bool(auto_shutdown_on_browser_close)
   runtime = _SparlectraWebUIRuntime(listener, paths.case_directory, paths.config_file, paths.operation_log, config_error, _test_runner, effective_shutdown_on_browser_close, false, 0.0, 0, nothing, _lifecycle_io, ReentrantLock())
   task = @async begin
@@ -767,6 +1009,9 @@ function start_sparlectra_webui(; host::AbstractString = "127.0.0.1", port::Inte
   _webui_lifecycle_println(runtime, "Sparlectra Web UI is available at ", url)
   _webui_lifecycle_println(runtime, "Stop: use Stop Web UI in the browser, close(server), or Ctrl+C here.")
   _webui_lifecycle_println(runtime, "Operation log: ", paths.operation_log)
+  for r in refreshed
+    _webui_lifecycle_println(runtime, "Shipped case file updated: ", r.file, " (earlier copy kept as ", r.kept_as, ")")
+  end
   # every key the template follow-up changed is named here, the backup alone
   # tells nobody that something moved
   if !isempty(paths.template_followed)

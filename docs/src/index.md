@@ -8,7 +8,7 @@ EditURL = "../../README.md"
 
 # Sparlectra.jl
 
-Power-system analysis in Julia: AC and DC power flow, WLS state estimation, IEC 60909 short circuit, scenarios and N-1 contingency, import and export in various formats.
+Power-system analysis in Julia: AC and DC power flow, quasi-static time series, WLS state estimation with tap estimation, IEC 60909 short circuit, scenarios and N-1 contingency; import of CGMES, MATPOWER, PowSyBl IIDM, DTF and SCF, export of CGMES, MATPOWER and SCF.
 
 [![Documentation](https://github.com/Welthulk/Sparlectra.jl/actions/workflows/jekyll-gh-pages.yml/badge.svg)](https://welthulk.github.io/Sparlectra.jl/)
 [![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FWelthulk%2FSparlectra.jl%2Fmain%2FProject.toml&query=%24.version&label=version&prefix=v&color=blue)](https://github.com/Welthulk/Sparlectra.jl/blob/main/Project.toml)
@@ -47,7 +47,10 @@ No installation required, the workshop notebooks run on Google Colab:
 | **Transformer taps**: OLTC, PST, X(α) characteristic, 3WT star equivalent | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Welthulk/Sparlectra.jl/blob/main/notebooks/workshop_transformers.ipynb) |
 | **FACTS flow control**: TCSC to UPFC | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Welthulk/Sparlectra.jl/blob/main/notebooks/workshop_series_compensation.ipynb) |
 | **Scenarios and N-1 screening** | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Welthulk/Sparlectra.jl/blob/main/notebooks/workshop_scenarios.ipynb) |
+| **QSTS**: a day on sp_case14, snapshot run and sequential run with tap and bank controllers | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Welthulk/Sparlectra.jl/blob/main/notebooks/workshop_qsts.ipynb) |
 | **State estimation**: measurement sets, observability, WLS, bad data | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Welthulk/Sparlectra.jl/blob/main/notebooks/workshop_state_estimation.ipynb) |
+| **SE bad data and parameter estimation**: normalized residuals, sequential elimination, robust estimation, shunt estimation | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Welthulk/Sparlectra.jl/blob/main/notebooks/workshop_se_diagnostics.ipynb) |
+| **SE taps, phasors and topology**: J and its degrees of freedom, tap estimation, PMU phasors, topology errors, islands | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Welthulk/Sparlectra.jl/blob/main/notebooks/workshop_se_taps.ipynb) |
 | **APSLF**: analytic power-series solver on a Sparlectra model, convergence radius as a loadability margin, hybrid start | [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Welthulk/Sparlectra.jl/blob/main/notebooks/workshop_apslf.ipynb) |
 
 The notebooks are generated from [docs/lit/](https://github.com/Welthulk/Sparlectra.jl/tree/main/docs/lit/) and are also part of the [documentation](https://welthulk.github.io/Sparlectra.jl/generated/workshop_tour/).
@@ -153,7 +156,19 @@ Embedding Sparlectra in your own tooling (scripts, sysimage, API): [integration 
 Case management, run history and results in the browser. Cases can be taken from the local cache, uploaded (MATPOWER, DTF, CGMES ZIP, PowSyBl IIDM `.xiidm`) or fetched by name; three PowSyBl networks ship under `data/powsybl`. IIDM files are read in Julia, no Python is needed.
 
 ```@raw html
-<a href="assets/webui_v0.10.0.png"><img src="assets/webui_v0.10.0.png" alt="Sparlectra Web UI: case, settings, run and result" /></a>
+<a href="assets/webui_overview.png"><img src="assets/webui_overview.png" alt="Sparlectra Web UI: case, settings, run and result" /></a>
+```
+
+Every run file opens in the browser: CSV as a sortable table, Markdown rendered.
+
+```@raw html
+<a href="assets/webui_artifacts.png"><img src="assets/webui_artifacts.png" alt="Sparlectra Web UI: CSV table, measurement verdict and Markdown report of a run" /></a>
+```
+
+A QSTS run shows its controllers, switching counts and a time-series chart per element.
+
+```@raw html
+<a href="assets/webui_qsts.png"><img src="assets/webui_qsts.png" alt="Sparlectra Web UI: QSTS run with time-series chart" /></a>
 ```
 
 ---
@@ -178,6 +193,14 @@ Full documentation: <https://welthulk.github.io/Sparlectra.jl/>
 ## Contributing
 
 Bug reports, test networks and import edge cases (CGMES, MATPOWER, DTF, PowSyBl IIDM) are welcome. Questions: [Discussions](https://github.com/Welthulk/Sparlectra.jl/discussions). Please read [CONTRIBUTING.md](https://github.com/Welthulk/Sparlectra.jl/blob/main/CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](https://github.com/Welthulk/Sparlectra.jl/blob/main/CODE_OF_CONDUCT.md) first.
+
+## Sponsors
+
+```@raw html
+<a href="https://www.soptim.de"><img src="assets/SOPTIM_Logo2.png" alt="SOPTIM AG" width="180" /></a>
+```
+
+The development of Sparlectra.jl is supported by [SOPTIM AG](https://www.soptim.de), Aachen, Germany.
 
 ## Citing
 

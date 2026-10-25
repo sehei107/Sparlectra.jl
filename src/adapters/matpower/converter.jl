@@ -18,8 +18,10 @@
 #          constructed by build_net like every other format. The conversion
 #          mirrors createNetFromMatPowerCase's interpretation rules field
 #          by field (classification, conventions, setpoint sources, order),
-#          and every SI value is emitted through _scf_stable so the
-#          file-unit round trip reproduces the per-unit value bit for bit.
+#          The case declares units = pu: the branch and shunt parameters
+#          are carried as stated in the MATPOWER file in the pu block of
+#          their extra entry, which build_net reads. The SI data section is
+#          a derived view for PGM readers, emitted through _scf_stable.
 
 struct MatpowerAdapter <: FormatAdapter end
 
@@ -44,7 +46,7 @@ Base.@kwdef struct MatpowerAdapterOptions
   import_for001_contingencies::Bool = true
   enable_pq_gen_controllers::Bool = true
   tap_changer_model::Symbol = :ideal
-  f_nom::Float64 = 50.0
+  f_nom::Float64 = model_config().nominal_frequency_hz
   log::Bool = false
 end
 
@@ -110,6 +112,7 @@ function matpower_adapter_options(cfg::SparlectraConfig; log::Bool = false)
     import_for001_contingencies = mat.import_for001_contingencies,
     enable_pq_gen_controllers = mat.enable_pq_gen_controllers,
     tap_changer_model = cfg.model.tap_changer_model,
+    f_nom = cfg.model.nominal_frequency_hz,
     log = log,
   )
 end
@@ -119,6 +122,10 @@ end
 _mpsi_watt(v::Float64) = _scf_stable(v, x -> x * 1.0e6, x -> x / 1.0e6)
 _mpsi_volt(vn_kv::Float64) = _scf_stable(vn_kv, x -> x * 1.0e3, x -> x / 1.0e3)
 _mpsi_deg_as_rad(deg::Float64) = _scf_stable(deg, deg2rad, rad2deg)
+
+# a NaN current step of mpc.sparlectra.tap_changers is no step: the SCF row
+# leaves pos out and the SCF import puts the changer on its middle position
+_matpower_tap_pos(x::Real) = isnan(x) ? nothing : Float64(x)
 
 function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCFCase
   busDict, genDict, branchDict = _createDict()
@@ -133,7 +140,12 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
   baseMVA = Float64(getproperty(mpc, :baseMVA))
   busData = convert(Matrix{Float64}, getproperty(mpc, :bus))
   genData = convert(Matrix{Float64}, getproperty(mpc, :gen))
-  brData = convert(Matrix{Float64}, getproperty(mpc, :branch))
+  # the transformers are built on the neutral position (TAP/SHIFT of a
+  # file before 0.50.0, columns 13 and 14 of the tap block since, #513);
+  # the tap_changer rows below move them off it
+  sp_taps_rows = _matpower_sparlectra_tap_changers(mpc)
+  brData = _matpower_neutral_branch_data(convert(Matrix{Float64}, getproperty(mpc, :branch)), sp_taps_rows, TAP, SHIFT)
+  tap_changer_rows = _matpower_tap_changer_rows(sp_taps_rows)
   nbus = size(busData, 1)
   nbranch = size(brData, 1)
   s_base_va = baseMVA * 1.0e6
@@ -143,7 +155,9 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
   pv_vset_by_bus = Dict(row.busI => row.imported_vset for row in pv_voltage_rows)
   opts.matpower_dcline_mode in (:reject_active, :ignore_inactive, :pf_injections, :paired_control) || throw(ArgumentError("matpower_dcline_mode must be one of :reject_active, :ignore_inactive, :pf_injections, :paired_control."))
   opts.matpower_dcline_mode in (:pf_injections, :paired_control) || MatpowerIO.assert_no_active_dcline(mpc)
-  bus_name_by_orig = _matpower_bus_names(mpc, busData, BUS_I; apply_bus_names = opts.apply_bus_names)
+  bus_name_by_orig = _matpower_bus_names(mpc, busData, BUS_I; apply_bus_names = opts.apply_bus_names, name = name, brData = convert(Matrix{Float64}, getproperty(mpc, :branch)))
+  aux_buses = _matpower_aux_bus_numbers(mpc, busData, BUS_I)
+  aux_ids = Int[]
   bus_original_name_by_orig = Dict{Int,String}()
   raw_bus_names = _matpower_metadata_vector(mpc, :bus_name)
   if raw_bus_names !== nothing && length(raw_bus_names) == nbus
@@ -168,6 +182,10 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
   spar.meta["s_base"] = _scf_stable(baseMVA, x -> x * 1.0e6, x -> x / 1.0e6)
   spar.meta["f_nom"] = opts.f_nom
   spar.meta["source_format"] = "matpower"
+  # MATPOWER states branch and shunt parameters per unit: they travel as
+  # stated, without a conversion that would lose the last bit of about one
+  # value in ten (no exact SI preimage)
+  spar.meta["units"] = "pu"
   extra = spar.extra
   data = case.data
 
@@ -200,6 +218,8 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
     vn_kv = raw_vn <= 0.0 ? 1.0 : raw_vn
     id = nid()
     node_id_by_orig[orig] = id
+    # the auxiliary role, as the direct import sets isAux
+    orig in aux_buses && push!(aux_ids, id)
     u_rated = _mpsi_volt(vn_kv)
     u_rated_by_orig[orig] = u_rated
     zb_by_orig[orig] = u_rated^2 / s_base_va
@@ -238,7 +258,7 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
       g_pu = pShunt / baseMVA
       b_pu = qShunt / baseMVA
       push!(data.shunt, SCFShuntRow(id = sid, node = id, status = 1, g1 = _scf_stable(g_pu, v -> v / zb_sh, to_pu), b1 = _scf_stable(b_pu, v -> v / zb_sh, to_pu)))
-      extra[string(sid)] = Dict{String,Any}("name" => string("SHUNT_", orig), "shunt_index" => length(data.shunt))
+      extra[string(sid)] = Dict{String,Any}("name" => string("SHUNT_", orig), "shunt_index" => length(data.shunt), "pu" => Dict{String,Any}("g_pu" => g_pu, "b_pu" => b_pu))
     end
   end
 
@@ -255,16 +275,19 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
     ratedS_raw = Float64(row[RATE_A])
     ratedS = ratedS_raw > 0.0 ? ratedS_raw : Inf
     tap_raw = Float64(row[TAP])
-    tap_specified = tap_raw != 0.0
     ratio = _matpower_import_ratio(tap_raw; mode = opts.ratio)
     angle = _matpower_shift_degrees(Float64(row[SHIFT]); sign = opts.shift_sign, unit = opts.shift_unit)
     status = Int(row[BR_STATUS])
     vn_from = u_rated_by_orig[fbus] / 1.0e3
     vn_to = u_rated_by_orig[tbus] / 1.0e3
-    heuristic_is_line = ((!tap_specified && angle == 0.0) && (vn_from == vn_to))
+    heuristic_is_line = _matpower_heuristic_is_line(tap_raw, angle, vn_from, vn_to)
     loss_meta = get(transformer_loss_by_row, branch_row_index, nothing)
     kind = branch_kind_overrides === nothing ? :unknown : branch_kind_overrides[branch_row_index]
-    kind = loss_meta !== nothing ? :transformer : kind
+    # as in the direct import: loss metadata, or with TAP not 0 a tap block
+    # row (counted in imported branches, like branch_index below) or a star
+    # point end, make a transformer
+    declared_trafo = loss_meta !== nothing || (tap_raw != 0.0 && ((branch_index + 1) in tap_changer_rows || fbus in aux_buses || tbus in aux_buses))
+    kind = declared_trafo ? :transformer : kind
     isLine = kind === :line ? true : kind === :transformer ? false : heuristic_is_line
 
     id = nid()
@@ -286,6 +309,7 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
         tan1 = 0.0,
         i_n = isfinite(ratedS) ? ratedS * 1.0e6 / (sqrt(3.0) * u_rated_by_orig[tbus]) : nothing,
       ))
+      e["pu"] = Dict{String,Any}("r_pu" => r_pu, "x_pu" => x_pu, "b_pu" => b_pu, "g_pu" => 0.0)
     else
       tap_rx = skip_tap_rx_correction ? (r_pu = r_pu, x_pu = x_pu, factor = 1.0) : calcTapCorrectedRX(r_pu = r_pu, x_pu = x_pu, tap_changer_model = opts.tap_changer_model, ratio = ratio)
       tap_correction_model = skip_tap_rx_correction ? :impedance_correction : opts.tap_changer_model
@@ -310,6 +334,7 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
         theta = _mpsi_deg_as_rad(angle),
         sn = isfinite(ratedS) ? _mpsi_watt(ratedS) : nothing,
       ))
+      e["pu"] = Dict{String,Any}("r_pu" => tap_rx.r_pu, "x_pu" => tap_rx.x_pu, "b_pu" => b_eff, "g_pu" => g_loss)
       loss_meta !== nothing && (e["transformer_loss_g_pu"] = g_loss)
     end
     # an unlimited rating (MATPOWER rateA = 0 arrives as Inf) has no PGM
@@ -503,7 +528,9 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
       haskey(by_index, k) || throw(ArgumentError("mpc.sparlectra.tap_changers references unknown branch $(k)."))
       bid = by_index[k]
       controllers = SCFTapControllerRow[]
-      Float64(row[2]) > 0.0 && push!(controllers, SCFTapControllerRow(index = 1, alpha_deg = 0.0, step = Float64(row[2]), pos = Float64(row[5]), pos_min = Float64(row[3]), pos_max = Float64(row[4])))
+      # ratio_grid 1 (column 12) is the SCF grid "linear" of a CGMES changer
+      rgrid = (size(sp_taps, 2) >= 12 && row[12] == 1.0) ? "linear" : nothing
+      Float64(row[2]) > 0.0 && push!(controllers, SCFTapControllerRow(index = 1, alpha_deg = 0.0, step = Float64(row[2]), pos = _matpower_tap_pos(row[5]), pos_min = Float64(row[3]), pos_max = Float64(row[4]), grid = rgrid))
       psi = size(sp_taps, 2) >= 10 ? Float64(row[10]) : 0.0
       dustep = size(sp_taps, 2) >= 11 ? Float64(row[11]) : 0.0
       # same nameplate contradiction check as applyTapNameplate! on the
@@ -511,7 +538,7 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
       # silently preferred phase_du_step when both grids were declared)
       (Float64(row[6]) > 0.0 && dustep > 0.0) && throw(ArgumentError("mpc.sparlectra.tap_changers branch $(k): phase_step_deg and phase_du_step are exclusive (a changer has ONE mechanical grid)."))
       if Float64(row[6]) > 0.0 || dustep > 0.0
-        ctrl = SCFTapControllerRow(index = 2, alpha_deg = psi, pos = Float64(row[9]), pos_min = Float64(row[7]), pos_max = Float64(row[8]))
+        ctrl = SCFTapControllerRow(index = 2, alpha_deg = psi, pos = _matpower_tap_pos(row[9]), pos_min = Float64(row[7]), pos_max = Float64(row[8]))
         if dustep > 0.0
           ctrl.step = dustep
         else
@@ -521,7 +548,7 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
       end
       isempty(controllers) && continue
       tid = nid()
-      # the branch row keeps the NEUTRAL position (mpc TAP/SHIFT); the
+      # the branch row keeps the NEUTRAL position (see brData above); the
       # nameplate application moves the live tap off it, exactly like the
       # direct import's applyTapNameplate! call
       push!(spar.components.tap_changer, SCFTapChangerRow(id = tid, branch = bid, side = "from", controllers = controllers, control = Dict{String,Any}("mode" => "fixed")))
@@ -534,6 +561,7 @@ function convert_case(::MatpowerAdapter, mpc, opts::MatpowerAdapterOptions)::SCF
     spar.roles.slack = SCFSlackRole(mode = isempty(participation) ? "single" : "distributed", nodes = ref_nodes, participation = participation)
   end
   isempty(isolated_ids) || (spar.roles.isolated_nodes = isolated_ids)
+  isempty(aux_ids) || (spar.roles.aux_nodes = aux_ids)
   if opts.import_for001_contingencies && hasproperty(mpc, :for001_contingencies) && getproperty(mpc, :for001_contingencies) !== nothing
     # the metadata carries outage LABELS (strings), one row per label
     rows = Dict{String,Any}[Dict{String,Any}("label" => String(c)) for c in getproperty(mpc, :for001_contingencies)]

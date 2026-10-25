@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,8 +49,7 @@ end
     # Polar update: the same tangent step dV = ΔVr + jΔVi, applied as the
     # polar Newton step it corresponds to (dV/V = a + jb: magnitude times
     # 1 + a, angle plus b). With this update the rectangular Jacobian
-    # reproduces MATPOWER's newtonpf iterates to rounding (study section
-    # 11). The linear update V + dV inflates |V| by sqrt(1 + b^2) on a
+    # reproduces MATPOWER's newtonpf iterates to rounding. The linear update V + dV inflates |V| by sqrt(1 + b^2) on a
     # rotation, which is what diverged from the flat start on
     # case9241pegase (rotations of 60 to 70 deg in the first step).
     # A bus at exactly zero voltage has no polar form; it takes the linear
@@ -353,14 +352,14 @@ is mutated in place.
 Reuses the exact merit function from the merit-function line search
 (`_rectangular_merit_value`, unweighted `W = I`) as `m(x)`, matching
 `m(x) = ‖F(x)‖²` up to the constant `1/2` factor common to numerator and
-denominator of `rho` — no second merit computation is implemented. The
+denominator of `rho`: no second merit computation is implemented. The
 dogleg gradient `g = JᵀF` uses the same `W = I` convention for consistency
 with `m(x)`.
 
 When `step_mode = :dogleg` and `active_set_changed = true` (a PV/PQ switch
 happened this Newton iteration), the pre-switch gradient/Cauchy point would
-be invalid, so — mirroring the merit-function line search's
-`active_set_skip` policy — the dogleg comparison is skipped for this call: a
+be invalid, so, mirroring the merit-function line search's
+`active_set_skip` policy, the dogleg comparison is skipped for this call: a
 single scaled-Newton trial is taken at the current radius and accepted
 unconditionally, and the radius is left unchanged.
 
@@ -489,7 +488,7 @@ end
         Vset,
     )
 
-Performs one Newton–Raphson step in rectangular coordinates using the analytic
+Performs one Newton-Raphson step in rectangular coordinates using the analytic
 Jacobian that matches `mismatch_rectangular`.
 
 - State: x = [Vr(non-slack); Vi(non-slack)]

@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,6 +23,9 @@ function _resolve_sparlectra_casefile(casefile::String, path::Union{Nothing,Stri
   # a PowSyBl source (a .powsybl bundle directory or an IIDM file) is
   # handed to its adapter as given; the content decides, not the suffix
   detect(PowsyblAdapter, c) && return abspath(c)
+  # an SCF time series zip, decided by its manifest
+  series = path === nothing ? c : joinpath(path, c)
+  is_scf_series(series) && return abspath(series)
   # a DTF deck is taken by what it holds: the same detection as for the
   # services, which refuses a .DAT file without the marks of the format
   # (a result report, any other text) with the reason
@@ -32,7 +35,7 @@ function _resolve_sparlectra_casefile(casefile::String, path::Union{Nothing,Stri
     _detect_case_format(deck) === :dtf_for001 && return abspath(deck)
   end
   # .json is the Sparlectra Case Format (#342), handled by its own reader
-  ext in (".m", ".jl", ".json") || throw(ArgumentError("run_sparlectra: file extension $(ext) is not supported; use .m, .jl, .json (Sparlectra Case Format), a DTF deck (.DAT), a .powsybl bundle directory or an .xiidm file."))
+  ext in (".m", ".jl", ".json") || throw(ArgumentError("run_sparlectra: file extension $(ext) is not supported; use .m, .jl, .json (Sparlectra Case Format), an SCF time series (.zip with series.json), a DTF deck (.DAT), a .powsybl bundle directory or an .xiidm file."))
   if path !== nothing
     filename = joinpath(path, c)
     isfile(filename) || error("File $(filename) not found")
@@ -104,7 +107,7 @@ end
 function _copy_sparlectra_with_powerflow(cfg::SparlectraConfig, powerflow::PowerFlowConfig)::SparlectraConfig
   # Field splat instead of an explicit keyword list: the old hand-written list
   # silently dropped `cgmes` and `webui`, resetting them to defaults on every
-  # copy (latent — the previous callers never read those fields afterwards).
+  # copy (latent: the previous callers never read those fields afterwards).
   fields = NamedTuple{fieldnames(SparlectraConfig)}(getfield.(Ref(cfg), fieldnames(SparlectraConfig)))
   return SparlectraConfig(; fields..., powerflow = powerflow)
 end
@@ -119,11 +122,11 @@ end
 
 Apply `cgmes_import.start_values` to the power-flow configuration of one CGMES
 run. `:flat` forces a synthetic flat start; `:sv` keeps the imported SvVoltage
-state and force-disables every competing start-value machine — the same set the
+state and force-disables every competing start-value machine, the same set the
 fixed-reference self-check forces off in `_self_check_forced_overrides`
 (run_self_check.jl); keep the two lists aligned. Returns the adjusted config
 plus the effective config keys that were overridden (for the decision line in
-run.log/cgmes.log). MATPOWER/DTF runs never call this.
+run.log/cgmes_import_report.md). MATPOWER/DTF runs never call this.
 """
 function _cgmes_start_values_powerflow(pf_cfg::PowerFlowConfig, start_values::Symbol)
   overridden = String[]
@@ -135,45 +138,75 @@ function _cgmes_start_values_powerflow(pf_cfg::PowerFlowConfig, start_values::Sy
   pf_cfg.start_mode.flatstart && push!(overridden, "power_flow.flatstart=true")
   pf_cfg.start_mode.start_projection && push!(overridden, "power_flow.start_mode.start_projection=true")
   pf_cfg.start_mode.dc_seed_unconditional && push!(overridden, "power_flow.start_mode.dc_seed_unconditional=true")
+  pf_cfg.start_mode.rotate_behind_pst && push!(overridden, "power_flow.start_mode.rotate_behind_pst=true")
   pf_cfg.start_current_iteration.enabled && push!(overridden, "power_flow.start_current_iteration.enabled=true")
   pf_cfg.apslf_start.enabled && push!(overridden, "power_flow.apslf_start.enabled=true")
-  start_mode = _copy_start_mode_with(pf_cfg.start_mode; flatstart = false, start_projection = false, dc_seed_unconditional = false)
+  start_mode = _copy_start_mode_with(pf_cfg.start_mode; flatstart = false, start_projection = false, dc_seed_unconditional = false, rotate_behind_pst = false)
   return _copy_powerflow_with(pf_cfg; start_mode = start_mode, start_current_iteration = _copy_start_current_iteration_with(pf_cfg.start_current_iteration; enabled = false), apslf_start = ApslfStartConfig(enabled = false, order = pf_cfg.apslf_start.order)), overridden
 end
 
 """
     _flatstart_profile_config(cfg) -> (SparlectraConfig, overridden::Vector{String})
 
-The flat start chooses the voltage PROFILE a run starts from and nothing
-else (#463): with `power_flow.flatstart = true` every bus starts at 1.0 pu
-(PV and slack buses at their setpoints) and 0 degrees instead of the
-imported voltages, and every start machine follows its own key and works
-from that flat profile: the start projection with its DC, blend and
-ratio-profile candidates (`start_mode.start_projection`), the unconditional
-DC seed (`start_mode.dc_seed_unconditional`), the current-iteration
-pre-solve (`start_current_iteration.enabled`) and the APSLF start
-(`apslf_start.enabled`). Before #463 the flat start switched all of them
-off, so "projection from a flat start" could not be configured as written.
+The one place that decides what a flat start means for a run. With
+`power_flow.flatstart = true` the run really starts flat: every PQ bus at
+1.0 pu and the slack angle (behind phase shifters plus their shifts when
+`power_flow.start_mode.rotate_behind_pst` is set, see `initialVrect`), PV
+and slack buses at their setpoints,
+and the voltages stored in the case file (MATPOWER `VM`/`VA`, SCF start
+state) are ignored.
+For this run the flat start switches off every machine that would replace
+the flat profile by another one:
 
-What the flat start still overrides are the two start MODES, because they
-choose a profile as well: `voltage_mode` and the imported-angle
-`angle_mode`s read the stored columns (the MATPOWER import applies them only
-under a flat start and would turn it into a blended imported start), and
-`angle_mode = dc` makes the DC angles a requested start that excludes the
-measured candidates. Both go `classic` for this run; the DC angles stay
-available as the projection's measured DC candidate (`try_dc_start`). The
-stored configuration is left as it is (the Web UI greys the two mode
-controls while the flat start is on); the returned list names every
-overridden key for the run log.
+- the start projection with its DC and blend candidates
+  (`start_mode.start_projection`),
+- the unconditional DC seed (`start_mode.dc_seed_unconditional`),
+- the two start modes (`start_mode.angle_mode`, `start_mode.voltage_mode`
+  go `classic`; the non-classic ones read the stored columns or request
+  DC angles),
+- the ratio-profile candidate (`start_mode.ratio_profile`). The first
+  solve runs no projection and would not use it anyway; switching it off
+  here keeps it out of the projections that the rescue ladder
+  (`:settled_qlimits`, `:dc_seed`) and the auto mode (`L3_full_projection`)
+  run from the flat profile later in the same run.
+
+One thing stays because it keeps the flat profile's meaning on networks
+with off-nominal transformers: auxiliary buses (three-winding star points)
+start at the ratio of their stiffest winding (`_aux_bus_flat_start!`, on
+every flat start of the solver). Under a flat start the ratio profile acts
+on auxiliary buses only, PQ buses keep 1.0 pu.
+
+The current-iteration pre-solve (`start_current_iteration.enabled`) and the
+APSLF start (`apslf_start.enabled`) follow their own keys, both off by
+default: they iterate from the flat vector instead of replacing it by a
+projected one, and a user who switches them on asks for them explicitly.
+
+This reverses #463 (flat start sets only the profile, every start machine
+follows its own key): the configuration template carries
+`start_projection: true`, the Web UI has no control for it, and a flat start
+selected in the Web UI still ran from the DC start (seen on sp_case118).
+
+Called at the run boundary (`import_case`, `_run_sparlectra`, the QSTS
+runners `_run_qsts` and `_run_qsts_series`), so the service, the library
+entry points, QSTS and the Web UI see the same start. A CGMES import applies
+it after the `cgmes_import.start_values` decision. The
+rescue ladder after a failed first solve and `power_flow.mode = auto` set
+their own start machines on top and are recorded as such. The stored
+configuration is left as it is; the returned list names every overridden
+key for the run log.
 """
 function _flatstart_profile_config(cfg::SparlectraConfig)
   pf = cfg.powerflow
-  pf.start_mode.flatstart || return cfg, String[]
+  sm = pf.start_mode
+  sm.flatstart || return cfg, String[]
   overridden = String[]
-  pf.start_mode.angle_mode === :classic || push!(overridden, "power_flow.start_mode.angle_mode=classic")
-  pf.start_mode.voltage_mode === :classic || push!(overridden, "power_flow.start_mode.voltage_mode=classic")
+  sm.start_projection && push!(overridden, "power_flow.start_mode.start_projection=false")
+  sm.dc_seed_unconditional && push!(overridden, "power_flow.start_mode.dc_seed_unconditional=false")
+  sm.angle_mode === :classic || push!(overridden, "power_flow.start_mode.angle_mode=classic")
+  sm.voltage_mode === :classic || push!(overridden, "power_flow.start_mode.voltage_mode=classic")
+  sm.ratio_profile && push!(overridden, "power_flow.start_mode.ratio_profile=false")
   isempty(overridden) && return cfg, overridden
-  start_mode = _copy_start_mode_with(pf.start_mode; angle_mode = :classic, voltage_mode = :classic)
+  start_mode = _copy_start_mode_with(sm; start_projection = false, dc_seed_unconditional = false, angle_mode = :classic, voltage_mode = :classic, ratio_profile = false)
   return _copy_sparlectra_with_powerflow(cfg, _copy_powerflow_with(pf; start_mode = start_mode)), overridden
 end
 
@@ -237,6 +270,21 @@ function _import_sparlectra_context(casefile::AbstractString, path::Union{Nothin
     return (net = net, config = cfg, projected_start_applied = false, auto_profile_result = nothing, auto_profile_overrides = Dict{String,Any}())
   end
 
+  # SCF time series: the power flow runs the base case, with the units the
+  # base case parks parked; build_net stamps the net parameters as for SCF.
+  # The line names the series in the console and in run.log.
+  if is_scf_series(filename)
+    phase_callback("reading_scf_series")
+    series = _perf_profile_time!(performance_profile, :scf_case_read) do
+      read_scf_series(filename)
+    end
+    println(stdout, "SCF time series ", series.name, ": ", length(series.steps), " steps; the power flow runs the base case")
+    net = _perf_profile_time!(performance_profile, :scf_case_build) do
+      build_net(series; config = cfg)
+    end
+    return (net = net, config = cfg, projected_start_applied = false, auto_profile_result = nothing, auto_profile_overrides = Dict{String,Any}())
+  end
+
   # DTF deck (the resolution above has let it through by its content): the
   # importer builds the network directly, with the model options of the
   # run configuration, as import_case does for the services
@@ -265,15 +313,6 @@ function _import_sparlectra_context(casefile::AbstractString, path::Union{Nothin
       build_net(scfcase; config = cfg)
     end
     return (net = net, config = cfg, projected_start_applied = false, auto_profile_result = nothing, auto_profile_overrides = Dict{String,Any}())
-  end
-
-  # The net cache stored the CONVERTED SCFCase, the very side product the
-  # direct import no longer creates, so the cache fell away with the
-  # conversion. The key
-  # stays readable and says so out loud instead of silently doing nothing;
-  # the removal follow-up is issue #292.
-  if model_cfg.net_cache_enabled
-    @warn "model.net_cache_enabled is inert since the direct import: the import no longer produces the converted case the cache stored." casefile = filename
   end
 
   phase_callback("reading_matpower_case")
@@ -439,8 +478,8 @@ function _self_check_forced_overrides()::Dict{String,Any}
   return Dict{String,Any}(
     "power_flow" => Dict{String,Any}(
       "max_iter" => 1,
-      # `flatstart` is the legacy power_flow-level key — the only one the
-      # config schema accepts — and PowerFlowConfig merges it into the
+      # `flatstart` is the legacy power_flow-level key, the only one the
+      # config schema accepts, and PowerFlowConfig merges it into the
       # start_mode raw dict (configuration.jl), so this reliably forces
       # flatstart=false even when the base config sets `flatstart: true`
       # (observed in a WebUI configuration.yaml, where it silently wiped the
@@ -451,12 +490,15 @@ function _self_check_forced_overrides()::Dict{String,Any}
         "voltage_mode" => "all_bus_vm",
         "start_projection" => false,
         "dc_seed_unconditional" => false,
+        # a stored start without angles would otherwise be turned behind
+        # phase shifters (initialVrect), not taken verbatim
+        "rotate_behind_pst" => false,
       ),
       "start_current_iteration" => Dict{String,Any}("enabled" => false),
       "apslf_start" => Dict{String,Any}("enabled" => false),
       "qlimits" => Dict{String,Any}("enabled" => false),
       # The self-check measures the residual at the imported reference state
-      # by design — it is SUPPOSED to look non-converged. The rescue ladder
+      # by design: it is SUPPOSED to look non-converged. The rescue ladder
       # (on by default) would retry from other start states and leave a
       # different net behind, so the measured residual would no longer be the
       # imported model's. Same reasoning as the start-value machines above.

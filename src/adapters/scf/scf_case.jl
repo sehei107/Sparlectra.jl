@@ -219,6 +219,17 @@ Base.@kwdef mutable struct SCFTapControllerRow
   pos::_ScfOptGridPos = nothing
   pos_min::_ScfOptGridPos = nothing
   pos_max::_ScfOptGridPos = nothing
+  # ratio changer only: "linear" when the positions count whole steps of
+  # the ratio from ratio_base (a CGMES changer); absent means the cascade
+  # fraction grid of nameplate data, so files written before the key stay
+  # readable as they were
+  grid::Union{Nothing,String} = nothing
+  # false when no nameplate row declared the changer (the constructor
+  # grid); absent means declared, as every file before the key
+  declared::Union{Nothing,Bool} = nothing
+  # true when the step was not transferred and pos is the assumed middle
+  # position; absent means pos is the step of the source
+  step_assumed::Union{Nothing,Bool} = nothing
 end
 
 Base.@kwdef mutable struct SCFTapChangerRow
@@ -326,7 +337,6 @@ Base.@kwdef mutable struct SCFSparlectra
   extra::Dict{String,Any} = Dict{String,Any}()
   measurements::Dict{String,Any} = Dict{String,Any}()
   start_state::SCFStartState = SCFStartState()
-  contingencies::Dict{String,Any} = Dict{String,Any}()
   short_circuit::Dict{String,Any} = Dict{String,Any}()
   config::Dict{String,Any} = Dict{String,Any}()
   transformer_types::Dict{String,Any} = Dict{String,Any}()
@@ -368,7 +378,26 @@ end
 _scf_opt_num(row, key::String, context::String)::_ScfOptNum = haskey(row, key) ? _scf_num(row[key], context) : nothing
 _scf_opt_int(row, key::String, context::String)::_ScfOptInt = haskey(row, key) ? _scf_int(row[key], context) : nothing
 _scf_tri_num(row, key::String, context::String)::_ScfTriNum = haskey(row, key) ? (row[key] === nothing ? nothing : _scf_num(row[key], context)) : missing
-_scf_tri_str(row, key::String)::_ScfTriStr = haskey(row, key) ? (row[key] === nothing ? nothing : String(row[key])) : missing
+# PGM enums by name in integer order (power_grid_model.enum): PGM's own JSON
+# writes the integer, SCF writes the name, and the reader accepts both and
+# keeps the name so the rest of the import compares strings only
+const _SCF_PGM_ENUMS = Dict{String,Vector{String}}(
+  "measured_terminal_type" => ["branch_from", "branch_to", "source", "shunt", "load", "generator", "branch3_1", "branch3_2", "branch3_3", "node"],
+  "angle_measurement_type" => ["local_angle", "global_angle"],
+  "fault_type" => ["three_phase", "single_phase_to_ground", "two_phase", "two_phase_to_ground"],
+)
+
+function _scf_enum_str(v, key::String)::String
+  names = _SCF_PGM_ENUMS[key]
+  if v isa Integer && !(v isa Bool)
+    0 <= v < length(names) && return names[v+1]
+  elseif v isa AbstractString
+    v in names && return String(v)
+  end
+  throw(ArgumentError("SCF: $(key) must be one of $(join(names, ", ")) or its PGM integer 0 to $(length(names) - 1); got $(repr(v))."))
+end
+
+_scf_tri_str(row, key::String)::_ScfTriStr = haskey(row, key) ? (row[key] === nothing ? nothing : _scf_enum_str(row[key], key)) : missing
 
 _scfcase_node(row) = SCFNodeRow(id = _scf_int(_scf_require(row, "id", "a node entry"), "node.id"), u_rated = _scf_num(_scf_require(row, "u_rated", "a node entry"), "node.u_rated"))
 
@@ -502,7 +531,7 @@ function _scfcase_fault(row)
     id = _scf_int(_scf_get(row, "id", 0), "fault.id"),
     fault_object = _scf_int(_scf_require(row, "fault_object", "a fault entry"), "fault.fault_object"),
     status = _scf_opt_int(row, "status", "fault.status"),
-    fault_type = haskey(row, "fault_type") ? String(row["fault_type"]) : nothing,
+    fault_type = haskey(row, "fault_type") ? _scf_enum_str(row["fault_type"], "fault_type") : nothing,
     r_f = _scf_opt_num(row, "r_f", "fault.r_f"),
     x_f = _scf_opt_num(row, "x_f", "fault.x_f"),
   )
@@ -543,6 +572,9 @@ function _scfcase_tap_controller(row)::SCFTapControllerRow
     pos = _scf_opt_gridpos(row, "pos", "controller.pos"),
     pos_min = _scf_opt_gridpos(row, "pos_min", "controller.pos_min"),
     pos_max = _scf_opt_gridpos(row, "pos_max", "controller.pos_max"),
+    grid = _scfcase_opt_str(row, "grid"),
+    declared = _scfcase_opt_bool(row, "declared"),
+    step_assumed = _scfcase_opt_bool(row, "step_assumed"),
   )
 end
 
@@ -653,7 +685,6 @@ function scfcase_from_root(root::AbstractDict)::SCFCase
       extra = _scfcase_dict(_scf_get(spar_raw, "extra", nothing)),
       measurements = _scfcase_dict(_scf_get(spar_raw, "measurements", nothing)),
       start_state = _scfcase_start_state(_scf_get(spar_raw, "start_state", nothing)),
-      contingencies = _scfcase_dict(_scf_get(spar_raw, "contingencies", nothing)),
       short_circuit = _scfcase_dict(_scf_get(spar_raw, "short_circuit", nothing)),
       config = _scfcase_dict(_scf_get(spar_raw, "config", nothing)),
       transformer_types = _scfcase_dict(_scf_get(spar_raw, "transformer_types", nothing)),
@@ -806,7 +837,7 @@ function scf_root_dict(case::SCFCase)::Dict{String,Any}
     isempty(components) || (sd["components"] = components)
     start_state = _scfdict_start_state(spar.start_state)
     isempty(start_state) || (sd["start_state"] = start_state)
-    for (key, block) in (("measurements", spar.measurements), ("contingencies", spar.contingencies), ("short_circuit", spar.short_circuit), ("config", spar.config), ("transformer_types", spar.transformer_types), ("scenarios", spar.scenarios), ("branch_shunt_split", spar.branch_shunt_split), ("tap_changer_models", spar.tap_changer_models))
+    for (key, block) in (("measurements", spar.measurements), ("short_circuit", spar.short_circuit), ("config", spar.config), ("transformer_types", spar.transformer_types), ("scenarios", spar.scenarios), ("branch_shunt_split", spar.branch_shunt_split), ("tap_changer_models", spar.tap_changer_models))
       isempty(block) || (sd[key] = block)
     end
     root["sparlectra"] = sd
@@ -878,6 +909,16 @@ end
 
 ## --- file IO ----------------------------------------------------------------
 
+# the checks and the conversion of read_scf_json on the document text; the
+# SCF series reader hands in the base case it read from its zip
+function _scfcase_from_text(text::AbstractString)::SCFCase
+  root = scf_json_parse(String(text))
+  _scf_validate_schema(root)
+  _scf_validate_studies(root)
+  _scf_validate_references(root)
+  return scfcase_from_root(root)
+end
+
 """
     read_scf_json(path) -> SCFCase
 
@@ -889,11 +930,7 @@ stage runs when the network is built ([`build_net`](@ref)).
 """
 function read_scf_json(path::AbstractString)::SCFCase
   isfile(path) || throw(ArgumentError("SCF: case file not found: $(path)"))
-  root = scf_json_parse(read(String(path), String))
-  _scf_validate_schema(root)
-  _scf_validate_studies(root)
-  _scf_validate_references(root)
-  return scfcase_from_root(root)
+  return _scfcase_from_text(read(String(path), String))
 end
 
 """

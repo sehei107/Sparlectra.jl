@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # file: src/adapters/cgmes/CGMESImporter.jl
-# purpose: lean CGMES (ENTSO-E CIM) import for Sparlectra — module root.
+# purpose: lean CGMES (ENTSO-E CIM) import for Sparlectra, module root.
 # Stage 0: container, generic RDF/XML reader, merged store, summarizeCGMES.
 # User documentation: docs/src/cgmes_import.md.
 
@@ -28,18 +28,24 @@ module CGMESImporter
 
 import EzXML
 import ZipArchives
+import Random
+import Dates
+using Dates: DateTime
+using Printf: @printf
 import Downloads
 import ..Sparlectra
 
 export CGMESFile, CIMObject, CGMESFileInfo, CGMESStore, CGMESSummary
-export collectCGMESFiles, loadCGMES, summarizeCGMES
+export collectCGMESFiles, loadCGMES, summarizeCGMES, cgmesEquipmentModelIds, cgmesModelKey
 export objectsOf, countOf, num, str, boolval, enumval, ref, refsAll, unresolvedReferences
 export analyzeCGMES, importFailureAnalysis
 export CGMESTopology, buildTopology
 export fetchCGMESTestSet, ensureCGMESTestConfigurations, CGMES_TESTSET_ALIASES
 export fetchReliCapGridSet, RELICAPGRID_ALIASES, RELICAPGRID_COMBINED, allCGMESTestSetAliases
-export CGMESImportResult, CGMESShortCircuitData, importCGMES, createNetFromCGMES, compareWithSV, shortCircuitCoverage, printShortCircuitCoverage
+export CGMESImportResult, CGMESShortCircuitData, importCGMES, createNetFromCGMES, compareWithSV, cgmesMeasurementKeys, generateMeasurementTableFromSV, shortCircuitCoverage, printShortCircuitCoverage, dynamicsReportLines
 export writeCGMESFiles, CGMESLineShortCircuit, cgmesLineShortCircuitData
+export CGMESSeriesInput, CGMESSeriesClassDiff, CGMESSeriesPair, CGMESSeriesReport, checkCGMESSeries, printCGMESSeriesReport, writeCGMESSeriesReport
+export CGMESSeriesError, CGMESSnapshotDelta, CGMESSeriesUnion, buildCGMESSeriesUnion, compareSnapshotReproduction
 
 include("cgmes_schema.jl")
 include("cgmes_container.jl")
@@ -50,7 +56,11 @@ include("cgmes_voltage_inference.jl")
 include("cgmes_topology.jl")
 include("cgmes_keys.jl")
 include("cgmes_mapping.jl")
+include("cgmes_dynamics.jl")
 include("cgmes_report.jl")
+include("cgmes_measurements.jl")
+include("cgmes_series.jl")
+include("cgmes_union.jl")
 include("cgmes_export.jl")
 include("cgmes_testsets.jl")
 

@@ -41,6 +41,9 @@ const SUITE_SPECS = ExampleSpec[
   ExampleSpec(name = "auto_slack_selection", file = "others/exp_auto_slack_selection.jl", purpose = "automatic slack selection (power_flow.auto_slack / ensureSlack!) on a case whose data registers no voltage reference"),
   ExampleSpec(name = "matpower_gencost", file = "others/exp_matpower_gencost.jl", purpose = "MATPOWER generator costs on the shipped sp_case9: kept per generator, written back unchanged (also through SCF), a unit without costs named instead of shifting the rows"),
   ExampleSpec(name = "island_reference_priority", file = "others/exp_island_reference_priority.jl", purpose = "reference priority on the shipped two-island case: the reference each AC island takes and why, with and without stated priorities, in the power flow and in N-1"),
+  ExampleSpec(name = "contingency_events", file = "others/exp_contingency_events.jl", purpose = "correlated contingency events (double circuits, busbar sections, stations, couplers, name groups) and N-2 pairs on the shipped SCF cases sp_case14 and sp_case60"),
+  ExampleSpec(name = "case_scenarios", file = "others/exp_case_scenarios.jl", purpose = "the scenarios block of a case file run alone, as the Web UI Scenarios button does: hand-written events, a load increase and generated busbar sections on a copy of sp_case60"),
+  ExampleSpec(name = "scf_series", file = "others/exp_scf_series.jl", purpose = "the shipped SCF time series sp_case14_day.qsts.zip: one step solved by hand with apply! and runpf!, then all 96 steps with the snapshot run (runQsts), the result files and a few steps with the example controls (tap control range, bank at priority 1)"),
   ExampleSpec(name = "powsybl_iidm_import", file = "others/exp_powsybl_iidm_import.jl", purpose = "PowSyBl IIDM file read in Julia without Python: shipped ieee14.xiidm and micro_grid_be.xiidm imported, solved and compared with the OpenLoadFlow reference"),
   ExampleSpec(name = "jacobian_block", file = "others/exp_jacobian_block.jl", purpose = "2x2 block of the rectangular Jacobian between two buses: layout, finite-difference check, zero block of unconnected buses, network diagram with the position of every bus in the Jacobian"),
   ExampleSpec(name = "tap_influence_zone", file = "others/exp_tap_influence_zone.jl", purpose = "one transformer tap moved by a few steps, power flow before and after, the buses whose voltage changes beyond a threshold"),
@@ -48,12 +51,16 @@ const SUITE_SPECS = ExampleSpec[
   ExampleSpec(name = "ac_rescue_dc_fallback", file = "others/exp_ac_rescue_dc_fallback.jl", purpose = "non-convergence handling: power_flow.rescue strategy ladder plus power_flow.dc.fallback standalone-DC result"),
   ExampleSpec(name = "cgmes_import_analysis", file = "others/exp_cgmes_import_analysis.jl", purpose = "analyzeCGMES report naming the missing declared dependency of an incomplete CGMES delivery"),
   ExampleSpec(name = "cgmes_infer_base_voltages", file = "others/exp_cgmes_infer_base_voltages.jl", purpose = "cgmes_import.infer_base_voltages: reconstruct missing nominal voltages from the SV state and solve"),
+  ExampleSpec(name = "cgmes_energy_source", file = "others/exp_cgmes_energy_source.jl", purpose = "cgmes_import.map_energy_source: EnergySource generation left out (default) and mapped as PQ injection, with the slack power of both runs; the same park as CGMES 3.0 PowerElectronicsConnection with cgmes_import.map_power_electronics, exported to CGMES 2.4.15 as EquivalentInjection and imported again"),
+  ExampleSpec(name = "cgmes_shunt_control", file = "others/exp_cgmes_shunt_control.jl", purpose = "cgmes_import.shunt_control: SmallGrid banks with a voltage RegulatingControl as switched-bank regulators; a raised target switches blocks"),
+  ExampleSpec(name = "dynamic_data", file = "others/exp_dynamic_data.jl", purpose = "DynamicData on sp_case14 generators: unit type, validation error, SCF round trip (format 1.3)"),
   ExampleSpec(name = "cgmes_topology_processor", file = "others/exp_cgmes_topology_processor.jl", purpose = "node-breaker import without a TP profile (#314): derived bus partition vs. the shipped TP on MiniGrid"),
   ExampleSpec(name = "export_solution", file = "others/export_solution.jl", args = ["sp_case9.m"], purpose = "exports a solver-agnostic PFModel/PFSolution for the shipped sp_case9"),
   ExampleSpec(name = "network_analyzer", file = "others/network_analyzer.jl", purpose = "topology analysis of a small network before and after removing a branch"),
   ExampleSpec(name = "using_links", file = "others/using_links.jl", purpose = "busbar coupler modeled as a bus link, demonstrating open/close link behavior"),
   ExampleSpec(name = "diagnose_self_check", file = "others/exp_diagnose_self_check.jl", project = "app", purpose = "run_fixed_reference_self_check and the narrative diagnose.log report"),
   ExampleSpec(name = "cgmes_export_demo", file = joinpath("cgmes", "cgmes_export_demo.jl"), optional = true, purpose = "CGMES 2.4.15 export (writeCGMESFiles) on a small net"),
+  ExampleSpec(name = "cgmes_export_physical", file = joinpath("cgmes", "cgmes_export_physical.jl"), purpose = "CGMES export of a net built from line data in ohm/km and nF/km, with the re-import"),
 ]
 
 const SUITE_NOTES = [

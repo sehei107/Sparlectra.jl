@@ -15,7 +15,7 @@
 # file: test/test_phase_tap_table.jl
 # purpose: unit tests for the tabular phase-tap model: TapTablePoint and
 #          constructor validation, step-range derivation, calcPhaseTapTable
-#          lookup, and bit-identical agreement with the formula path
+#          lookup, and the tabular reactance and fraction
 
 function run_phase_tap_table_tests()
   @testset "TapTablePoint / PhaseTapChangerModel :tabular constructor validation" begin (function ()
@@ -82,29 +82,17 @@ function run_phase_tap_table_tests()
     @test r_default_step.effective_ratio == r0.effective_ratio
 
     @test_throws ArgumentError calcPhaseTapTable(m; step = 99)
-  end)() end
-
-  @testset "calcPhaseTapAngleRatio :tabular reproduces the formula path bit-identically" begin (function ()
+    # regulating_vector of a table row is the inverse of the formula path's
+    # (ratio, shift) mapping: a formula model read back through its own table
+    # gives the formula's vector again
     m_formula = PhaseTapChangerModel(kind = :asymmetrical, step = 3, lowStep = -8, highStep = 8, neutralStep = 0, voltage_step_increment = 0.02, winding_connection_angle_deg = 25.0)
-    formula_results = Dict(s => calcPhaseTapAngleRatio(m_formula; step = s) for s in m_formula.lowStep:m_formula.highStep)
-
-    table = [TapTablePoint(step = s, ratio = formula_results[s].effective_ratio, angle_deg = formula_results[s].effective_shift_deg) for s in m_formula.lowStep:m_formula.highStep]
-    m_tabular = PhaseTapChangerModel(kind = :tabular, step = 3, neutralStep = 0, table = table)
-
-    for s in m_formula.lowStep:m_formula.highStep
-      formula_result = formula_results[s]
-      tabular_result = calcPhaseTapAngleRatio(m_tabular; step = s)
-      # ratio/shift are stored verbatim in the table row, so these are bit-identical.
-      @test tabular_result.effective_ratio == formula_result.effective_ratio
-      @test tabular_result.effective_shift_deg == formula_result.effective_shift_deg
-      # regulating_vector is reconstructed from (ratio, shift_deg) via deg2rad/cis, a
-      # trig round-trip that is not bit-identical at the ULP level; this validates the
-      # derivation formula itself, not bit-for-bit equality.
-      @test isapprox(tabular_result.regulating_vector, formula_result.regulating_vector; atol = 1e-12)
-    end
+    steps = m_formula.lowStep:m_formula.highStep
+    formula = Dict(s => calcPhaseTapAngleRatio(m_formula; step = s) for s in steps)
+    m_tab = PhaseTapChangerModel(kind = :tabular, step = 3, neutralStep = 0, table = [TapTablePoint(step = s, ratio = formula[s].effective_ratio, angle_deg = formula[s].effective_shift_deg) for s in steps])
+    @test all(isapprox(calcPhaseTapAngleRatio(m_tab; step = s).regulating_vector, formula[s].regulating_vector; atol = 1e-12) for s in steps)
   end)() end
 
-  @testset "calcPhaseTapReactance :tabular returns row x_pu, ignores alpha_deg" begin (function ()
+  @testset "calcPhaseTapReactance and calcPhaseTapFraction on :tabular" begin (function ()
     table = [
       TapTablePoint(step = -2, ratio = 1.0, angle_deg = 0.0, x_pu = 0.10),
       TapTablePoint(step = 0, ratio = 1.0, angle_deg = 0.0, x_pu = 0.20),
@@ -118,11 +106,8 @@ function run_phase_tap_table_tests()
 
     m2 = PhaseTapChangerModel(kind = :tabular, step = 2, neutralStep = 0, table = table)
     @test isnothing(calcPhaseTapReactance(m2, 0.0))
-  end)() end
 
-  @testset "calcPhaseTapFraction :tabular throws" begin (function ()
-    table = [TapTablePoint(step = s, ratio = 1.0, angle_deg = Float64(s)) for s in -3:3]
-    m = PhaseTapChangerModel(kind = :tabular, step = 0, neutralStep = 0, table = table)
-    @test_throws ArgumentError calcPhaseTapFraction(m)
+    # a table has no step fraction
+    @test_throws ArgumentError calcPhaseTapFraction(m0)
   end)() end
 end

@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -131,6 +131,24 @@ function _qv_characteristic_summary(net::Union{Nothing,Net}, converged::Bool; ba
 end
 
 """
+    _qlimit_stability_summary(raw_result) -> NamedTuple
+
+The Q-limit stability check of a run (`qlimitStabilityReport`, the
+conditions (6) and (7) of Zhao et al. at every voltage-regulated bus) as the
+service reports it: `status`, `violations`, `buses` (the failing ones,
+`;`-joined) and the one `line` (`qlimit_stability_line`) that goes into
+`run.log`, the metadata and the result page. Read from the result
+diagnostics; a result without them (a DC solve) is not checked.
+"""
+function _qlimit_stability_summary(raw_result::SparlectraRunResult)
+  d = raw_result.diagnostics
+  hasproperty(d, :qlimit_stability_status) || return (status = "not_checked", violations = 0, buses = "", line = qlimit_stability_line(:not_checked, NamedTuple[]))
+  rows = d.qlimit_stability_report
+  bad = [r.bus_name for r in rows if !r.ok]
+  return (status = String(d.qlimit_stability_status), violations = Int(d.qlimit_stability_violations), buses = join(bad, ";"), line = qlimit_stability_line(d.qlimit_stability_status, rows))
+end
+
+"""
     _final_q_check_summary(raw_result) -> NamedTuple
 
 The final Q-limit check of a run as the service reports it: `status`,
@@ -203,9 +221,44 @@ function _power_mode_lu_lifecycle_metadata(rect_status)::Dict{String,Any}
   return md
 end
 
+# the plausibility check of the run (power_flow.plausibility.vmin_warn):
+# status, the lowest energized bus with its voltage and the warning text
+# (nothing when no bus is below the threshold); empty for a result without
+# the check (DC)
+function _plausibility_lifecycle_metadata(raw_result::SparlectraRunResult)::Dict{String,Any}
+  d = raw_result.diagnostics
+  hasproperty(d, :plausibility_status) || return Dict{String,Any}()
+  return Dict{String,Any}(
+    "plausibility_status" => String(d.plausibility_status),
+    "plausibility_vmin_warn_pu" => d.plausibility_vmin_warn_pu,
+    "plausibility_min_vm_pu" => isfinite(d.plausibility_min_vm_pu) ? d.plausibility_min_vm_pu : nothing,
+    "plausibility_min_vm_bus" => d.plausibility_min_vm_bus,
+    "plausibility_low_vm_count" => d.plausibility_low_vm_count,
+    "plausibility_warning" => isempty(d.plausibility_warning) ? nothing : d.plausibility_warning,
+  )
+end
+
+# Why a non-converged APSLF solve failed (AnalyticLoadFlow diagnosis, set by
+# apslf_execution.jl); all values nothing for a converged run or another
+# solver. Also used for the failure metadata of an island-wise run.
+function _apslf_diagnosis_metadata(status)::Dict{String,Any}
+  field(name::Symbol) = status !== nothing && hasproperty(status, name) ? getproperty(status, name) : nothing
+  finite_or_nothing(x) = x isa Real && isfinite(x) ? x : nothing
+  reason = field(:apslf_diagnosis_reason)
+  return Dict{String,Any}(
+    "apslf_diagnosis_reason" => reason === nothing ? nothing : String(reason),
+    "apslf_pole_min_abs" => finite_or_nothing(field(:apslf_pole_min_abs)),
+    "apslf_pole_min_bus" => field(:apslf_pole_min_bus),
+    "apslf_pole_pair" => field(:apslf_pole_pair),
+    "apslf_pade_change" => finite_or_nothing(field(:apslf_pade_change)),
+    "apslf_diagnosis_line" => field(:apslf_diagnosis_line),
+  )
+end
+
 function _build_success_lifecycle_metadata(raw_result::SparlectraRunResult, config::SparlectraConfig; numerical_success::Bool, final_outcome::Dict{String,Any}, csv_export_status::AbstractString, csv_export_skip_reason, csv_export_error, csv_artifacts::Vector{String}, detailed_result_csv::Bool, config_overrides, config_override_source::AbstractString, casefile, config_file, performance_timing, run_diagnostics::Bool, csv_format_name::AbstractString, qlimit_metadata::AbstractDict, csv_timing_metadata::AbstractDict)::Dict{String,Any}
   qv = _qv_characteristic_summary(raw_result.net, raw_result.numerical_converged)
   fq = _final_q_check_summary(raw_result)
+  qs = _qlimit_stability_summary(raw_result)
   rect_status = raw_result.net === nothing ? nothing : rectangular_pf_status(raw_result.net)
   current_iteration_metadata = _current_iteration_lifecycle_metadata(rect_status)
   merit_linesearch_metadata = _merit_linesearch_lifecycle_metadata(rect_status)
@@ -218,7 +271,8 @@ function _build_success_lifecycle_metadata(raw_result::SparlectraRunResult, conf
   # no_reference_bus_remaining, base_pf_not_converged); nothing when no
   # classic mode ran
   classic_outer_loop_stop = _classic_outer_loop_stop(rect_status)
-  pv_to_pq_events = raw_result.net === nothing ? 0 : length(raw_result.net.qLimitLog)
+  # the log holds the releases as well (kind :release); these are the PV->PQ switches
+  pv_to_pq_events = raw_result.net === nothing ? 0 : qlimit_pv_to_pq_event_count(raw_result.net)
   active_set_events = config.powerflow.qlimits.enforcement_mode === :active_set ? pv_to_pq_events : 0
   # Jacobian conditioning of the exact system the rectangular solver
   # factored (lazy thunk in the solver status, evaluated once here). Non-NR
@@ -231,10 +285,6 @@ function _build_success_lifecycle_metadata(raw_result::SparlectraRunResult, conf
   apslf_field(name::Symbol) = rect_status !== nothing && hasproperty(rect_status, name) ? getproperty(rect_status, name) : nothing
   metadata = merge(Dict{String,Any}(
     "apslf_pade_margin" => apslf_field(:apslf_convergence_radius),
-    # DEPRECATED (0.30.2): the former name of apslf_pade_margin, same value.
-    # Still written so readers of 0.30.1 metadata keep working within the
-    # patch series; new readers use apslf_pade_margin.
-    "apslf_convergence_radius" => apslf_field(:apslf_convergence_radius),
     "apslf_pade_margin_bus" => apslf_field(:apslf_convergence_bus),
     "apslf_series_radius" => apslf_field(:apslf_series_radius),
     "apslf_series_radius_bus" => apslf_field(:apslf_series_radius_bus),
@@ -249,6 +299,10 @@ function _build_success_lifecycle_metadata(raw_result::SparlectraRunResult, conf
     "final_q_check_buses" => fq.buses,
     "final_q_check_max_dev_pu" => fq.max_dev_pu,
     "final_q_check_line" => fq.line,
+    "qlimit_stability_status" => qs.status,
+    "qlimit_stability_violations" => qs.violations,
+    "qlimit_stability_buses" => qs.buses,
+    "qlimit_stability_line" => qs.line,
     "solver_status" => "completed",
     "service_status" => "completed",
     "numerical_status" => numerical_success ? "converged" : "not_converged",
@@ -269,6 +323,15 @@ function _build_success_lifecycle_metadata(raw_result::SparlectraRunResult, conf
     "q_limit_pv_to_pq_events" => pv_to_pq_events,
     "q_limit_classic_outer_loop_passes" => classic_outer_loop_passes,
     "q_limit_classic_outer_loop_stop" => classic_outer_loop_stop,
+    # the frequency the network was built with: an SCF file's meta.f_nom
+    # wins over model.nominal_frequency_hz, so effective_config.yaml (the
+    # key) can name another value than the one the run used
+    "network_nominal_frequency_hz" => raw_result.net === nothing ? nothing : raw_result.net.nominal_frequency_hz,
+    # whether that frequency entered the model at all (case_file,
+    # configuration, not_used) and the header line run.log and the result
+    # page show
+    "frequency_source" => raw_result.net === nothing ? nothing : nominal_frequency_source(raw_result.net),
+    "frequency_line" => raw_result.net === nothing ? nothing : nominal_frequency_line(raw_result.net),
     "webui_request_settings" => merge(Dict{String,Any}(String(key) => value for (key, value) in config_overrides), Dict{String,Any}(
       "casefile" => casefile,
       "config_file" => config_file,
@@ -278,9 +341,22 @@ function _build_success_lifecycle_metadata(raw_result::SparlectraRunResult, conf
       "detailed_result_csv" => detailed_result_csv,
       "detailed_result_csv_format" => csv_format_name,
     )),
-  ), qlimit_metadata, current_iteration_metadata, merit_linesearch_metadata, wrong_branch_metadata, trust_region_metadata, island_wise_metadata, _jacobian_reuse_lifecycle_metadata(rect_status), _power_mode_lu_lifecycle_metadata(rect_status))
+  ), qlimit_metadata, current_iteration_metadata, merit_linesearch_metadata, wrong_branch_metadata, trust_region_metadata, island_wise_metadata, _jacobian_reuse_lifecycle_metadata(rect_status), _power_mode_lu_lifecycle_metadata(rect_status), _plausibility_lifecycle_metadata(raw_result), _apslf_diagnosis_metadata(rect_status))
   # Partial CSV exports are still successful API runs, but the Web UI needs the
   # partial file error in the stable lifecycle field used by Last Errors.
   haskey(csv_timing_metadata, :partial_error) && (metadata["detailed_result_csv_error"] = csv_timing_metadata[:partial_error])
   return metadata
+end
+
+# the system frequency for the services that do not build their metadata
+# with _build_success_lifecycle_metadata (state estimation, the SE-started
+# power flow, N-1): the same three keys and the same run.log line as a
+# power-flow run, written right after the import so a later failure keeps them
+function _record_network_frequency!(metadata::Dict{String,Any}, net::Net, logfile::AbstractString)
+  line = nominal_frequency_line(net)
+  metadata["network_nominal_frequency_hz"] = net.nominal_frequency_hz
+  metadata["frequency_source"] = nominal_frequency_source(net)
+  metadata["frequency_line"] = line
+  open(io -> println(io, "System frequency: ", line), logfile, "a")
+  return nothing
 end

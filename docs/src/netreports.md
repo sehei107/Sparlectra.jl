@@ -1,7 +1,7 @@
 # Network Reports (ACPFlowReport)
 
-Besides the formatted terminal output (`printACPFlowResults`), Sparlectra provides a
-machine-readable report object for downstream processing.
+`buildACPFlowReport` returns a machine-readable report object next to the
+formatted terminal output of `printACPFlowResults`.
 
 ## Build a report
 
@@ -15,8 +15,9 @@ addBus!(net = net, busName = "B2", vn_kV = 110.0)
 addBus!(net = net, busName = "B3", vn_kV = 110.0)
 addBus!(net = net, busName = "B4", vn_kV = 110.0)
 
-addACLine!(net = net, fromBus = "B1", toBus = "B2", length = 5.0, r = 0.05, x = 0.5)
-addACLine!(net = net, fromBus = "B3", toBus = "B4", length = 20.0, r = 0.05, x = 0.5)
+# line totals in ohm and siemens, or values per km and the length
+addACLine!(net = net, fromBus = "B1", toBus = "B2", r_ohm = 0.6, x_ohm = 1.95, b_s = 1.5e-5, length_km = 5.0)
+addACLinePerKm!(net = net, fromBus = "B3", toBus = "B4", length_km = 20.0, r_ohm_per_km = 0.12, x_ohm_per_km = 0.39, c_nf_per_km = 9.5)
 
 # Optional bus-link connection (reported in report.links)
 addLink!(net = net, fromBus = "B2", toBus = "B3", status = 1)
@@ -40,17 +41,12 @@ report = buildACPFlowReport(
 )
 ```
 
+The snippet is a complete script for a `julia --project=.` session.
+
 ## Report content
 
-`ACPFlowReport` contains:
-
-- `metadata`
-- `nodes`
-- `branches`
-- `links`
-- `q_limit_events`
-
-Example access:
+`ACPFlowReport` has the fields `metadata`, `nodes`, `branches`, `links`,
+`transformer_controls`, `q_limit_events` and `hvdc_links`:
 
 ```julia
 report.metadata.total_p_loss_MW
@@ -61,7 +57,7 @@ report.links
 
 ## DataFrame conversion
 
-Each table-like vector can be converted directly:
+Each vector field converts directly:
 
 ```julia
 using DataFrames
@@ -70,9 +66,3 @@ nodes_df = DataFrame(report.nodes)
 branches_df = DataFrame(report.branches)
 links_df = DataFrame(report.links)
 ```
-
-## Full runnable example
-
-The "Build a report" snippet above is a complete runnable script: paste it
-into a `julia --project=.` session and follow it with the access and
-DataFrame-conversion lines from this page.

@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -92,3 +92,7 @@ profileTagFromKeyword(kw::AbstractString)::Symbol = get(PROFILE_KEYWORD_TAGS, up
 # Profile tags that carry power-flow relevant data (Stage 0 reads only these;
 # DL/GL/DY are counted and skipped).
 const IMPORT_PROFILE_TAGS = Set([:EQ, :EQ_OP, :EQ_SC, :SSH, :TP, :SV, :EQ_BD, :EQ_BD_OP, :TP_BD])
+
+# The import set plus the dynamics profile, read with
+# cgmes_import.read_dynamics = true (#506).
+const IMPORT_PROFILE_TAGS_WITH_DY = union(IMPORT_PROFILE_TAGS, Set([:DY]))

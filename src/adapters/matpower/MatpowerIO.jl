@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -186,7 +186,7 @@ end
 MATPOWER semantics:
 - column 9 (TAP) == 0 means "no transformer tap specified" and is treated electrically as 1.0 by Y-bus stamping and import code.
 
-This helper is kept for callers that explicitly want normalized data, but `read_case` preserves raw TAP values so import code can distinguish lines (`TAP == 0`) from explicit nominal-tap transformers (`TAP == 1`).
+This helper is kept for callers that explicitly want normalized data, but `read_case` preserves raw TAP values so import code can tell `TAP == 1` between two voltage levels (a transformer with ratio 1) from `TAP == 0`.
 """
 function normalize_branch_tap!(branch::AbstractMatrix{<:Real})
   ncol = size(branch, 2)
@@ -420,7 +420,7 @@ end
 
 # MATLAB accepts both `;` and bare newlines as matrix row separators. Official
 # MATPOWER cases terminate every row with `;`, but e.g. RTS-GMLC relies on
-# newline-separated rows only — splitting on `;` alone would silently collapse
+# newline-separated rows only: splitting on `;` alone would silently collapse
 # the whole matrix into a single row.
 const _MATPOWER_ROW_SEPARATORS = in(";\r\n")
 
@@ -446,7 +446,7 @@ end
 end
 
 # Parses up to `maxvals` whitespace-separated numbers of `row` into `dest`
-# (tokens beyond `maxvals` are ignored — MATPOWER fixed-width truncation).
+# (tokens beyond `maxvals` are ignored: MATPOWER fixed-width truncation).
 # Returns the number of parsed values; 0 means a blank row. Allocation-free:
 # tokens are SubString views of the row.
 function _parse_matpower_row!(dest::AbstractVector{Float64}, row::AbstractString, maxvals::Int)::Int
@@ -594,7 +594,14 @@ function try_parse_sparlectra_extension(txt::String)
   # fraction of the estimator's r-grid (0 = no ratio tap changer),
   # phase_step_deg the degrees per phase step (0 = no phase tap changer),
   # and current steps may be fractional (a controller can leave a tap
-  # between mechanical positions).
+  # between mechanical positions). Optional columns: 10 psi_deg, 11
+  # phase_du_step, 12 ratio_grid (0 = the fraction grid above, 1 = the
+  # linear grid of a CGMES changer, ratio = neutral + n * tap_step).
+  # Columns 13 neutral_ratio and 14 neutral_shift_deg (0.50.0, #513) come
+  # as a pair and are the marker of the current rule: TAP/SHIFT in
+  # mpc.branch carry the ratio and shift in effect, the neutral position
+  # stands here. A block of 9 to 12 columns is the rule before 0.50.0:
+  # TAP/SHIFT are the neutral position and the steps move the tap off it.
   tap_changers = nothing
   if occursin("mpc.sparlectra.tap_changers", txt)
     tap_changers = try
@@ -603,8 +610,18 @@ function try_parse_sparlectra_extension(txt::String)
       throw(ArgumentError("mpc.sparlectra.tap_changers could not be parsed: $(sprint(showerror, err))"))
     end
   end
-  if tap_changers !== nothing && !(size(tap_changers, 2) in (9, 10, 11))
-    throw(ArgumentError("mpc.sparlectra.tap_changers needs 9 columns (branch tap_step tap_min_step tap_max_step tap_current_step phase_step_deg phase_min_step phase_max_step phase_current_step) plus optional columns 10 psi_deg (PST regulating-vector direction, 0 = unspecified -> 90) and 11 phase_du_step (additional-voltage amplitude per step for a Delta-u PST; exclusive with phase_step_deg), got $(size(tap_changers, 2))."))
+  if tap_changers !== nothing && !(size(tap_changers, 2) in (9, 10, 11, 12, 14))
+    throw(ArgumentError("mpc.sparlectra.tap_changers needs 9 columns (branch tap_step tap_min_step tap_max_step tap_current_step phase_step_deg phase_min_step phase_max_step phase_current_step) plus optional columns 10 psi_deg (PST regulating-vector direction, 0 = unspecified -> 90), 11 phase_du_step (additional-voltage amplitude per step for a Delta-u PST; exclusive with phase_step_deg), 12 ratio_grid (0 = fraction grid, 1 = linear grid) and the pair 13 neutral_ratio, 14 neutral_shift_deg (TAP/SHIFT then carry the position in effect), got $(size(tap_changers, 2))."))
+  end
+  if tap_changers !== nothing && size(tap_changers, 2) == 14
+    for r in axes(tap_changers, 1)
+      tap_changers[r, 13] != 0.0 || throw(ArgumentError("mpc.sparlectra.tap_changers row $(r): column 13 (neutral_ratio) must not be 0, the row names a transformer."))
+    end
+  end
+  if tap_changers !== nothing && size(tap_changers, 2) >= 12
+    for g in view(tap_changers, :, 12)
+      g in (0.0, 1.0) || throw(ArgumentError("mpc.sparlectra.tap_changers column 12 (ratio_grid) must be 0 (fraction grid) or 1 (linear grid), got $(g)."))
+    end
   end
   branch_shunts = nothing
   if occursin("mpc.sparlectra.branch_shunts", txt)
@@ -615,7 +632,21 @@ function try_parse_sparlectra_extension(txt::String)
     end
     size(branch_shunts, 2) == 4 || throw(ArgumentError("mpc.sparlectra.branch_shunts needs 4 columns (branch bus Gs_MW Bs_MVar), got $(size(branch_shunts, 2))."))
   end
-  return (format_version = version, warning = warning, transformer_losses = losses, tap_changer_model = tap_changer_model, solution_written = solution_written, links = links, tap_changers = tap_changers, branch_shunts = branch_shunts)
+  # Optional auxiliary buses (0.50.0): one BUS_I per row, the buses Sparlectra
+  # built as auxiliary (three-winding star points, internal nodes). The role
+  # sets the solver's flat start of such a bus; the bus name no longer marks
+  # it since a bus keeps its own name.
+  aux_buses = nothing
+  if occursin("mpc.sparlectra.aux_buses", txt)
+    aux_buses = try
+      parse_matrix_block(txt, "mpc.sparlectra.aux_buses")
+    catch err
+      throw(ArgumentError("mpc.sparlectra.aux_buses could not be parsed: $(sprint(showerror, err))"))
+    end
+    # a column (one bus per row, as the exporter writes it) or one row
+    (isempty(aux_buses) || size(aux_buses, 1) == 1 || size(aux_buses, 2) == 1) || throw(ArgumentError("mpc.sparlectra.aux_buses needs one bus number per row, got $(size(aux_buses, 1))x$(size(aux_buses, 2))."))
+  end
+  return (format_version = version, warning = warning, transformer_losses = losses, tap_changer_model = tap_changer_model, solution_written = solution_written, links = links, tap_changers = tap_changers, branch_shunts = branch_shunts, aux_buses = aux_buses)
 end
 
 function for001_contingency_branch_indices(mpc::MatpowerCase)::Vector{Int}

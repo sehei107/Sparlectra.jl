@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -74,6 +74,21 @@ function _matpower_import_ratio(raw_ratio::Float64; mode::Symbol = :normal)::Flo
   return mode === :reciprocal ? inv(ratio) : ratio
 end
 
+# Line or transformer for a MATPOWER branch row without an explicit kind
+# (0.60.0, shared by the direct import and the SCF converter). MATPOWER writes
+# TAP = 0 for a line, but not every file does: case6495rte carries TAP = 1 on
+# every branch, and as transformers its lines became tap changers for the
+# state estimation. So TAP = 0 or exactly 1, no phase shift and the same
+# nominal voltage at both ends is a line; any other TAP, a shift or two
+# voltage levels is a transformer. TAP = 1 between two levels stays a
+# transformer with ratio 1. Exact comparisons on purpose: a TAP of 0.9999 is
+# a transformer. An explicit kind (mpc.branch_kind with apply_branch_kind)
+# and Sparlectra transformer-loss metadata override this rule; on a TAP 1
+# branch also a mpc.sparlectra.tap_changers row or an auxiliary (star point)
+# bus at one end (see the callers).
+_matpower_heuristic_is_line(tap_raw::Float64, shift_deg::Float64, vn_from::Float64, vn_to::Float64)::Bool =
+  (tap_raw == 0.0 || tap_raw == 1.0) && shift_deg == 0.0 && vn_from == vn_to
+
 
 #! format: on
 
@@ -124,7 +139,29 @@ function _matpower_metadata_vector(mpc, field::Symbol)
   return hasproperty(mpc, field) ? getproperty(mpc, field) : nothing
 end
 
-function _matpower_bus_names(mpc, busData, BUS_I::Int; apply_bus_names::Bool)
+# Cases whose bus_name fallback was already reported in this process. The Web
+# UI imports the same case for the start page and again for every run, so the
+# warning would repeat on each import. The importer only sees the parsed mpc,
+# not the file path, so the key is the case content: name, bus and branch
+# matrices. Imports run on Web UI worker tasks, hence the lock.
+const _MATPOWER_BUS_NAME_FALLBACK_WARNED = Set{UInt}()
+const _MATPOWER_BUS_NAME_FALLBACK_LOCK = ReentrantLock()
+
+# true on the first report of this case in the process, false afterwards.
+# Nothing is recorded while a package image or sysimage is written: the set
+# would be stored in the image and the first import of a session would then
+# stay silent.
+function _matpower_first_bus_name_fallback!(name::AbstractString, busData::Matrix{Float64}, brData::Matrix{Float64})::Bool
+  ccall(:jl_generating_output, Cint, ()) == 1 && return true
+  key = hash((name, busData, brData))
+  return lock(_MATPOWER_BUS_NAME_FALLBACK_LOCK) do
+    key in _MATPOWER_BUS_NAME_FALLBACK_WARNED && return false
+    push!(_MATPOWER_BUS_NAME_FALLBACK_WARNED, key)
+    return true
+  end
+end
+
+function _matpower_bus_names(mpc, busData, BUS_I::Int; apply_bus_names::Bool, name::AbstractString, brData::Matrix{Float64})
   names = Dict{Int,String}()
   for row in eachrow(busData)
     names[Int(row[BUS_I])] = string(Int(row[BUS_I]))
@@ -132,16 +169,22 @@ function _matpower_bus_names(mpc, busData, BUS_I::Int; apply_bus_names::Bool)
   apply_bus_names || return names
   bus_name = _matpower_metadata_vector(mpc, :bus_name)
   if bus_name === nothing || length(bus_name) != size(busData, 1)
-    @warn "MATPOWER bus_name metadata missing or length-mismatched; falling back to numeric BUS_I names." expected = size(busData, 1) actual = bus_name === nothing ? 0 : length(bus_name)
+    expected = size(busData, 1)
+    actual = bus_name === nothing ? 0 : length(bus_name)
+    if _matpower_first_bus_name_fallback!(name, busData, brData)
+      @warn "MATPOWER bus_name metadata missing or length-mismatched; falling back to numeric BUS_I names." expected actual
+    else
+      @debug "MATPOWER bus_name metadata missing or length-mismatched; falling back to numeric BUS_I names (already reported for this case)." expected actual
+    end
     return names
   end
   seen = Set{String}()
   for (row_index, row) in enumerate(eachrow(busData))
-    name = bus_name[row_index]
-    !isempty(name) || throw(ArgumentError("MATPOWER bus_name at row $(row_index) is empty."))
-    name in seen && throw(ArgumentError("Duplicate MATPOWER bus_name `$(name)`; cannot import ambiguous bus names."))
-    push!(seen, name)
-    names[Int(row[BUS_I])] = name
+    bname = bus_name[row_index]
+    !isempty(bname) || throw(ArgumentError("MATPOWER bus_name at row $(row_index) is empty."))
+    bname in seen && throw(ArgumentError("Duplicate MATPOWER bus_name `$(bname)`; cannot import ambiguous bus names."))
+    push!(seen, bname)
+    names[Int(row[BUS_I])] = bname
   end
   return names
 end
@@ -246,6 +289,62 @@ function _matpower_sparlectra_tap_changers(mpc)::Union{Nothing,Matrix{Float64}}
   return getproperty(sp, :tap_changers)
 end
 
+# Branch rows that carry a mpc.sparlectra.tap_changers row: transformers by
+# declaration when their TAP is not 0, whatever SHIFT and the bus voltages
+# say (a row on a TAP 0 branch stays an error of the file).
+_matpower_tap_changer_rows(sp_taps::Union{Nothing,AbstractMatrix})::Set{Int} =
+  sp_taps === nothing ? Set{Int}() : Set{Int}(Int(r) for r in view(sp_taps, :, 1))
+
+# BUS_I numbers of the auxiliary buses (three-winding star points, internal
+# nodes) of a MATPOWER case, for both readers (direct import and SCF
+# converter). A file of 0.50.0 or later lists them in
+# mpc.sparlectra.aux_buses; a bus there keeps its own name. A file without
+# that list marks them by a bus_name starting with "Aux_", the schematic
+# name an auxiliary bus carried before 0.50.0 (Aux_<idx>_<kV>).
+function _matpower_aux_bus_numbers(mpc, busData, BUS_I::Int)::Set{Int}
+  out = Set{Int}()
+  sp = hasproperty(mpc, :sparlectra) ? getproperty(mpc, :sparlectra) : nothing
+  listed = sp === nothing || !hasproperty(sp, :aux_buses) ? nothing : getproperty(sp, :aux_buses)
+  if listed !== nothing
+    known = Set{Int}(Int(b) for b in view(busData, :, BUS_I))
+    for b in listed
+      k = Int(b)
+      k in known || throw(ArgumentError("mpc.sparlectra.aux_buses references unknown bus $(k)."))
+      push!(out, k)
+    end
+    return out
+  end
+  names = _matpower_metadata_vector(mpc, :bus_name)
+  (names === nothing || length(names) != size(busData, 1)) && return out
+  for (r, name) in enumerate(names)
+    startswith(name, "Aux_") && push!(out, Int(busData[r, BUS_I]))
+  end
+  return out
+end
+
+# Branch matrix with TAP/SHIFT at the NEUTRAL position of every transformer
+# with a mpc.sparlectra.tap_changers row (#513). Since 0.50.0 the exporter
+# writes the ratio and shift in effect into TAP/SHIFT, so that a plain
+# MATPOWER reader solves the same network, and the neutral position into
+# columns 13 (neutral_ratio) and 14 (neutral_shift_deg); the two columns are
+# the marker. A block of 9 to 12 columns comes from an older exporter, whose
+# TAP/SHIFT already are the neutral position: the matrix is returned as it
+# is. Both readers (direct import and SCF converter) take the result, build
+# the transformer on the neutral position and apply the steps on top of it,
+# as for an older file. The input is never written to (it may alias
+# mpc.branch, and the caller keeps the mpc).
+function _matpower_neutral_branch_data(brData::Matrix{Float64}, sp_taps::Union{Nothing,AbstractMatrix}, TAP::Int, SHIFT::Int)::Matrix{Float64}
+  (sp_taps === nothing || size(sp_taps, 2) < 13) && return brData
+  out = copy(brData)
+  for row in eachrow(sp_taps)
+    k = Int(row[1])
+    1 <= k <= size(out, 1) || throw(ArgumentError("mpc.sparlectra.tap_changers references unknown branch $(k)."))
+    out[k, TAP] = Float64(row[13])
+    out[k, SHIFT] = Float64(row[14])
+  end
+  return out
+end
+
 function _matpower_sparlectra_transformer_losses(mpc)
   hasproperty(mpc, :sparlectra) || return NamedTuple[]
   ext = getproperty(mpc, :sparlectra)
@@ -297,8 +396,9 @@ Builds a Sparlectra `Net` from an already parsed MATPOWER case object `mpc`.
 This is the construction core behind [`createNetFromMatPowerFile`](@ref): bus,
 branch, generator and shunt import, PQ generator controllers, and the MATPOWER
 convention switches below. `flatstart` is stored as the start mode of the
-net: the solver then starts from 1 pu and 0 degrees instead of the case VM/VA,
-keeping the reference bus voltage and the PV voltage magnitudes. `profile`
+net: the solver then starts from 1 pu and the slack angle (see
+`initialVrect`) instead of the case VM/VA, keeping the
+reference bus voltage and the PV voltage magnitudes. `profile`
 collects per-stage import timings when given. Throws on inconsistent case data.
 
 `mpc` can be either:
@@ -326,7 +426,7 @@ uses the `TAP` value directly (with MATPOWER `0` treated as `1`). Set
 ratio expected by Sparlectra.
 
 `tap_changer_model` selects the tap-changer model applied to all transformers
-(`transformer.tap_changer_model` in the central configuration). `:ideal`
+(`model.tap_changer_model` in the central configuration). `:ideal`
 (default) keeps the imported series impedance unchanged;
 `:impedance_correction` re-refers R/X through the tapped winding via
 [`calcTapCorrectedRX`](@ref), interpreting the effective off-nominal tap ratio
@@ -339,8 +439,8 @@ function createNetFromMatPowerCase(; mpc, log::Bool=false, flatstart::Bool=false
   # --- Extract fields from NamedTuple / struct uniformly ---
   # convert instead of the Matrix constructor: elides the full copy when the
   # field already is a Matrix{Float64} (the parser output). The matrices are
-  # only read below, so aliasing mpc.bus/gen/branch is safe — keep it that
-  # way (the net cache also serializes the mpc alongside the built net).
+  # only read below, so aliasing mpc.bus/gen/branch is safe. Keep it that
+  # way (the import context reads the mpc again after the build).
   name    = hasproperty(mpc, :name)    ? getproperty(mpc, :name)    : "mpc"
   baseMVA = hasproperty(mpc, :baseMVA) ? Float64(getproperty(mpc, :baseMVA)) : error("mpc.baseMVA missing")
   busData = hasproperty(mpc, :bus)     ? convert(Matrix{Float64}, getproperty(mpc, :bus)) : error("mpc.bus missing")
@@ -355,6 +455,13 @@ function createNetFromMatPowerCase(; mpc, log::Bool=false, flatstart::Bool=false
   MBASE = genDict["mBase"]; GEN_STATUS = genDict["status"]; PMAX = genDict["Pmax"]; PMIN = genDict["Pmin"]; APF = genDict["apf"]
   F_BUS = branchDict["fbus"]; T_BUS = branchDict["tbus"]; BR_R = branchDict["r"]; BR_X = branchDict["x"]; BR_B = branchDict["b"]
   RATE_A = branchDict["rateA"]; TAP = branchDict["ratio"]; SHIFT = branchDict["angle"]; BR_STATUS = branchDict["status"]
+  # TAP/SHIFT as written (the position in effect when the tap block carries
+  # the 0.50.0 neutral columns, #513); the branches are built on the
+  # neutral position and the tap block below moves them off it
+  sp_taps = _matpower_sparlectra_tap_changers(mpc)
+  brData_file = brData
+  brData = _matpower_neutral_branch_data(brData, sp_taps, TAP, SHIFT)
+  tap_changer_rows = _matpower_tap_changer_rows(sp_taps)
 
   mp_bus_type = Dict{Int,Int}()
   bus_row_by_i = Dict{Int,Int}()
@@ -389,7 +496,8 @@ function createNetFromMatPowerCase(; mpc, log::Bool=false, flatstart::Bool=false
   pv_vset_by_bus = Dict(row.busI => row.imported_vset for row in pv_voltage_rows)
   matpower_dcline_mode in (:reject_active, :ignore_inactive, :pf_injections, :paired_control) || throw(ArgumentError("matpower_dcline_mode must be one of :reject_active, :ignore_inactive, :pf_injections, :paired_control."))
   matpower_dcline_mode in (:pf_injections, :paired_control) || MatpowerIO.assert_no_active_dcline(mpc)
-  bus_name_by_orig = _matpower_bus_names(mpc, busData, BUS_I; apply_bus_names = apply_bus_names)
+  bus_name_by_orig = _matpower_bus_names(mpc, busData, BUS_I; apply_bus_names = apply_bus_names, name = string(name), brData = brData_file)
+  aux_buses = _matpower_aux_bus_numbers(mpc, busData, BUS_I)
   bus_original_name_by_orig = Dict{Int,String}()
   raw_bus_names = _matpower_metadata_vector(mpc, :bus_name)
   if raw_bus_names !== nothing && length(raw_bus_names) == nbus
@@ -482,7 +590,11 @@ function createNetFromMatPowerCase(; mpc, log::Bool=false, flatstart::Bool=false
       va_deg = va_deg,
       vmin_pu = vmin,
       vmax_pu = vmax,
-      isAux = false,
+      # an auxiliary bus keeps its role through the round trip
+      # (_matpower_aux_bus_numbers). The flat start of the solver starts such
+      # a star point at the ratio of its stiffest winding; read back as a
+      # plain bus it started at 1.0 pu and the CGMES MiniGrid did not converge.
+      isAux = kIdx in aux_buses,
       oBusIdx = kIdx,
       zone = zone,
       area = area,
@@ -547,7 +659,6 @@ function createNetFromMatPowerCase(; mpc, log::Bool=false, flatstart::Bool=false
     ratedS = ratedS_raw > 0.0 ? ratedS_raw : Inf
 
     tap_raw = Float64(row[TAP])
-    tap_specified = tap_raw != 0.0
     ratio = _matpower_import_ratio(tap_raw; mode = ratio_mode)
 
     # MATPOWER defines SHIFT on the branch from side. Sparlectra uses the
@@ -560,13 +671,20 @@ function createNetFromMatPowerCase(; mpc, log::Bool=false, flatstart::Bool=false
     vn_from = getNodeVn(myNet.nodeVec[from_idx])
     vn_to   = getNodeVn(myNet.nodeVec[to_idx])
 
-    # MATPOWER uses TAP == 0 for ordinary lines and a non-zero TAP value for
-    # transformers. Preserve explicit nominal-tap transformers (`TAP == 1`) so
-    # case300-style branches such as BUS_I 196 -> 2040 are not demoted to lines.
-    heuristic_is_line = ((!tap_specified && angle == 0.0) && (vn_from == vn_to))
+    # TAP 0 or 1, no shift, one voltage level: a line (_matpower_heuristic_is_line)
+    heuristic_is_line = _matpower_heuristic_is_line(tap_raw, angle, vn_from, vn_to)
     loss_meta = get(transformer_loss_by_row, branch_row_index, nothing)
     kind = branch_kind_overrides === nothing ? :unknown : branch_kind_overrides[branch_row_index]
-    kind = loss_meta !== nothing ? :transformer : kind
+    # loss metadata, a tap-changer nameplate row and an auxiliary bus end
+    # (a three-winding star point, mpc.sparlectra.aux_buses) exist only for a
+    # transformer. A Sparlectra export writes TAP = 1 for a transformer at
+    # ratio 1 (the 380 kV leg of a star), which the rule above would read
+    # back as a line. The tap block counts imported branches (the branchVec
+    # index it is applied to). Both declare only on a TAP 1 branch (other
+    # TAP values are transformers anyway); TAP 0 keeps the old rule, and the
+    # block below rejects a tap row on such a line.
+    declared_trafo = loss_meta !== nothing || (tap_raw != 0.0 && ((length(myNet.branchVec) + 1) in tap_changer_rows || fbus_orig in aux_buses || tbus_orig in aux_buses))
+    kind = declared_trafo ? :transformer : kind
     isLine = kind === :line ? true : kind === :transformer ? false : heuristic_is_line
 
     tap_correction_model = nothing
@@ -665,8 +783,8 @@ function createNetFromMatPowerCase(; mpc, log::Bool=false, flatstart::Bool=false
     (mBase != baseMVA) && @debug "generator $(bus) has different mBase than network baseMVA (allowed in MATPOWER)" bus mBase baseMVA
 
     # MATPOWER APF (area participation factor, column 21) → distributed-slack
-    # participation weight (issue #192). The column is optional — many cases
-    # ship 10-column gen matrices — and 0.0 means "no factor", stored as
+    # participation weight (issue #192). The column is optional (many cases
+    # ship 10-column gen matrices), and 0.0 means "no factor", stored as
     # `nothing`. Carrying the value must not change results while
     # power_flow.distributed_slack is disabled.
     apf_raw = length(row) >= APF ? Float64(row[APF]) : 0.0
@@ -846,14 +964,19 @@ function createNetFromMatPowerCase(; mpc, log::Bool=false, flatstart::Bool=false
   end
 
   # Optional mpc.sparlectra.tap_changers rows: nameplate tap-changer data
-  # standard MATPOWER cannot express. The mpc.branch TAP/SHIFT columns stay
-  # the NEUTRAL position; the current steps move the LIVE tap_ratio /
-  # phase_shift_deg off it on the same grids the estimation fixes to
-  # (ratio: tap = neutral / (1 + n * tap_step); phase: additive degrees).
+  # standard MATPOWER cannot express. The branches were built on the
+  # NEUTRAL position (the TAP/SHIFT columns of a file before 0.50.0, columns
+  # 13 and 14 of the block since, see _matpower_neutral_branch_data); the
+  # current steps move the LIVE tap_ratio / phase_shift_deg off it on the
+  # same grids the estimation fixes to (ratio: tap = neutral / (1 + n *
+  # tap_step), or neutral + n * tap_step with ratio_grid 1; phase: additive
+  # degrees).
   # A ratio tap_step of 0 explicitly declares "no ratio tap changer" and
   # keeps that transformer out of the estimator's mass release.
-  sp_taps = _matpower_sparlectra_tap_changers(mpc)
   if sp_taps !== nothing
+    # a NaN current step (column 5 or 9): the file carried no step, the
+    # changer sits at its middle position, the neutral position 0
+    assumed = Tuple{String,Int}[]
     for row in eachrow(sp_taps)
       k = Int(row[1])
       1 <= k <= length(myNet.branchVec) || throw(ArgumentError("mpc.sparlectra.tap_changers references unknown branch $(k)."))
@@ -872,7 +995,25 @@ function createNetFromMatPowerCase(; mpc, log::Bool=false, flatstart::Bool=false
       # same thing no matter which format carried it
       psi = size(sp_taps, 2) >= 10 ? Float64(row[10]) : 0.0
       dustep = size(sp_taps, 2) >= 11 ? Float64(row[11]) : 0.0
-      applyTapNameplate!(br; tap_step = tstep, tap_min_step = tminS, tap_max_step = tmaxS, tap_current_step = tcur, phase_step_deg = pstep, phase_min_step = pminS, phase_max_step = pmaxS, phase_current_step = pcur, psi_deg = psi, phase_du_step = dustep, context = "mpc.sparlectra.tap_changers branch $(k)")
+      # column 12: the positions count on the linear grid of a CGMES changer
+      # (1) or on the fraction grid (0, and every file without the column)
+      tgrid = (size(sp_taps, 2) >= 12 && row[12] == 1.0) ? :linear : :fraction
+      applyTapNameplate!(br; tap_step = tstep, tap_min_step = tminS, tap_max_step = tmaxS, tap_current_step = tcur, phase_step_deg = pstep, phase_min_step = pminS, phase_max_step = pmaxS, phase_current_step = pcur, psi_deg = psi, phase_du_step = dustep, tap_ratio_grid = tgrid, context = "mpc.sparlectra.tap_changers branch $(k)")
+      (br.ratio_step_assumed || br.phase_step_assumed) && push!(assumed, ("branch $(k)", 0))
+      # a 0.50.0 file states the position twice: TAP/SHIFT in effect and the
+      # steps. They differ only after an edit of one of them; the steps are
+      # kept, so the nameplate stays consistent, and the edit is named
+      if size(sp_taps, 2) >= 13
+        tap_file = _matpower_import_ratio(Float64(brData_file[k, TAP]); mode = ratio_mode)
+        shift_file = _matpower_shift_degrees(Float64(brData_file[k, SHIFT]); sign = shift_sign, unit = shift_unit)
+        if abs(br.tap_ratio - tap_file) > 1e-9 || abs(br.phase_shift_deg - shift_file) > 1e-7
+          @warn "mpc.sparlectra.tap_changers branch $(k): TAP/SHIFT in mpc.branch differ from the ratio and shift of the tap position; the tap position is kept" tap_column = tap_file tap_of_position = br.tap_ratio shift_column_deg = shift_file shift_of_position_deg = br.phase_shift_deg
+        end
+      end
+    end
+    # one line per transformer, or one for all of them
+    for line in _tap_step_assumed_lines(assumed)
+      @info "MATPOWER: " * line
     end
   end
 

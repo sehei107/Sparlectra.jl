@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # file: src/adapters/cgmes/cgmes_topology.jl
-# purpose: layer 4 of the CGMES importer — bus-branch topology from the TP
+# purpose: layer 4 of the CGMES importer, bus-branch topology from the TP
 # profile. One bus per TopologicalNode; equipment lands on buses via
 # Terminal.TopologicalNode. Node-breaker (ConnectivityNode) is a later stage.
 
@@ -84,7 +84,7 @@ function buildTopology(store::CGMESStore; infer_base_voltages::Bool = false, mes
       # names the declared dependency instead of leaving a bare node error.
       analysis = importFailureAnalysis(store)
       print(analysis)
-      throw(CGMESImportError("CGMES topology: TopologicalNode $(n) ($(tn.mrid)) has no resolvable BaseVoltage — see the import analysis (CLI: printed above; Web UI runs: cgmes.log).", analysis))
+      throw(CGMESImportError("CGMES topology: TopologicalNode $(n) ($(tn.mrid)) has no resolvable BaseVoltage. See the import analysis (CLI: printed above; Web UI runs: cgmes_import_report.md).", analysis))
     end
     vn_kV[tn.mrid] = vn
   end
@@ -93,7 +93,7 @@ function buildTopology(store::CGMESStore; infer_base_voltages::Bool = false, mes
     # nominal voltages are substituted data the user must see, but a
     # thousand-line flood would hide everything else.
     levels_text = join(("$(k) kV×$(v)" for (k, v) in sort!(collect(inferred_levels); by = first, rev = true)), ", ")
-    push!(messages, "warning: inferred base voltages for $(used_inferred) topological node(s) (SV-seeded $(sv_seeded), transformer-rated $(trafo_seeded), propagated $(propagated); levels: $(levels_text)) — the BaseVoltage catalog is missing (boundary set); nominal voltages are reconstructed, not delivered")
+    push!(messages, "warning: inferred base voltages for $(used_inferred) topological node(s) (SV-seeded $(sv_seeded), transformer-rated $(trafo_seeded), propagated $(propagated); levels: $(levels_text)). The BaseVoltage catalog is missing (boundary set); nominal voltages are reconstructed, not delivered")
   end
 
   terminals = Dict{String,Vector{CIMObject}}()
@@ -129,6 +129,11 @@ end
 
 # --- node-breaker topology processor (#314) ---------------------------------
 
+# Run condition of the processor below: connectivity nodes present and no
+# non-boundary topological node. importCGMES asks it as well, because a run
+# writes into the store.
+_nodeBreakerProcessorApplies(store::CGMESStore)::Bool = countOf(store, :ConnectivityNode) > 0 && !any(tn -> !(tn.mrid in store.boundary), objectsOf(store, :TopologicalNode))
+
 """
     applyNodeBreakerTopologyProcessor!(store, ctx) -> Bool
 
@@ -156,8 +161,7 @@ Runs only when connectivity nodes exist and no non-boundary topological
 node does; returns whether it ran. TP-carrying deliveries are untouched.
 """
 function applyNodeBreakerTopologyProcessor!(store::CGMESStore, ctx)::Bool
-  countOf(store, :ConnectivityNode) == 0 && return false
-  any(tn -> !(tn.mrid in store.boundary), objectsOf(store, :TopologicalNode)) && return false
+  _nodeBreakerProcessorApplies(store) || return false
 
   # union-find over connectivity-node mRIDs (path compression)
   parent = Dict{String,String}()

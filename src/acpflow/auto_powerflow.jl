@@ -453,8 +453,8 @@ function _auto_pf_escalation_stages(base_pf::PowerFlowConfig)
   ))
   push!(stages, (
     id = :L3_full_projection,
-    # no flat-start gate since #463: the flat start only sets the profile,
-    # and the projection works from it like every other start machine
+    # no flat-start gate: the auto mode chooses its own start, and this
+    # stage sets the projection explicitly on top of the run's flat start
     gate = (ev, pf) -> (true, ""),
     transform = (pf, ev) -> begin
       sm = _copy_start_mode_with(pf.start_mode; start_projection = true, try_blend_scan = true, try_dc_start = true, measure_candidates = true, accept_unmeasured_dc_start = true, blend_lambdas = [0.15, 0.25, 0.5, 0.75, 0.9])
@@ -578,7 +578,8 @@ _set_auto_pf_record!(net::Net, rec) = lock(() -> (_AUTO_PF_RECORDS[net] = rec), 
     auto_pf_record(net) -> Union{Nothing,NamedTuple}
 
 The auto-mode decision/escalation record of the most recent auto run on
-this net (`nothing` when the run was manual).
+this net (`nothing` when the run was manual). `final_qlimits` is the
+Q-limit configuration of the attempt that produced the result.
 """
 auto_pf_record(net::Net) = lock(() -> get(_AUTO_PF_RECORDS, net, nothing), _AUTO_PF_RECORDS_LOCK)
 
@@ -651,10 +652,10 @@ end
 # returning a status); an auto attempt treats that as "not converged" and
 # escalates instead of dying. Anything else is a programming error and is
 # rethrown unchanged.
-function _auto_pf_try_execute!(net::Net, run_cfg::SparlectraConfig; performance_profile = nothing)
+function _auto_pf_try_execute!(net::Net, run_cfg::SparlectraConfig; performance_profile = nothing, print_island_table::Bool = true)
   t0 = time()
   try
-    return _execute_sparlectra_powerflow!(net, run_cfg; performance_profile = performance_profile), nothing
+    return _execute_sparlectra_powerflow!(net, run_cfg; performance_profile = performance_profile, print_island_table = print_island_table), nothing
   catch err
     err isa ErrorException || rethrow()
     # the wall time up to the throw still belongs to the attempt record
@@ -727,7 +728,8 @@ function _execute_auto_sparlectra_powerflow!(net::Net, cfg::SparlectraConfig; pe
       _restore_start_voltages!(net, snap)
       run_cfg = _copy_sparlectra_with_powerflow(cfg, pf)
       _auto_pf_clear_rescue!(performance_profile)
-      execution, stage_err = _auto_pf_try_execute!(net, run_cfg; performance_profile = performance_profile)
+      # one auto run prints the AC island table once, in the base attempt
+      execution, stage_err = _auto_pf_try_execute!(net, run_cfg; performance_profile = performance_profile, print_island_table = false)
       evidence = _auto_pf_qlimit_evidence(net)
       push!(attempts, (stage = st.id, changed = stage_err === nothing ? changed : vcat(changed, string("solver error: ", first(sprint(showerror, stage_err), 160))), solver = _auto_pf_solver_label(pf, execution), iterations = execution.iterations, converged = execution.erg == 0, elapsed_s = round(execution.elapsed_s; digits = 3), qlimit_evidence = evidence, rescue_strategy = _auto_pf_rescue_strategy(performance_profile)))
       final_stage = st.id
@@ -749,6 +751,9 @@ function _execute_auto_sparlectra_powerflow!(net::Net, cfg::SparlectraConfig; pe
     final_strategy = final_rescue,
     hints = hints,
     converged = execution.erg == 0,
+    # the Q-limit configuration of the attempt that produced the result
+    # (stage locks, handling switched off); the stability check reads it
+    final_qlimits = pf.qlimits,
   ))
   return execution
 end

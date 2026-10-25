@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,6 +38,8 @@
 # - flatstart=false: `initialVrect` keeps the imported vm/va instead of 1.0/0°;
 # - start_projection=false: no DC angle start, no blend scan;
 # - dc_seed_unconditional=false: no standalone DC pre-solve seeding;
+# - start_mode.rotate_behind_pst=false: a start without angles is not turned
+#   behind phase shifters;
 # - start_current_iteration.enabled=false: no current-iteration pre-solve;
 # - apslf_start.enabled=false: no APSLF start preconditioner.
 
@@ -123,9 +125,9 @@ function _write_self_check_summary(result, output_dir::AbstractString)::Nothing
   path = joinpath(output_dir, "self_check.log")
   open(path, "w") do io
     println(io, "# Fixed-reference self-check")
-    println(io, "forced: max_iter=1, qlimits.enabled=false, flatstart=false, start_mode.start_projection=false, start_mode.dc_seed_unconditional=false, start_current_iteration.enabled=false, apslf_start.enabled=false")
+    println(io, "forced: max_iter=1, qlimits.enabled=false, flatstart=false, start_mode.start_projection=false, start_mode.dc_seed_unconditional=false, start_mode.rotate_behind_pst=false, start_current_iteration.enabled=false, apslf_start.enabled=false")
     if raw === nothing
-      # The run never reached the solver — no start state existed, so the
+      # The run never reached the solver: no start state existed, so the
       # verbatim-start statement would be an empty claim.
       println(io, "run did not reach the solver (", something(result.reason, "unknown"), "); no residual was evaluated")
       return
@@ -138,7 +140,7 @@ function _write_self_check_summary(result, output_dir::AbstractString)::Nothing
     if raw !== nothing
       # GUI-editable overrides (Web UI form: max_iter, qlimits.enabled) are
       # applied on top of the forced self-check config, so the run may have
-      # taken more than the forced single iteration — report what actually
+      # taken more than the forced single iteration: report what actually
       # ran instead of assuming one step. start_state_residual_inf above is
       # captured before the first iteration and stays the fixed-reference
       # answer either way.
@@ -150,7 +152,17 @@ function _write_self_check_summary(result, output_dir::AbstractString)::Nothing
     no_sv = get(result.metadata, "cgmes_no_sv_buses", nothing)
     if no_sv !== nothing
       buses = get(result.metadata, "cgmes_buses", nothing)
-      println(io, "cgmes_no_sv_buses: ", no_sv, buses === nothing ? "" : " of $(buses)", " (flat 1.0 pu / 0° start — a large share weakens the SV comparison)")
+      println(io, "cgmes_no_sv_buses: ", no_sv, buses === nothing ? "" : " of $(buses)", " (start from a neighbour with SV, else 1.0 pu / 0°; a large share weakens the SV comparison)")
+    end
+    # A tap changer whose SvTapStep the SV flows contradict leaves a residual
+    # at its transformer that no model change removes; the mismatch is the
+    # sum of |S_model - S_sv| at both terminals at the SV voltages, in MVA
+    tap_fits = get(result.metadata, "cgmes_sv_tap_step_fits", nothing)
+    if tap_fits !== nothing
+      println(io, "cgmes_sv_tap_step_fits: ", length(tap_fits), " (tap changers whose SV flows fit another step clearly better than SvTapStep)")
+      for r in tap_fits
+        println(io, "  ", r.transformer, " / ", r.tap_changer, ": SvTapStep ", r.sv_step, " mismatch ", round(r.sv_mismatch_mva; sigdigits = 4), " MVA, best step ", r.best_step, " mismatch ", round(r.best_mismatch_mva; sigdigits = 4), " MVA")
+      end
     end
   end
   return nothing
@@ -176,8 +188,10 @@ Supported inputs:
   state, which the importer writes into the bus objects at creation time.
   Buses without a usable `SvVoltage` keep the importer's `1.0 pu / 0°`
   fallback; their count is reported in `self_check.log` and per bus in the
-  `has_sv` column of `self_check_residuals.csv` — a large no-SV share weakens
-  the interpretation of the residual.
+  `has_sv` column of `self_check_residuals.csv`, a large no-SV share weakens
+  the interpretation of the residual. `self_check.log` also lists the tap
+  changers whose `SvPowerFlow` fits another step clearly better than their
+  `SvTapStep`, with both steps and mismatches.
 
 # Arguments
 - `casefile`: case path (MATPOWER file or CGMES delivery), forwarded to
@@ -209,7 +223,7 @@ regulating setpoint (noted in `self_check.log`).
 
 # Returns
 A `SparlectraApiResult`. `success` reflects whether the run completed, not
-whether the residual is small — read `self_check.log`'s
+whether the residual is small, read `self_check.log`'s
 `start_state_residual_inf` (the max |P|/|Q| residual at the unmodified start
 state) or `raw_result.final_mismatch` (after the single corrective step) for
 that. `self_check_residuals.csv` holds the full per-bus residual export for

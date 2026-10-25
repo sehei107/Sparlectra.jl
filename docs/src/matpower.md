@@ -1,18 +1,18 @@
 # MATPOWER cases
 
 Sparlectra reads MATPOWER `.m` case files (format version 2) and writes
-networks back as `.m` files, including the solved state. The format itself,
-the `mpc` structure with `baseMVA`, `bus`, `gen`, `branch` and the optional
-`gencost`, and every column of those matrices are defined by the
-MATPOWER Manual, Appendix "Data File Format":
-<https://matpower.app/manual/matpower/DataFileFormat.html> (see also the
-`caseformat` reference
-<https://matpower.org/documentation/ref-manual/legacy/functions/caseformat.html>
-and the named column constants
-<https://matpower.org/docs/ref/matpower6.0/define_constants.html>). A plain
+networks back as `.m` files, including the solved state. The `mpc`
+structure (`baseMVA`, `bus`, `gen`, `branch`, optional `gencost`) and
+every column are defined by the MATPOWER Manual, Appendix "Data File
+Format": <https://matpower.app/manual/matpower/DataFileFormat.html>
+(`caseformat` reference:
+<https://matpower.org/documentation/ref-manual/legacy/functions/caseformat.html>,
+named column constants:
+<https://matpower.org/docs/ref/matpower6.0/define_constants.html>). A
 power flow needs `baseMVA`, `bus`, `gen` and `branch`; `gencost` serves
-optimal power flow: Sparlectra has none, keeps the cost rows with the
-generators and writes them back on export (see [Generator costs](@ref matpower_gencost)).
+optimal power flow, which Sparlectra does not have: the cost rows stay with
+the generators and are written back on export
+([Generator costs](@ref matpower_gencost)).
 
 ## Import
 
@@ -33,19 +33,18 @@ result = run_sparlectra(
 net = result.net
 ```
 
-Standard MATPOWER test cases are downloaded on demand by `ensure_casefile`
-(into `Sparlectra.data/mpower`, returning the absolute path); a `.jl` name
-(`ensure_casefile("case14.jl")`) requests a generated `.jl` companion file.
-Pass `path` for local fixtures or site-specific files and `config` for a
-loaded configuration (`load_sparlectra_config("examples/configuration.yaml")`).
+`ensure_casefile` downloads a standard MATPOWER test case on demand into
+the user case cache and returns the absolute path; a `.jl` name
+(`ensure_casefile("case14.jl")`) requests a generated `.jl` companion
+file. Pass `path` for local files and `config` for a loaded configuration
+(`load_sparlectra_config("examples/configuration.yaml")`).
 
-Several configured cases run sequentially in configured order with
-`run_sparlectra_cases`; a non-empty `runtime.cases` list wins over
-`runtime.case`, and batch-level performance-profile aggregation is not
-supported (profile individual `run_sparlectra` calls):
+`run_sparlectra_cases` runs several configured cases in order; a non-empty
+`runtime.cases` list wins over `runtime.case`, and performance profiles
+are per `run_sparlectra` call, not per batch:
 
 ```yaml
-matpower_import:
+runtime:
   cases: [case14.m, case118.m]
 ```
 
@@ -60,10 +59,10 @@ for result in results
 end
 ```
 
-Import without a power flow, with the transformer conventions either taken
-from `SparlectraConfig.matpower` (framework runs) or passed directly (the
-default `matpower_ratio = "normal"` uses branch `TAP` values as stored,
-`"reciprocal"` imports their reciprocal):
+`createNetFromMatPowerFile` imports without a power flow. The transformer
+conventions come from `SparlectraConfig.matpower` in framework runs or are
+passed directly (`matpower_ratio = "normal"`, the default, uses the branch
+`TAP` values as stored, `"reciprocal"` their reciprocal):
 
 ```julia
 using Sparlectra
@@ -106,28 +105,22 @@ end
 using Sparlectra
 
 case_name, baseMVA, busData, genData, branchData = casefileparser("case9.m")
-println("Number of buses: \$(size(busData, 1))")
+println("Number of buses: $(size(busData, 1))")
 ```
 
-The `examples/powerflow/matpower_import.jl` workflow also controls the Julia
-thread count: `runtime.julia_threads` is resolved after the CLI and
-environment overrides, and if the requested value differs from
-`Threads.nthreads()` the script re-executes once with that `--threads`
-setting.
+`examples/powerflow/matpower_import.jl` resolves `runtime.julia_threads`
+after the CLI (`--julia-threads=8`) and environment
+(`SPARLECTRA_JULIA_THREADS`) overrides and re-executes itself once with
+that `--threads` setting when it differs from `Threads.nthreads()`:
 
 ```bash
 julia --threads=8 --project=. examples/powerflow/matpower_import.jl
 julia --project=. examples/powerflow/matpower_import.jl --julia-threads=8
 ```
 
-```powershell
-$env:SPARLECTRA_JULIA_THREADS = "8"
-julia --project=. examples/powerflow/matpower_import.jl
-```
-
 The Web UI imports `.m` files copy-only through **Import case files** and
-exposes the import-convention controls below in its form; see
-[Local PowerFlow Web UI](webui.md).
+shows the import-convention controls in its form
+([Import case files](@ref webui-import-case-files)).
 
 ## Import options
 
@@ -144,42 +137,44 @@ The comparison options use these MATPOWER reference terms:
 
 The keys of a MATPOWER run: the case selectors, the import profile that recommends or applies the conventions a case needs, the conversion switches (phase-shift unit and sign, tap ratio, PV voltage source, shunt and tap-changer model, generator controllers), the solution export and the network preallocation.
 
-| YAML path | Type | Default | Allowed values | Meaning | Use when | Avoid when | Performance impact | Interactions |
-|---|---:|---:|---|---|---|---|---|---|
-| `runtime.case` | String | `case14.m` | case path/name | Compatible single-case selector and fallback when `cases` is empty. | Single case studies and benchmarks. | Invalid/missing paths. | Parse/solve scales with case size. | `runtime.cases`, runtime/profile. |
-| `runtime.cases` | Vector{String} | `[case14.m, case118.m]` | non-empty case names | Ordered batch selector for `run_sparlectra_cases`; a non-empty list takes precedence over `case`. | Deterministic multi-case validation and release checks. | Empty case names or expecting `run_sparlectra` to return a vector. | Sequential parse/solve cost per case. | `runtime.case`, `run_sparlectra_cases`. |
-| `model.auto_profile` | Symbol/String | `off` | `off`, `recommend`, `apply` | Experimental convention scan of the stored voltages (see [MATPOWER conventions (experimental)](@ref matpower_conventions_experimental)). `off` disables it, `recommend` logs decisions without changing the active config, and `apply` changes only safe import-convention recommendations with clear evidence. Solver-start and Q-limit recommendations remain logged but skipped unless configured directly. | Development, large-case investigation, reproducible robust imports. | Expecting YAML files to be rewritten; applying ambiguous diagnostics. | Low; scans existing VM/VA residuals before the solve. | Output profile visibility options. |
-| `model.auto_profile_log` | Bool | `true` | `true`, `false` | Print/log auto-profile reasoning and final effective options. | Debug import decisions and reproduce final settings. | Quiet high-volume runs. | Logging overhead only. | `output.console_auto_profile`, logfile settings. |
-| `model.auto_profile_max_fit_pu` | Float64 | `0.1` | non-negative | Largest power mismatch (pu, worst bus) at which the stored `VM`/`VA` columns still count as a solved state. When the best convention reading scores above it, the scan recommends no convention change and keeps the configured `shift_unit`, `shift_sign`, `ratio` and `bus_shunt_model`. | Files whose stored state is a real solution (default). | Raise only for files with a slightly stale but consistent solution; lower to make the scan stricter. | None. | `model.auto_profile`, `matpower_import.shift_unit`, `matpower_import.shift_sign`, `matpower_import.ratio`. |
-| `matpower_import.pv_voltage_source` | Symbol/String | `gen_vg` | `gen_vg`, `bus_vm`, `auto`, `strict_check` | PV voltage setpoint source policy. | Standard MATPOWER semantics. | Nonstandard conversion assumptions. | None. | `compare_voltage_reference`, PF starts. |
-| `matpower_import.pv_voltage_mismatch_tol_pu` | Float64 | `1e-4` | nonnegative real | Tolerance for PV voltage mismatch checks. | Tight validation studies. | Overly strict noisy data. | Low. | `compare_voltage_reference`. |
-| `matpower_import.compare_voltage_reference` | Symbol/String | `imported_setpoint` | `bus_vm`, `gen_vg`, `imported_setpoint`, `hybrid` | Voltage reference used for comparisons. Auto-profile recommends `hybrid` when BUS.VM / GEN.VG mismatches are detected. | MATPOWER comparison workflows. | When historical/SCADA ref should dominate. | Low. | `pv_voltage_source`, diagnostics. |
-| `model.bus_shunt_model` | Symbol/String | `admittance` | `admittance`, `voltage_dependent_injection` | Bus shunt interpretation model. | Default import path. | Alternative modeling studies without residual evidence. | None. | Import convention diagnostics. |
-| `matpower_import.shift_unit` | Symbol/String | `deg` | `deg`, `rad` | Phase-shift input unit. | Cases with radians metadata. | Wrong unit declaration. | Negligible. | `shift_sign`, branch shift diagnostics. |
-| `matpower_import.shift_sign` | Float64 | `1.0` | real (typ. `1.0`, `-1.0`) | Phase-shift sign convention. | Cross-tool convention alignment. | Unnecessary flipping. | None. | `shift_unit`, branch-shift diagnostics. |
-| `matpower_import.ratio` | Symbol/String | `normal` | `normal`, `reciprocal` | Branch ratio interpretation mode. | Standard MATPOWER import. | Unsupported alternate conventions. | None. | Transformer/tap interpretation. |
-| `model.tap_changer_model` | Symbol/String | `ideal` | `ideal`, `impedance_correction` | Tap-changer model applied to all transformers after import; see [Transformer tap-changer model](configuration.md#transformer-tap-changer-model). | Cases where reference data corrects R/X with the tap position. | Standard ideal-tap-changer imports. | None (constant per-branch scale factor). | Shared with the native DTF importer; implemented centrally in `src/equicircuit.jl`. |
-| `matpower_export.write_solution` | Bool | `true` | `true`, `false` | Whether [`writeMatpowerCasefile`](@ref) writes the solved bus `VM`/`VA` state and branch result columns 14 to 17 (`PF`/`QF`/`PT`/`QT`) into the export, marked with `mpc.sparlectra.solution_written`. When `false`, `mpc.branch` keeps 13 columns and `VM = 1.0`/`VA = 0.0` for all non-slack/non-PV buses (slack and PV setpoints are preserved). | Exporting a solved case for downstream tools or roundtrip validation. | Exporting a pure, state-independent model file. | None; sourced from the existing branch-flow report, no recomputation. | If the network is unsolved, falls back to a 13-column model-only export with a warning; interacts with `model.tap_changer_model` through the `mpc.sparlectra.tap_changer_model` roundtrip marker (see [Tap-impedance correction and reimport](#tap-impedance-correction-and-reimport)). |
-| `matpower_import.enable_pq_gen_controllers` | Bool | `true` | `true`, `false` | Enable controller behavior on imported PQ generators. | Realistic controlled studies. | Raw imported behavior reproduction. | Small control bookkeeping cost. | PF Q-limit behavior. |
-| `model.preallocate_network` | Symbol/String | `auto` | `off`, `on`, `auto` | Controls import-time `sizehint!` preallocation for large MATPOWER network construction. | Large imports where construction allocations dominate runtime. | Tiny cases where tuning is unnecessary. | Can reduce import allocations/time; no model changes. | `model.preallocate_min_buses`. |
-| `model.preallocate_min_buses` | Int | `1000` | positive integer | Bus-count threshold used when `preallocate_network = auto`. | Auto-tuning preallocation trigger for site-specific case sizes. | If fixed always-on/off behavior is preferred. | Threshold only; no model changes. | `model.preallocate_network`. |
-| `matpower_import.apply_bus_names` | Bool | `false` | `true`, `false` | Use standard `mpc.bus_name` metadata for imported bus names. | FOR001/FOR002 validation and named-bus workflows. | Preserve historical numeric names. | None. | Fails on duplicate names. |
-| `matpower_import.apply_branch_names` | Bool | `false` | `true`, `false` | Attach user-defined `mpc.branch_name` metadata to `net.matpower_branch_metadata`. | Outage and contingency mapping. | Cases without branch metadata. | None. | `import_for001_contingencies`. |
-| `matpower_import.apply_branch_kind` | Bool | `false` | `true`, `false` | Use user-defined `mpc.branch_kind` to override line/transformer classification. | Conversion workflows that know row kinds. | Prefer electrical heuristic. | None. | Accepts `L`/`LINE`/`ACL` and `T`/`TRAFO`/`TRANSFORMER`/`2WT`. |
-| `matpower_import.import_for001_contingencies` | Bool | `true` | `true`, `false` | Preserve user-defined `mpc.for001_contingencies`. | FOR001/FOR002 validation. | Ignore validation metadata. | None. | `mpc.branch_name` enables index mapping. |
-| `matpower_import.matpower_dcline_mode` | Symbol/String | `pf_injections` | `reject_active` (deprecated), `ignore_inactive`, `pf_injections`, `paired_control` | Controls active `mpc.dcline` rows. | Use `pf_injections` to emulate MATPOWER simple PF DC-line injections; `paired_control` additionally attaches one steerable `HvdcPairControl` per row (transfer `PF`, losses `LOSS0`/`LOSS1`, see [HVDC Back-to-Back](hvdc_back_to_back.md)). | OPF/dclinecost studies. | Adds two fixed prosumers per active row in `pf_injections`; `paired_control` adds one controller per row on top. | Default supports active DC-line rows as fixed terminal injections. Configuration files carrying the deprecated `reject_active` load as `pf_injections` with a warning. The strict fail-fast check stays available programmatically: `createNetFromMatPowerCase(matpower_dcline_mode = :reject_active)`. |
+| YAML path | Type | Default | Allowed values | Meaning |
+|---|---:|---:|---|---|
+| `runtime.case` | String | `case14.m` | case path/name | Single-case selector and fallback when `cases` is empty. |
+| `runtime.cases` | Vector{String} | `[case14.m, case118.m]` | non-empty case names | Ordered batch selector for `run_sparlectra_cases`; a non-empty list takes precedence over `case`. |
+| `model.auto_profile` | Symbol/String | `off` | `off`, `recommend`, `apply` | Experimental convention scan of the stored voltages ([MATPOWER conventions (experimental)](@ref matpower_conventions_experimental)). `off` disables it, `recommend` logs decisions without changing the active config, `apply` changes only `shift_unit`, `shift_sign`, `ratio` and `bus_shunt_model`, and only on clear evidence; PV/REF voltage, solver-start and Q-limit recommendations are logged, never applied. YAML files are never rewritten. |
+| `model.auto_profile_log` | Bool | `true` | `true`, `false` | Print/log auto-profile reasoning and final effective options. |
+| `model.auto_profile_max_fit_pu` | Float64 | `0.1` | non-negative | Largest power mismatch (pu, worst bus) at which the stored `VM`/`VA` columns still count as a solved state. When the best convention reading scores above it, the scan recommends no convention change and keeps the configured `shift_unit`, `shift_sign`, `ratio` and `bus_shunt_model`. Raise only for files with a slightly stale but consistent solution; lower to make the scan stricter. |
+| `matpower_import.pv_voltage_source` | Symbol/String | `gen_vg` | `gen_vg`, `bus_vm`, `auto`, `strict_check` | PV voltage setpoint source; `gen_vg` is the standard MATPOWER semantics. |
+| `matpower_import.pv_voltage_mismatch_tol_pu` | Float64 | `1e-4` | nonnegative real | Tolerance for the PV voltage mismatch checks. |
+| `matpower_import.compare_voltage_reference` | Symbol/String | `imported_setpoint` | `bus_vm`, `gen_vg`, `imported_setpoint`, `hybrid` | Voltage reference used for comparisons. Auto-profile recommends `hybrid` when `BUS.VM`/`GEN.VG` mismatches are detected. |
+| `model.bus_shunt_model` | Symbol/String | `admittance` | `admittance`, `voltage_dependent_injection` | Bus shunt interpretation ([Branch model](branchmodel.md)); change it only with residual evidence. |
+| `matpower_import.shift_unit` | Symbol/String | `deg` | `deg`, `rad` | Phase-shift input unit. |
+| `matpower_import.shift_sign` | Float64 | `1.0` | real (typ. `1.0`, `-1.0`) | Phase-shift sign convention. |
+| `matpower_import.ratio` | Symbol/String | `normal` | `normal`, `reciprocal` | Branch ratio interpretation: `TAP` as stored, or its reciprocal. |
+| `model.tap_changer_model` | Symbol/String | `ideal` | `ideal`, `impedance_correction` | Tap-changer model applied to all transformers after import, shared with the DTF importer; see [Transformer tap-changer model](configuration.md#Transformer-tap-changer-model). |
+| `matpower_export.write_solution` | Bool | `true` | `true`, `false` | Whether [`writeMatpowerCasefile`](@ref) writes the solved state (see [Export](#Export)). |
+| `matpower_import.enable_pq_gen_controllers` | Bool | `true` | `true`, `false` | Enable controller behavior on imported PQ generators; `false` reproduces the raw imported behavior. |
+| `model.preallocate_network` | Symbol/String | `auto` | `off`, `on`, `auto` | Import-time `sizehint!` preallocation for large network construction; no model change. |
+| `model.preallocate_min_buses` | Int | `500` | positive integer | Bus-count threshold used when `preallocate_network = auto`. |
+| `matpower_import.apply_bus_names` | Bool | `false` | `true`, `false` | Use `mpc.bus_name` for the imported bus names; fails on duplicate names. |
+| `matpower_import.apply_branch_names` | Bool | `false` | `true`, `false` | Attach `mpc.branch_name` to `net.matpower_branch_metadata` (outage and contingency mapping). |
+| `matpower_import.apply_branch_kind` | Bool | `false` | `true`, `false` | Use `mpc.branch_kind` to override the line/transformer classification; accepts `L`/`LINE`/`ACL` and `T`/`TRAFO`/`TRANSFORMER`/`2WT`. |
+| `matpower_import.import_for001_contingencies` | Bool | `true` | `true`, `false` | Preserve `mpc.for001_contingencies` (FOR001/FOR002 validation); `mpc.branch_name` enables index mapping. |
+| `matpower_import.matpower_dcline_mode` | Symbol/String | `pf_injections` | `reject_active`, `ignore_inactive`, `pf_injections`, `paired_control` | Handling of active `mpc.dcline` rows, see [DC lines and disconnected AC islands](#DC-lines-and-disconnected-AC-islands). |
 
 Example configuration for a case-conversion or validation workflow:
 
 ```yaml
-matpower_import:
+model:
   auto_profile: off
+  bus_shunt_model: admittance
+
+matpower_import:
   pv_voltage_source: gen_vg
   compare_voltage_reference: imported_setpoint
   ratio: normal
   shift_unit: deg
   shift_sign: 1.0
-  bus_shunt_model: admittance
   apply_bus_names: true
   apply_branch_names: true
   apply_branch_kind: true
@@ -191,74 +186,58 @@ matpower_import:
 
 The convention overrides (`matpower_import.shift_unit`, `shift_sign`,
 `ratio`, `model.bus_shunt_model`) and the convention scan
-(`model.auto_profile`) are an experimental feature since 0.30.0, off by
-default and silent. The standard MATPOWER reading (shift in degrees, sign
-+1, ratio as stored, bus shunt as admittance) satisfies the power balance
-of the file on every case checked; the alternative readings fail wherever
-a file has a phase shift or an off-nominal tap. Change these only for a
-file you know to deviate. With `auto_profile: off` and every convention
-at its standard value, nothing about conventions is written to the run
+(`model.auto_profile`) are experimental, off by default and silent. The
+standard MATPOWER reading (shift in degrees, sign +1, ratio as stored, bus
+shunt as admittance) satisfies the power balance of the file on every case
+checked; the alternative readings fail wherever a file has a phase shift
+or an off-nominal tap. Change these only for a file you know to deviate.
+At the standard values nothing about conventions is written to the run
 log, the solver log, the result metadata or the configuration report, and
-no `matpower_auto_profile.log` artifact is created. With the scan on, or
-with any convention set away from the standard reading, the lines and the
-artifact appear, prefixed `experimental`, and the effective values appear
-in the configuration report. In the Web UI the block sits under Advanced
-on the Case page as "MATPOWER conventions (experimental)"; it opens by
-itself when a case configuration carries a non-standard value. See
-[Start strategies by case](start_strategies.md) for why the stored
+no `matpower_auto_profile.log` artifact is created; with the scan on, or a
+convention set away from the standard reading, the lines and the artifact
+appear, prefixed `experimental`, and the effective values appear in the
+configuration report. In the Web UI the block sits under Advanced on the
+Case page as "MATPOWER conventions (experimental)" and opens by itself
+when a case configuration carries a non-standard value.
+[Start strategies by case](start_strategies.md) explains why the stored
 voltage columns of some files must not be used to change the reading.
 
 ### Auto-profile pre-run
 
-The MATPOWER runner evaluates `model.auto_profile` before the main solve: it
-reads the case, computes compact diagnostics and prints a table with option
-path, current value, recommended value, action, reason and evidence. The
-shipped default is `off`; `recommend` with `auto_profile_log: true` logs
-recommendations without changing the configuration.
+With `model.auto_profile` on, the MATPOWER runner reads the case before
+the main solve and prints a table with option path, current value,
+recommended value, action, reason and evidence. Diagnostics: `VM`/`VA`
+power-balance residual scans over the shift unit/sign and ratio
+conventions, bus-shunt residuals with and without the bus shunt
+admittance, PV/REF `BUS.VM` versus online `GEN.VG` mismatch counts, and
+case size, PV-bus count and generator Q-range heuristics for the
+robust-start and Q-limit recommendations. For large cases the pre-run
+keeps start projection disabled, uses DC-angle and blended-voltage
+flat-start seeds, recommends a practical validation tolerance, and
+disables expensive diagnostics unless requested.
 
-| Mode | Effect |
-|---|---|
-| `off` | No pre-run. |
-| `recommend` | Diagnostics are logged, the run configuration is unchanged. |
-| `apply` | Only clearly safe convention changes are applied: `shift_unit`, `shift_sign`, `ratio` and `bus_shunt_model` when residual scans show a large, unambiguous improvement. PV/REF voltage, robust-start and Q-limit guard settings stay recommendation-only (`keep` or `skipped` in the table). |
-
-Diagnostics used: VM/VA power-balance residual scans over branch shift
-unit/sign and transformer ratio conventions; bus-shunt residual comparison
-with and without the MATPOWER bus shunt admittance; PV/REF `BUS.VM` versus
-online `GEN.VG` mismatch counts; case size, PV-bus count and generator
-Q-range heuristics for robust-start and Q-limit recommendations. For large
-cases the pre-run keeps start projection disabled, uses DC-angle and
-blended-voltage flat-start seeds, recommends a practical validation
-tolerance, and disables expensive diagnostics unless requested.
-
-The convention scan judges the eight readings of the shift column and the
-ratio by the power mismatch of the file's stored `VM`/`VA` columns. That
-ranking is evidence only when the stored columns are a solved state under
-some reading: when the best reading still scores above
-`model.auto_profile_max_fit_pu` (default `0.1` pu at the worst bus), the
-scan recommends no convention change, `apply` changes nothing, and the
-table and the compact console line say so with the best score ("stored
-VM/VA are not a solved state under any reading"). The PEGASE files ship
-such columns (best fit 0.5 to 3.9 pu); a solved state scores below 0.1 pu.
-
-Explicit YAML values stay visible; in `apply` mode a changed option is shown
-as `applied` in the table and in the final effective options block.
-Auto-profile never rewrites user YAML files. To reproduce a run, copy the
-logged final effective options (or enable
+The convention ranking is evidence only when the stored `VM`/`VA` columns
+are a solved state under some reading: when the best of the eight
+readings still scores above `model.auto_profile_max_fit_pu` (default
+`0.1` pu at the worst bus), the scan recommends no convention change,
+`apply` changes nothing, and the table and the console line say so with
+the best score ("stored VM/VA are not a solved state under any reading").
+The PEGASE files ship such columns (best fit 0.5 to 3.9 pu); a solved
+state scores below 0.1 pu. In `apply` mode a changed option is shown as
+`applied` in the table and in the final effective options block; to
+reproduce a run, copy the logged final effective options (or enable
 `diagnostics.log_effective_config`) into a tracked configuration file.
 
-`examples/powerflow/matpower_import_multi_config.jl` runs one MATPOWER case
-against several YAML files (repeated `--config=...` or a comma- or
-semicolon-separated `--configs=A,B,C` list) to check whether
-`model.auto_profile`, `power_flow.wrong_branch_detection` or start-mode
-settings change the final rectangular solver status; `--status-only` prints
-the status and wrong-branch diagnostic fields per configuration, `--runner`
-delegates to the standard `Sparlectra.run_matpower_case` output, and the
-script never creates or rewrites YAML files:
+`examples/powerflow/matpower_import_multi_config.jl` runs one case against
+several YAML files (repeated `--config=...`, or `--configs=A,B,C`) to
+check whether `model.auto_profile`, `power_flow.wrong_branch_detection` or
+start-mode settings change the final solver status; `--status-only` prints
+the status and wrong-branch fields per configuration, `--runner` delegates
+to `Sparlectra.run_matpower_case`:
 
 ```bash
 julia --project=. examples/powerflow/matpower_import_multi_config.jl \
-  data/mpower/case14.m \
+  data/mpower/sp_case118.m \
   --config=path/to/config_a.yaml \
   --config=path/to/config_b.yaml \
   --status-only
@@ -266,71 +245,65 @@ julia --project=. examples/powerflow/matpower_import_multi_config.jl \
 
 ### DC lines and disconnected AC islands
 
-`matpower_import.matpower_dcline_mode = pf_injections` (the default) imports
-each active `mpc.dcline` row with the MATPOWER `toggle_dcline`-compatible
-approximation: two generator-like terminal prosumers, from-side `PG = -PF`,
+`matpower_import.matpower_dcline_mode = pf_injections` (the default)
+imports each active `mpc.dcline` row as MATPOWER's `toggle_dcline` power
+flow does: two generator-like terminal prosumers, from-side `PG = -PF`,
 to-side received power `PF - (LOSS0 + LOSS1 * PF)` when loss columns exist
 (else the input `PT`), row `QF`/`QT`, voltage setpoints `VF`/`VT`, and
 terminal Q limits where present. Terminal buses with voltage setpoints
-become voltage-controlled where MATPOWER would make them PV; reference buses
-stay reference buses and isolated buses are not activated. API and Web UI
-runs write `matpower_dcline.csv` describing the mapping.
+become voltage-controlled where MATPOWER would make them PV; reference
+buses stay reference buses and isolated buses are not activated. API and
+Web UI runs write `matpower_dcline.csv` describing the mapping.
 
-- `reject_active` (strict, deprecated as a configuration value): an active
-  row (`status != 0`) aborts before solving with
+- `reject_active`: an active row
+  (`status != 0`) aborts before solving with
   `failure_reason = unsupported_matpower_dcline`.
-- `ignore_inactive`: the same active-row rejection, documenting the
-  inactive-row ignore policy. Empty or inactive-only tables are tolerated in
-  every mode.
+- `ignore_inactive`: the same active-row rejection. Empty or
+  inactive-only tables are tolerated in every mode.
 - `paired_control`: one steerable `HvdcPairControl` per row, see
   [HVDC Back-to-Back](hvdc_back_to_back.md).
-- This is a power-flow approximation, not an HVDC converter or DC-grid
-  model: OPF constraints, converter controls, `dclinecost` and DC-line
-  optimization are unsupported.
 
-No AC branches, dummy admittances or tiny impedance bridges are created
-between the terminals, so large cases such as `case_SyntheticUSA.m` consist
-of several AC Ybus components coupled only through DC-line injections.
-`power_flow.islands.enabled = true` is the default; each AC island is
-solved by the rectangular NR solver (large islands on their own threads,
-see [Parallel Execution](parallel_execution.md)) and the states are merged
-into one result. The
-artifact `ac_islands.csv` records per island the reference bus, status,
-active DC-line terminal count, power totals and pre-slack active-power
-imbalance.
+This is a power-flow approximation, not an HVDC converter or DC-grid
+model: OPF constraints, converter controls, `dclinecost` and DC-line
+optimization are unsupported. No AC branch or dummy admittance joins the
+terminals, so a case such as `case_SyntheticUSA.m` consists of several AC
+islands coupled only through DC-line injections; each island is solved on
+its own and `ac_islands.csv` records the result per island
+([Power-Flow Configuration](powerflow_configuration.md),
+[Parallel Execution](parallel_execution.md)).
 
 ### Tap-impedance correction and reimport
 
 A case built with `model.tap_changer_model = impedance_correction` exports
-`BR_R`/`BR_X` values that already carry the correction (see
-[Transformer tap-changer model](configuration.md#transformer-tap-changer-model));
+`BR_R`/`BR_X` values that already carry the correction
+([Transformer tap-changer model](configuration.md#Transformer-tap-changer-model));
 `writeMatpowerCasefile` marks this with
 `mpc.sparlectra.tap_changer_model = 'impedance_correction'`. On reimport,
 `createNetFromMatPowerFile`/`createNetFromMatPowerCase` detect the marker
-and skip `calcTapCorrectedRX` whatever `model.tap_changer_model` says. Cases
-without the marker, including third-party MATPOWER cases, import unchanged.
+and skip `calcTapCorrectedRX` whatever `model.tap_changer_model` says, so
+the correction is never applied twice. Cases without the marker, including
+third-party MATPOWER cases, import unchanged.
 
 ## What Sparlectra reads
 
 A power-flow run uses `bus`, `gen` and `branch`; with Q-limit handling
 enabled, `QMAX` and `QMIN` decide whether a generator can hold its voltage
-setpoint, and the configured strategy decides how a limited bus is treated.
-Additional MATLAB functions inside the `.m` file are not supported. The
-optional fields below are Sparlectra extensions, not MATPOWER fields: when
-absent, standard imports work unchanged; when present with the `apply_*`
-option at `false`, naming and branch classification keep their defaults.
-The direct importer takes the same switches as keywords
-(`apply_bus_names = true`, `apply_branch_names = true`,
-`apply_branch_kind = true`, `import_for001_contingencies = true`).
+setpoint. MATLAB functions inside the `.m` file are not supported. The
+fields below the standard matrices are Sparlectra extensions: when absent,
+standard imports work unchanged; when present with the `apply_*` option at
+`false`, naming and branch classification keep their defaults. The direct
+importer takes the same switches as keywords (`apply_bus_names = true`,
+`apply_branch_names = true`, `apply_branch_kind = true`,
+`import_for001_contingencies = true`).
 
 | Field | Used for | Notes |
 |---|---|---|
 | `mpc.baseMVA` | Common power base for per-unit quantities | Typically `100`. |
 | `mpc.bus` | Network nodes: type (`1` PQ, `2` PV, `3` reference, `4` isolated), demand, shunts, `VM`/`VA` start or reference values, base voltage, limits | Lines and transformers refer to `BUS_I`. |
 | `mpc.gen` | Generators: `PG`, `VG` setpoint, `QMAX`/`QMIN` for Q-limit handling, status | `PG`, `VG`, `QMAX` and `QMIN` are the values to inspect first. |
-| `mpc.branch` | Lines and transformers: `BR_R`/`BR_X`, charging, ratings, `TAP`, `SHIFT`, status | A non-zero tap ratio or phase shift marks a transformer; `TAP = 0` is treated as ratio `1`. |
+| `mpc.branch` | Lines and transformers: `BR_R`/`BR_X`, charging, ratings, `TAP`, `SHIFT`, status | A branch with `TAP` 0 or exactly 1, `SHIFT` 0 and the same `BASE_KV` at both ends is a line; any other `TAP`, a shift or two voltage levels make a transformer (`TAP = 1` between two levels: ratio 1). Some files write `TAP = 1` on lines (case6495rte on every branch). `mpc.branch_kind`, Sparlectra loss or tap-changer rows and a three-winding star point at one end override the rule. `TAP = 0` is treated as ratio `1`. `TAP` (column 9) and `SHIFT` (column 10) are the ratio and shift in effect; Sparlectra exports write them that way since 0.50.0. |
 | `mpc.gencost` | Optimal power flow | Kept per generator ([`GenCost`](@ref)) and written back unchanged on export; no calculation reads it. |
-| `mpc.bus_name` | Readable bus names | `matpower_import.apply_bus_names: true`; the original `BUS_I` values stay in `busOrigIdxDict`. |
+| `mpc.bus_name` | Readable bus names | `matpower_import.apply_bus_names: true`; the original `BUS_I` values stay in `busOrigIdxDict`. Without `mpc.bus_name`, or with a length other than the bus count, the import keeps the numeric names and warns once per case and session; later imports of the same case log this at debug level. In a file without `mpc.sparlectra.aux_buses` (written before 0.50.0) a name starting with `Aux_` marks an auxiliary bus (three-winding star point), with or without that switch. |
 | `mpc.branch_name` | Readable branch/source names, outage mapping | `matpower_import.apply_branch_names = true`; lands in `net.matpower_branch_metadata`. |
 | `mpc.branch_kind` | Line/transformer classification override | `matpower_import.apply_branch_kind = true`; `L`, `LINE`, `ACL` force a line, `T`, `TRAFO`, `TRANSFORMER`, `2WT` a transformer. Missing or length-mismatched metadata falls back to the electrical heuristic. |
 | `mpc.for001_contingencies` | FOR001-derived contingency names for validation workflows | `matpower_import.import_for001_contingencies = true`; lands in `net.for001Contingencies`. |
@@ -338,8 +311,9 @@ The direct importer takes the same switches as keywords
 | `mpc.sparlectra` | Versioned extension namespace (`mpc.sparlectra.format_version = 1`) for metadata that standard MATPOWER does not model | Recognized automatically when present; sub-blocks below. |
 | `mpc.sparlectra.transformer_losses` | Transformer no-load conductance from FOR/DTF sources | One entry per transformer branch: MATPOWER branch row, original FOR/DTF identifier, terminal bus names, raw `R/X/G/B` values where available, converted per-unit values, tap/phase-shift data, source marker and allocation convention. |
 | `mpc.sparlectra.links` | Busbar couplers, one `fbus tbus status` row per impedance-less coupler (`1` = closed) | Each row becomes a `BusLink`: a closed link merges its two buses into one electrical node (the same contraction CGMES switch imports use), an open link keeps them separate. Exports write the block from `net.linkVec`. Unknown bus numbers or a wrong column count are rejected. |
-| `mpc.sparlectra.tap_changers` | Tap-changer nameplates, one row per transformer branch | Columns `branch tap_step tap_min_step tap_max_step tap_current_step phase_step_deg phase_min_step phase_max_step phase_current_step` plus optional `psi_deg` and `phase_du_step`; see below. |
-| `mpc.sparlectra.tap_changer_model` | Roundtrip marker `'impedance_correction'` | See [Tap-impedance correction and reimport](#tap-impedance-correction-and-reimport). |
+| `mpc.sparlectra.tap_changers` | Tap-changer nameplates, one row per transformer branch | Columns `branch tap_step tap_min_step tap_max_step tap_current_step phase_step_deg phase_min_step phase_max_step phase_current_step` plus optional `psi_deg`, `phase_du_step`, `ratio_grid` and the pair `neutral_ratio`, `neutral_shift_deg`; see below. |
+| `mpc.sparlectra.aux_buses` | Auxiliary buses (three-winding star points, internal nodes), one `BUS_I` per row | The solver's flat start puts such a bus at the ratio of its stiffest winding instead of 1.0 pu. Exports write the block from the auxiliary role of the buses. Unknown bus numbers are rejected. |
+| `mpc.sparlectra.tap_changer_model` | Roundtrip marker `'impedance_correction'` | See [Tap-impedance correction and reimport](#Tap-impedance-correction-and-reimport). |
 | `mpc.sparlectra.solution_written` | Marker `1` that columns 8/9 and 14-17 are a solution | Written by `writeMatpowerCasefile` with `write_solution = true`. |
 
 **Notes**
@@ -356,39 +330,68 @@ The direct importer takes the same switches as keywords
   one without any generating unit cannot be solved.
 - Inactive generators or branches carry status `0`; per-unit branch
   impedances must be consistent with `baseMVA` and the voltage base.
-- Transformer conductance lives on `PowerTransformerWinding.g` and flows
-  through `getTrafoRXBG`/`getTrafoRXBG_pu` into `Branch.g_pu`, part of the
-  transformer PI branch model rather than a synthetic terminal bus shunt;
-  Sparlectra reimports the `transformer_losses` block without adding
-  bus-shunt approximations.
-- Support for individual network data issues is beyond the scope of this
-  project; users are encouraged to resolve such issues independently and
-  share their results with the community.
+- Transformer conductance flows into `Branch.g_pu`, part of the
+  transformer PI branch model and not a terminal bus shunt
+  ([Branch model](branchmodel.md)); the `transformer_losses` block
+  reimports without bus-shunt approximations.
 
 ### Tap-changer nameplates
 
-Standard MATPOWER knows only the continuous `TAP`/`SHIFT` columns. With
-`mpc.sparlectra.tap_changers` present, `TAP`/`SHIFT` are the neutral
-position and the current steps move the live position off it (ratio grid
-`tap = neutral / (1 + n * tap_step)`, the grid the tap estimation fixes to).
-`psi_deg` is the PST regulating-vector direction (`0` = unspecified, default
-the symmetric 90 degrees).
+Standard MATPOWER knows only the continuous `TAP`/`SHIFT` columns and no
+tap changer. The block adds the nameplate: the current steps move the live
+position off the neutral (ratio grid `tap = neutral / (1 + n * tap_step)`,
+the grid the tap estimation fixes to). `psi_deg` is the PST
+regulating-vector direction (`0` = unspecified, default the symmetric 90
+degrees). `ratio_grid` (column 12) is `1` for a CGMES ratio changer, whose
+positions count on its linear grid `tap = neutral + n * tap_step`; `0` or a
+missing column means the fraction grid. A current step of `NaN` (column 5
+or 9) means the step was not transferred: the changer sits at its middle
+position, the neutral position 0, and the import names it in an info line.
+
+Where the neutral position stands depends on the width of the block:
+
+- 14 columns (written since 0.50.0): `TAP`/`SHIFT` of the branch row are
+  the ratio and shift in effect, so MATPOWER and every other reader solve
+  the network Sparlectra solves. Column 13 `neutral_ratio` and column 14
+  `neutral_shift_deg` hold the neutral position; Sparlectra builds the
+  transformer on it and applies the steps. If `TAP`/`SHIFT` were edited and
+  no longer match the steps, the steps are kept and a warning names the
+  branch.
+- 9 to 12 columns (files written before 0.50.0): `TAP`/`SHIFT` are the
+  neutral position and the steps are applied on top of it. Such files read
+  as before. A plain MATPOWER reader sees a transformer off neutral at its
+  neutral ratio in these files.
+
+Example, transformer Wehrden in `sp_case14`: neutral 1.025, four steps of
+0.625 percent, ratio in effect 1.0. The export writes `TAP = 1.0` and
+`1.025` in column 13. The step grid cannot be expressed in MATPOWER; other
+tools see the fixed ratio.
+
+Releases before 0.50.0 reject the 14-column block, so a new file never
+reads there with the position applied twice.
 
 Two phase-changer flavors exist, and declaring both grids at once is
 rejected: `phase_step_deg` steps the shift angle in degrees; `phase_du_step`
 is an additional-voltage stepper (the common Delta-u PST): each step adds
 `phase_du_step` per unit of additional voltage in the direction `psi_deg`,
-the shift angle follows from the cascade (`atan`), and the step columns
-count Delta-u steps. The tap estimation fixes a Delta-u PST linearly on that
-grid.
+the complex tap is divided by `1 + n * phase_du_step * e^(j psi_deg)`,
+and the step columns count Delta-u steps. The tap estimation estimates a
+Delta-u PST on these steps, along the line of the additional voltage.
 
-A `tap_step` of `0` declares a pure phase shifter, which keeps it out
-of the estimator's ratio mass release; declared phase changers join the mass
-release in `:pst` mode along their nameplate direction. Current steps may be
-fractional; short rows are zero-padded like MATPOWER optional trailing
-columns. Exports write the block for every transformer off neutral or with a
-non-default grid. Rows referencing non-transformer branches, unknown
-branches, or positions outside the declared band are rejected at import.
+A `tap_step` of `0` declares a pure phase shifter, which keeps it out of
+the estimator's ratio mass release; declared phase changers join the mass
+release (`:pst`, or `:both` next to a ratio changer) with their nameplate
+direction, which is never estimated. The tap estimation reads the row as
+tap changers: the ratio step as a ratio changer on the to side (with
+`ratio_grid` 1 an additive linear grid), `phase_du_step` as an asymmetrical
+changer with direction `psi_deg`, `phase_step_deg` as a linear changer in
+degrees ([Transformer tap estimation](@ref se-tap-estimation)). Current steps may
+be fractional; short rows are zero-padded like MATPOWER optional trailing
+columns. Exports write the block for every transformer off neutral or with
+a non-default grid, always with 14 columns. Rows referencing
+non-transformer branches, unknown branches, or positions outside the
+declared band are rejected at import, as are a 13-column block and a
+`neutral_ratio` of 0.
 
 ## Export
 
@@ -416,12 +419,26 @@ writeMatpowerCasefile(net, filepath)                          # configuration de
 
 | `write_solution` | Export |
 |---|---|
-| `true` (default) | `mpc.bus` `VM`/`VA` carry the solved node state and `mpc.branch` gains the standard MATPOWER result columns 14-17 (`PF`, `QF`, `PT`, `QT`, flow into the branch at each end) from the branch-flow report path; the exporter does not recompute flows. `mpc.sparlectra.solution_written = 1` marks columns 8/9 and 14-17 as a solution. An unsolved network (no branch flows) warns and falls back to the 13-column model-only export. |
-| `false` | A pure model file: `mpc.branch` keeps its 13 columns, `VM = 1.0`/`VA = 0.0` for all non-slack/non-PV buses (slack and PV setpoints are preserved). |
+| `true` (default) | `mpc.bus` `VM`/`VA` carry the solved node state and `mpc.branch` gains the standard MATPOWER result columns 14-17 (`PF`, `QF`, `PT`, `QT`, flow into the branch at each end) from the branch-flow report; the exporter does not recompute flows. `mpc.sparlectra.solution_written = 1` marks columns 8/9 and 14-17 as a solution. An unsolved network (no branch flows) warns and falls back to the 13-column model-only export. |
+| `false` | A pure model file: `mpc.branch` keeps its 13 columns, `VM = 1.0`/`VA = 0.0` for all non-slack/non-PV buses (slack and PV setpoints are preserved; with a slack angle other than 0 every bus gets `VA` = the slack angle, the angle of the flat start). An auxiliary bus (three-winding star point) gets the value of the solver's flat start instead, the voltage at which its stiffest winding carries no current; read back, a bus listed in `mpc.sparlectra.aux_buses` stays auxiliary. |
 
-Sparlectra writes no OPF columns 18-21. Exported `.m`
-files with transformer losses carry a `SPARLECTRA EXTENSION WARNING` comment
-because plain MATPOWER ignores the `mpc.sparlectra` block.
+A unit without an active-power limit is written with `Pmax = 9999` and
+`Pmin = -9999`, the MATPOWER convention for an unlimited unit; the CGMES
+import reads limits of 9999 MW and above as no limit as well. The reactive
+limits of a unit without them stay at `±baseMVA`.
+
+A transformer whose step was not transferred (its changer sits at the
+assumed middle position) has no mark in MATPOWER: the export writes the
+middle position as the step, in `TAP`/`SHIFT` and in
+`mpc.sparlectra.tap_changers`, and logs one warning per transformer. Read
+back, the step counts as transferred. The SCF export keeps the mark. A
+changer that a tap controller or a QSTS carry moved has no mark and gets
+no warning.
+
+Sparlectra writes no OPF columns 18-21. Exported `.m` files with
+transformer losses carry a `SPARLECTRA EXTENSION WARNING` comment, because
+plain MATPOWER ignores the `mpc.sparlectra` block and computes different
+transformer active losses.
 
 A branch whose two terminal shunt arms differ (a PowSyBl transformer with
 its magnetizing admittance on side 1, a line with unequal `b1`/`b2`, see
@@ -435,52 +452,29 @@ Gs in MW, Bs in MVar). A MATPOWER solver reproduces the same Y-bus; the
 Sparlectra reimport keeps these parts on the bus shunt as parts of their
 branch, so an N-1 outage of the branch takes them away with it.
 
-!!! details "Why it is built this way"
-    Transformer no-load conductance has no branch-local field in standard
-    MATPOWER, and mapping it onto a terminal bus shunt would change the
-    active losses of the transformer. The `mpc.sparlectra.transformer_losses`
-    block keeps the conductance on the branch across an export and reimport;
-    plain MATPOWER ignores the block and computes different transformer
-    active losses, which the comment in the exported file says.
-
-    The `mpc.sparlectra.tap_changer_model` marker exists because a second
-    tap-impedance correction on reimport would stack a differently derived
-    factor on the already corrected values: the MATPOWER reimport uses
-    `1/ratio²`, the native DTF importer the `tap_fraction`-based
-    regulating-vector factor. Skipping `calcTapCorrectedRX` when the marker
-    is present keeps the transformer impedances bit-identical between the
-    native and the roundtrip case.
-
-    DC lines are imported as fixed terminal injections rather than as an
-    HVDC model because that is what MATPOWER's own `toggle_dcline` power
-    flow does; the same approximation gives comparable results and needs no
-    converter parameters the case does not carry. The price is that the AC
-    components joined only by DC lines are separate islands, which the
-    island solver handles instead of an artificial bridge branch.
-
 ### [Generator costs](@id matpower_gencost)
 
-Sparlectra has no optimal power flow, but a case it writes stays usable with
-MATPOWER's `runopf`: the `mpc.gencost` rows are kept with their generators
-and written back unchanged, in the model export and in the
+Sparlectra has no optimal power flow, but a case it writes stays usable
+with MATPOWER's `runopf`: the `mpc.gencost` rows are kept with their
+generators and written back unchanged, in the model export and in the
 `<case>_calc_<date>.m` file of a service run.
 
-- Import: row `g` of `mpc.gencost` belongs to generator row `g`; a block with
-  twice as many rows carries the reactive-power costs of the same units in
-  its second half. Both MATPOWER cost models are kept: 1 (piecewise linear)
-  and 2 (polynomial). Each generator holds its rows as a [`GenCost`](@ref)
-  in `ProSumer.gencost`. A block whose row count fits neither, or that holds
-  a row which is not a valid model 1 or 2 row, is not imported, with a
-  warning that names the reason; the network itself imports as before.
-  Out-of-service generators are not imported, and their cost rows with them.
+- Import: row `g` of `mpc.gencost` belongs to generator row `g`; a block
+  with twice as many rows carries the reactive-power costs of the same
+  units in its second half. Both cost models are kept, 1 (piecewise
+  linear) and 2 (polynomial), as a [`GenCost`](@ref) in
+  `ProSumer.gencost`. A block whose row count fits neither, or that holds
+  an invalid row, is not imported, with a warning naming the reason; the
+  network imports as before. Out-of-service generators are dropped with
+  their cost rows.
 - Export: the rows are written in the order of the `mpc.gen` rows, padded
   with zeros to the widest row. When only some generators carry costs (a
-  unit added in Sparlectra, a slack generator the exporter adds), no block is
-  written and a warning names the units without costs: a partial block would
-  assign the rows to the wrong generators. Reactive-power rows are written
-  only when every unit has one. A case without `gencost` writes none.
-- SCF stores the rows per machine as `extra.<machine>.gencost` (see
-  [Case Format](scf.md)).
+  unit added in Sparlectra, a slack generator the exporter adds), no block
+  is written and a warning names the units without costs, because a
+  partial block would assign the rows to the wrong generators.
+  Reactive-power rows are written only when every unit has one.
+- SCF stores the rows per machine as `extra.<machine>.gencost`
+  ([Case Format](scf.md)).
 
 ## [Citation and case-file usage](@id matpower-citation)
 
@@ -500,9 +494,3 @@ citations in their headers. Case names in this documentation (`case300.m`,
 you obtain from MATPOWER or the original data sources under their license,
 citation and redistribution terms.
 
-## Binary case cache (`model.net_cache_enabled`)
-
-`model.net_cache_enabled: true` is inert (every importer builds its network
-directly from its own format) and logs a warning; the key stays readable for
-old configuration files, and leftover `.sparlectra_net_cache` directories
-can be deleted.

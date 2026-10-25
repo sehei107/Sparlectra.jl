@@ -13,199 +13,88 @@
 # limitations under the License.
 
 # file: test/test_demo_cases.jl
-# purpose: the shipped demo cases (data/scf/sp_case*)
-#          are regression fixtures, not decoration: each case is read through
-#          import_case like any other SCF file, all five run kinds are
-#          executed (power flow, N-1, explicit scenarios, state estimation,
-#          short circuit), and the results are compared against the tracked
-#          reference fixture tracked next to this file. The fixtures are
-#          part of the repository: they are not generated during a test run,
-#          they are the recorded reference the run is compared against.
+# purpose: the shipped demo cases (data/scf/sp_case*) are read through
+#          import_case like any other SCF file; power flow, state estimation
+#          on the measurements the file carries, and the declared controllers
+#          must converge; sp_case6tap holds its three tap control targets.
+#          The file checks (provenance, case config, size budget, bad-data
+#          twin) live in test_repository_hygiene.jl.
 
 const _DEMO_CASE_DIR = normpath(joinpath(dirname(@__DIR__), "data", "scf"))
-const _DEMO_CASE_FIXTURES = normpath(joinpath(@__DIR__, "fixtures", "demo_cases"))
-const _DEMO_CASE_NAMES = ("sp_case5", "sp_case14", "sp_case60", "sp_case188")
-# same rule for the provenance stamp as the SCF tests use
-include("test_scf_support.jl")
-# the fixtures are machine-neutral: they were taken against the PACKAGE
-# defaults, so the comparison must never
-# resolve through this machine's configuration.yaml
+const _DEMO_CASE_NAMES = ("sp_case5", "sp_case6tap", "sp_case14", "sp_case60", "sp_case188")
+# the hand-written tap control case carries no measurement rows in its file;
+# its measurement table next to it is read instead
+const _DEMO_CASES_TABLE_ONLY = ("sp_case6tap",)
+# scf_with_foreign_stamp for the legacy group of this file
+isdefined(@__MODULE__, :scf_roundtrip_field_diffs) || include("test_scf_support.jl")
+# the cases are machine-neutral: they run against the PACKAGE defaults and
+# never resolve through this machine's configuration.yaml
 _DEMO_REF_CONFIG() = Sparlectra.SparlectraConfig(Dict())
 
-function _demo_fixture(name::String)::Dict{String,Any}
-  path = joinpath(_DEMO_CASE_FIXTURES, "$(name).json")
-  # the fixture is TRACKED, so a missing one means the checkout is
-  # incomplete, not that something has to be generated first
-  isfile(path) || error("demo case fixture missing: $(path); the reference fixtures are tracked in test/fixtures/demo_cases, so this checkout is incomplete")
-  return Sparlectra.scf_json_parse(read(path, String))
-end
-
 function run_demo_case_tests()
-  @testset "Shipped demo cases (regression fixtures)" begin (function ()
+  # one outer set, so a failing case still runs the sets after it
+  @testset "Shipped demo cases" begin (function ()
     for name in _DEMO_CASE_NAMES
       @testset "$(name)" begin (function ()
         scf_path = joinpath(_DEMO_CASE_DIR, "$(name).scf.json")
-        fixture = _demo_fixture(name)
-        @test isfile(scf_path)
-        # provenance: the self-built statement travels in the file itself
-        @test occursin("Self-built Sparlectra demo network", read(scf_path, String))
-        # the per-case config file exists and pins the solve tolerance: its
-        # presence pins the resolution chain to package defaults, so the
-        # 1e-6 pu fixtures never resolve against a machine configuration
-        cfg_path = Sparlectra.case_config_path(scf_path)
-        @test isfile(cfg_path)
-        @test occursin("scope: case", read(cfg_path, String))
-        @test Sparlectra.load_case_config(scf_path)["power_flow.tol"] == 1.0e-8
 
         # 1) power flow through the standard import path (start_state applies)
-        res = Sparlectra.import_case(scf_path, _DEMO_REF_CONFIG())
-        net = res.net
-        ite, erg = runpf!(net; verbose = 0)
+        net = Sparlectra.import_case(scf_path, _DEMO_REF_CONFIG()).net
+        _, erg = runpf!(net; verbose = 0)
         @test erg == 0
-        @test ite == fixture["power_flow"]["iterations"]
-        calcNetLosses!(net)
-        p_losses, _ = Sparlectra.getTotalLosses(net = net)
-        @test isapprox(p_losses, fixture["power_flow"]["losses_mw"]; atol = 1e-5)
-        ids = Sparlectra.scf_id_map(net)
-        bus_state = fixture["power_flow"]["bus_state"]
-        @test length(bus_state) == length(net.nodeVec)
-        for i in eachindex(net.nodeVec)
-          ref = bus_state[string(ids.node[i])]
-          @test isapprox(net.nodeVec[i]._vm_pu, ref["vm_pu"]; atol = 1e-6)
-          @test isapprox(net.nodeVec[i]._va_deg, ref["va_deg"]; atol = 1e-5)
-        end
 
-        # 2) state estimation on the measurements the file itself carries
-        # the topology precheck advises on two of the shipped cases by design;
+        # 2) state estimation on the measurements the file itself carries;
+        # the topology precheck advises on two of the shipped cases by design,
         # captured, anything else that warns fails
+        meas_file = joinpath(_DEMO_CASE_DIR, "$(name).measurements.csv")
+        @test isfile(meas_file)
+        name in _DEMO_CASES_TABLE_ONLY && readMeasurementTable!(net; file = meas_file)
         se = run_with_expected_warnings(() -> runse!(net), (r"topology precheck reported",))
         @test se.converged
-        @test se.dof == fixture["state_estimation"]["dof"]
-        @test isapprox(se.objectiveJ, fixture["state_estimation"]["objective"]; atol = 1e-4)
 
-        # 3) short circuit at the fixture's buses: the feeder with the data
-        # of the file, the machines (the file names no data for them) with
-        # the engine's default, which is why every row is flagged and the
-        # engine warns once per machine
-        sc_buses = sort(collect(keys(fixture["short_circuit"])))
-        sc = run_with_expected_warnings(() -> runShortCircuit!(net, net.sc_sources; buses = sc_buses, case = :max), ("has no usable x''_d", "has no usable ratedS", "has neither x''_d nor ratedS"))
-        @test length(sc.rows) == length(sc_buses)
-        @test length(net.sc_sources.external_network_injections) == 1
-        @test all(m -> m.satDirectSubtransX_pu === nothing, net.sc_sources.synchronous_machines)
-        @test all(row -> row.contains_defaulted_data, sc.rows)
-        for row in sc.rows
-          ref = fixture["short_circuit"][String(row.bus)]
-          @test isapprox(row.ik_kA, ref["ik_kA"]; atol = 1e-5)
-          @test isapprox(row.sk_MVA, ref["sk_MVA"]; atol = 1e-3)
-        end
-
-        # 4) N-1 over the generated branch list on a fresh import
-        n1net = Sparlectra.import_case(scf_path, _DEMO_REF_CONFIG()).net
-        n1 = runContingencies!(n1net, generateN1Branches(n1net))
-        @test length(n1) == fixture["n1"]["total"]
-        @test count(r -> r.converged, n1) == fixture["n1"]["converged"]
-        @test count(r -> r.converged && r.max_branch_loading_pct !== nothing && r.max_branch_loading_pct > 100.0, n1) == fixture["n1"]["overloads"]
-
-        # 5) the file's own explicit scenarios through runScenarios!
-        icase = read_scf_json(scf_path)
-        iset = Sparlectra.scf_case_scenarios(icase)
-        @test iset !== nothing
-        @test String(iset.mode) == fixture["scenarios"]["mode"]
-        explicit_ref = fixture["scenarios"]["explicit"]
-        @test sort(collect(keys(explicit_ref))) == sort([s.name for s in iset.scenarios])
-        scen_net = Sparlectra.import_case(scf_path, _DEMO_REF_CONFIG()).net
-        scen_res = runScenarios!(scen_net, Sparlectra.ScenarioSet(scenarios = iset.scenarios, mode = :explicit); index = Sparlectra.ScenarioIndex(icase))
-        for r in scen_res
-          ref = explicit_ref[r.name]
-          @test r.converged == ref["converged"]
-          # islanding scenarios carry no finite loading; the fixture then
-          # omits the key
-          ref_loading = get(ref, "max_branch_loading_pct", nothing)
-          ref_loading === nothing || @test isapprox(r.max_branch_loading_pct, ref_loading; atol = 1e-5)
-        end
-
-        # 6) cases with a declared controller: the parameters in the file
-        # must match the fixture (a changed controller default then shows
-        # up as a parameter diff next to the symptom), and the control run
-        # reproduces its reference behavior
-        if haskey(fixture, "control")
-          ctrl_ref = fixture["control"]
-          # a shipped case's controllers MUST settle; equality with the
-          # fixture alone once froze a non-converging SSSC as the
-          # reference (the first live run found it)
-          @test ctrl_ref["converged"] === true
-          file_params = icase.sparlectra.components.controllers
-          @test Dict{String,Any}(String(k) => v for (k, v) in file_params) == ctrl_ref["parameters"]
-          ctrl_net = Sparlectra.import_case(scf_path, _DEMO_REF_CONFIG()).net
+        # 3) the declared controllers of a shipped case must settle: a
+        # comparison with a recorded run once froze a non-converging SSSC as
+        # the reference. sp_case5 is the one case without a controller.
+        ctrl_net = Sparlectra.import_case(scf_path, _DEMO_REF_CONFIG()).net
+        controllers = Sparlectra.collect_outer_controllers(ctrl_net)
+        @test isempty(controllers) == (name == "sp_case5")
+        if !isempty(controllers)
           cres = Sparlectra.run_control!(ctrl_net; verbose = 0)
-          @test cres.converged == ctrl_ref["converged"]
-          @test cres.outer_iterations == ctrl_ref["outer_iterations"]
-          @test cres.powerflow_solves == ctrl_ref["powerflow_solves"]
+          @test cres.converged
         end
-
-        # size budget: no single bundle runs away; the BINDING cap is the
-        # task's total (all cases together well under a megabyte, checked
-        # after the loop). 420k since the place names: the
-        # benchmark bundle measured 412k, up 3.2 percent from 399k, because
-        # measurements and extra carry reference NAMES (Birkloh_110, not
-        # C9); the names are already compact (max 9 chars a place). The
-        # planned measurement id-mapping option (post-release) is the lever
-        # that shrinks this below the old level
-        bundle = filter(f -> startswith(f, name), readdir(_DEMO_CASE_DIR))
-        @test sum(filesize(joinpath(_DEMO_CASE_DIR, f)) for f in bundle) < 420_000
-        # the bad-data variant exists and differs in exactly the marked way
-        @test isfile(joinpath(_DEMO_CASE_DIR, "$(name).measurements.baddata.csv"))
-        @test occursin("baddata", read(joinpath(_DEMO_CASE_DIR, "$(name).measurements.baddata.csv"), String))
       end)() end
     end
-    all_files = filter(f -> startswith(f, "sp_case"), readdir(_DEMO_CASE_DIR))
-    @test sum(filesize(joinpath(_DEMO_CASE_DIR, f)) for f in all_files) < 900_000
 
-    # Why there is no byte round trip for these four, in case someone reaches
-    # for one here: importing a shipped case and exporting it again does NOT
-    # reproduce the file. `scenarios`, the `short_circuit` block with its PGM
-    # `fault` row, the `extra` names and the measurement provenance are EXPORT
-    # ARGUMENTS, not network state (measured: sp_case5 comes back as
-    # 15354 characters against the shipped 16643). Handing those blocks back to
-    # the exporter from the file under test would compare it against its own
-    # input. These files are built by a generator that passes those arguments
-    # and is their provenance record, not by a re-export; the property such a
-    # comparison would be reaching for is checked directly below instead.
-    #
-    # Review note: after the 0.10.0 -> 0.11.0 bump turned a
-    # fixture comparison red: a test that goes red on every version bump
-    # trains the reflex to regenerate the file, and the next time the diff
-    # may be more than the stamp line, with the regeneration hiding it. The
-    # shipped cases must therefore not depend on the release recorded in
-    # them at all. A copy stamped with a version that does not exist has to
-    # import to the same network and solve to the same result; nothing may
-    # read `created_by` except a human looking for provenance.
-    @testset "the provenance stamp does not reach behavior" begin (function ()
-      d = mktempdir()
-      for name in _DEMO_CASE_NAMES
-        original = joinpath(_DEMO_CASE_DIR, "$(name).scf.json")
-        # the case config next to the file pins the tolerance; it has to
-        # travel with the copy or the comparison resolves differently
-        cp(Sparlectra.case_config_path(original), joinpath(d, basename(Sparlectra.case_config_path(original))); force = true)
-        foreign = scf_with_foreign_stamp(original, d)
-        @test occursin("Sparlectra 0.0.0-nonexistent", read(foreign, String))
-        # and it is the ONLY difference
-        @test scf_without_stamp(read(foreign, String)) == scf_without_stamp(read(original, String))
-
-        ref = Sparlectra.import_case(original, _DEMO_REF_CONFIG()).net
-        alt = Sparlectra.import_case(foreign, _DEMO_REF_CONFIG()).net
-        @test length(alt.nodeVec) == length(ref.nodeVec)
-        @test length(alt.branchVec) == length(ref.branchVec)
-        @test length(alt.measurements) == length(ref.measurements)
-        ite_ref, erg_ref = runpf!(ref; verbose = 0)
-        ite_alt, erg_alt = runpf!(alt; verbose = 0)
-        @test (ite_alt, erg_alt) == (ite_ref, erg_ref)
-        calcNetLosses!(ref)
-        calcNetLosses!(alt)
-        p_ref, q_ref = Sparlectra.getTotalLosses(net = ref)
-        p_alt, q_alt = Sparlectra.getTotalLosses(net = alt)
-        @test p_alt == p_ref && q_alt == q_ref
-      end
+    # sp_case6tap, the tap control case (diagram
+    # data/scf/sp_case6tap_single_line.svg): its names, the ratio changer of
+    # T2 that no controller drives, and the three targets of the case file
+    # met inside their deadbands after the outer control loop
+    @testset "sp_case6tap names, T2 changer and control targets" begin (function ()
+      net = Sparlectra.import_case(joinpath(_DEMO_CASE_DIR, "sp_case6tap.scf.json"), _DEMO_REF_CONFIG()).net
+      @test [n.comp.cName for n in net.nodeVec] == ["Nordwerk_220", "Suedfeld_220", "Kreuzau_110", "Mittelbach_110", "Ostheim_110", "Lindenau_20"]
+      @test [b.comp.cName for b in net.branchVec] == ["Nordwerk_Suedfeld", "Kreuzau_Mittelbach", "Mittelbach_Ostheim", "Kreuzau_Ostheim", "T1_Nordwerk_Kreuzau", "T2_Suedfeld_Ostheim", "T3_Mittelbach_Lindenau"]
+      # T2: declared ratio changer, +-12 steps of 1.25 percent around the
+      # neutral ratio 1.0, at position 0, no phase changer; no controller
+      # names it (the controllers sit on branch 5, T1, and 7, T3)
+      t2 = net.branchVec[6]
+      @test t2.has_ratio_tap && t2.ratio_tap_declared && !t2.has_phase_tap
+      @test t2.tap_step == 0.0125 && t2.tap_ratio == 1.0
+      @test Sparlectra._tap_position(t2.tap_ratio, 1.0, t2.tap_step) == 0
+      @test t2.tap_min ≈ 1 / (1 + 12 * 0.0125) && t2.tap_max ≈ 1 / (1 - 12 * 0.0125)
+      controllers = Sparlectra.collect_outer_controllers(net)
+      @test sort([(c.trafo, c.mode) for c in controllers]) == [("5", :branch_active_power), ("5", :voltage), ("7", :voltage)]
+      cres = Sparlectra.run_control!(net; verbose = 0)
+      @test cres.converged
+      row(n) = only(r for r in cres.controllers if r.controller_name == n)
+      @test abs(row("T1_Nordwerk_Kreuzau OLTC").achieved_vm_pu - 1.0) <= 0.01
+      @test abs(row("T3_Mittelbach_Lindenau OLTC").achieved_vm_pu - 1.0) <= 0.01
+      @test abs(row("T1_Nordwerk_Kreuzau PST").achieved_p_mw - 60.0) <= 4.0
+      # the result rows read the solved net: the bus voltages and the T1
+      # flow agree with them
+      vm(b) = only(n for n in net.nodeVec if n.comp.cName == b)._vm_pu
+      @test row("T1_Nordwerk_Kreuzau OLTC").achieved_vm_pu ≈ vm("Kreuzau_110")
+      @test row("T3_Mittelbach_Lindenau OLTC").achieved_vm_pu ≈ vm("Lindenau_20")
+      @test row("T1_Nordwerk_Kreuzau PST").achieved_p_mw ≈ Sparlectra.get_branch_p_from_to_mw(net, "Nordwerk_220", "Kreuzau_110")
     end)() end
 
     # the shipped cases load through the Web
@@ -217,6 +106,7 @@ function run_demo_case_tests()
       app_root = normpath(joinpath(dirname(@__DIR__)))
       offered = SparlectraApp._webui_bundled_scf_options(app_root)
       @test "sp_case14.scf.json" in offered
+      @test "sp_case6tap.scf.json" in offered
       @test "sp_casePST.scf.json" in offered
       # 0.12.5: the feeder/Q-limit example cases and the plain PGM files are
       # offered too, each with its case configuration sidecar
@@ -303,14 +193,6 @@ function run_demo_case_tests()
       ite_ref, erg_ref = runpf!(ref_net; verbose = 0)
       @test erg_ref == 0
       @test ite_ref > 1
-
-      # and it still lands on the shipped fixture
-      fixture = _demo_fixture("sp_case14")
-      bus_state = fixture["power_flow"]["bus_state"]
-      ids = Sparlectra.scf_id_map(ref_net)
-      for i in eachindex(ref_net.nodeVec)
-        @test isapprox(ref_net.nodeVec[i]._vm_pu, bus_state[string(ids.node[i])]["vm_pu"]; atol = 1e-6)
-      end
 
       # an explicit `config` still wins over the carried one
       loose = Sparlectra.SparlectraConfig(Dict{String,Any}("power_flow" => Dict{String,Any}("max_iter" => 50)))

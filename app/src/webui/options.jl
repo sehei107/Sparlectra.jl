@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -59,7 +59,7 @@ const WEBUI_OPTION_SPECS = WebUIOptionSpec[
   WebUIOptionSpec("power_flow.autodamp_min", "power_flow_autodamp_min", Float64, :number, 0.05, (), :expert, :case, true),
   WebUIOptionSpec("power_flow.qlimits.enabled", "power_flow_qlimits_enabled", Bool, :checkbox, true, (), :basic, :case, true),
   WebUIOptionSpec("power_flow.qlimits.enforcement_mode", "power_flow_qlimits_enforcement_mode", String, :select, "active_set", _WEBUI_QLIMIT_ENFORCEMENT_MODE_VALUES, :expert, :case, true),
-  # the rest of the Q-limit block (task 0.20.2, PV/PQ switching studies);
+  # the rest of the Q-limit block (0.20.2, PV/PQ switching studies);
   # defaults are the template values, the floats as text in scientific
   # notation like the tolerance, the bus lists as comma-separated text
   WebUIOptionSpec("power_flow.qlimits.start_iter", "power_flow_qlimits_start_iter", Int, :number, 3, (), :expert, :case, true),
@@ -91,6 +91,7 @@ const WEBUI_OPTION_SPECS = WebUIOptionSpec[
   WebUIOptionSpec("power_flow.apslf.convergence_radius", "power_flow_apslf_convergence_radius", Bool, :checkbox, true, (), :expert, :case, true),
   WebUIOptionSpec("power_flow.flatstart", "power_flow_flatstart", Bool, :checkbox, false, (), :basic, :case, true),
   WebUIOptionSpec("power_flow.start_mode.ratio_profile", "power_flow_ratio_profile", Bool, :checkbox, true, (), :expert, :case, true),
+  WebUIOptionSpec("power_flow.start_mode.rotate_behind_pst", "power_flow_rotate_behind_pst", Bool, :checkbox, false, (), :expert, :case, true),
   WebUIOptionSpec("power_flow.apslf_start.enabled", "power_flow_apslf_start_enabled", Bool, :checkbox, false, (), :expert, :case, true),
   WebUIOptionSpec("power_flow.apslf_start.order", "power_flow_apslf_start_order", Int, :number, 40, (), :expert, :case, true),
   WebUIOptionSpec("power_flow.wrong_branch_detection", "power_flow_wrong_branch_detection", String, :select, "warn", WRONG_BRANCH_DETECTION_VALUES, :expert, :case, true),
@@ -128,6 +129,18 @@ const WEBUI_OPTION_SPECS = WebUIOptionSpec[
   WebUIOptionSpec("contingency.warm_active_set", "contingency_warm_active_set", Bool, :checkbox, true, (), :expert, :case, true),
   WebUIOptionSpec("contingency.warm_cold_check", "contingency_warm_cold_check", Bool, :checkbox, false, (), :expert, :case, true),
   WebUIOptionSpec("contingency.warm_cold_check_margin_pu", "contingency_warm_cold_check_margin_pu", Float64, :number, 0.02, (), :expert, :case, true),
+  # correlated events and N-2 pairs (#355); the defaults come from the
+  # configuration structs, one source
+  WebUIOptionSpec("contingency.events.enabled", "contingency_events_enabled", Bool, :checkbox, ContingencyEventsConfig().enabled, (), :expert, :case, true),
+  WebUIOptionSpec("contingency.events.double_circuits", "contingency_events_double_circuits", Bool, :checkbox, ContingencyEventsConfig().double_circuits, (), :expert, :case, true),
+  WebUIOptionSpec("contingency.events.busbars", "contingency_events_busbars", Bool, :checkbox, ContingencyEventsConfig().busbars, (), :expert, :case, true),
+  WebUIOptionSpec("contingency.events.substations", "contingency_events_substations", Bool, :checkbox, ContingencyEventsConfig().substations, (), :expert, :case, true),
+  WebUIOptionSpec("contingency.events.links", "contingency_events_links", Bool, :checkbox, ContingencyEventsConfig().links, (), :expert, :case, true),
+  WebUIOptionSpec("contingency.events.name_groups", "contingency_events_name_groups", Bool, :checkbox, ContingencyEventsConfig().name_groups, (), :expert, :case, true),
+  WebUIOptionSpec("contingency.events.max_members", "contingency_events_max_members", Int, :number, ContingencyEventsConfig().max_members, (), :expert, :case, true),
+  WebUIOptionSpec("contingency.pairs.enabled", "contingency_pairs_enabled", Bool, :checkbox, ContingencyPairsConfig().enabled, (), :expert, :case, true),
+  WebUIOptionSpec("contingency.pairs.rule", "contingency_pairs_rule", String, :select, String(ContingencyPairsConfig().rule), CONTINGENCY_PAIR_RULE_VALUES, :expert, :case, true),
+  WebUIOptionSpec("contingency.pairs.max_pairs", "contingency_pairs_max_pairs", Int, :number, ContingencyPairsConfig().max_pairs, (), :expert, :case, true),
   WebUIOptionSpec("power_flow.auto_slack", "power_flow_auto_slack", Bool, :checkbox, false, (), :expert, :case, true),
   WebUIOptionSpec("runtime.parallel.enabled", "runtime_parallel_enabled", Bool, :checkbox, true, (), :expert, :session, true),
   WebUIOptionSpec("power_flow.dc.fallback", "power_flow_dc_fallback", Bool, :checkbox, false, (), :expert, :case, true),
@@ -142,6 +155,8 @@ const WEBUI_OPTION_SPECS = WebUIOptionSpec[
   WebUIOptionSpec("cgmes_import.start_values", "cgmes_start_values", String, :select, "auto", CGMES_START_VALUES_VALUES, :expert, :adapter, true),
   WebUIOptionSpec("cgmes_import.require_boundary", "cgmes_require_boundary", Bool, :checkbox, true, (), :basic, :adapter, true),
   WebUIOptionSpec("cgmes_import.infer_base_voltages", "cgmes_infer_base_voltages", Bool, :checkbox, false, (), :expert, :adapter, true),
+  WebUIOptionSpec("cgmes_import.read_dynamics", "cgmes_read_dynamics", Bool, :checkbox, false, (), :expert, :adapter, true),
+  WebUIOptionSpec("cgmes_import.equivalent_injection_as_source", "cgmes_equivalent_injection_as_source", Bool, :checkbox, false, (), :expert, :adapter, true),
   WebUIOptionSpec("cgmes_import.hvdc_mode", "cgmes_hvdc_mode", String, :select, "injections", CGMES_HVDC_MODE_VALUES, :basic, :adapter, true),
   # PowSyBl (IIDM) import: the field names carry the config prefix so the
   # form map and the help registry read the same way as the CGMES keys
@@ -160,6 +175,11 @@ const WEBUI_OPTION_SPECS = WebUIOptionSpec[
   WebUIOptionSpec("matpower_import.compare_voltage_reference", "matpower_import_compare_voltage_reference", String, :select, "imported_setpoint", MATPOWER_COMPARE_VOLTAGE_REFERENCE_VALUES, :expert, :adapter, true),
   WebUIOptionSpec("matpower_import.apply_bus_names", "matpower_import_apply_bus_names", Bool, :checkbox, false, (), :expert, :adapter, true),
   WebUIOptionSpec("model.tap_changer_model", "transformer_tap_changer_model", String, :select, "ideal", TRANSFORMER_TAP_CHANGER_MODEL_VALUES, :basic, :adapter, true),
+  # the system frequency, for every case format (Case page, own section);
+  # the configuration takes any positive value, the form offers 50 and 60.
+  # :expert by the visibility rule above (no workshop sets it, the template
+  # carries its default); its own section renders it either way
+  WebUIOptionSpec("model.nominal_frequency_hz", "model_nominal_frequency_hz", Float64, :select, 50.0, (50.0, 60.0), :expert, :case, true),
   WebUIOptionSpec("matpower_export.write_solution", "matpower_export_write_solution", Bool, :checkbox, true, (), :expert, :adapter, true),
   WebUIOptionSpec("output.logfile_results", "output_logfile_results", String, :select, "compact", OUTPUT_LOGFILE_RESULTS_VALUES, :expert, :session, true),
   # state-estimation run options and measurement-generator options: request
@@ -179,10 +199,15 @@ const WEBUI_OPTION_SPECS = WebUIOptionSpec[
   # the case sidecar instead of only ever showing the literal default below;
   # _webui_se_form_state merges that resolution into gen_values as its base
   # layer. The rest (se_tol, se_max_iter, se_robust_k1/k2,
-  # se_suppression_sigma, se_update_shunts, se_tap_estimation) stay
-  # config_key = nothing: issue #377 does not ask for them, and widening the
-  # case-scope surface beyond what was asked is its own review.
+  # se_suppression_sigma, se_update_shunts) stay config_key = nothing:
+  # issue #377 does not ask for them, and widening the case-scope surface
+  # beyond what was asked is its own review. "estimate taps" is the switch
+  # state_estimation.tap_estimation.enabled (0.60.0), its fallback the key
+  # next to it.
   WebUIOptionSpec("state_estimation.flatstart", "se_flatstart", Bool, :checkbox, true, (), :basic, :case, true),
+  # the SE flat start turned behind phase shifters (0.60.0), a config key
+  # like flatstart, so it rides in config_overrides
+  WebUIOptionSpec("state_estimation.start_mode.rotate_behind_pst", "se_rotate_behind_pst", Bool, :checkbox, false, (), :expert, :case, true),
   WebUIOptionSpec(nothing, "se_tol", Float64, :number, 1.0e-6, (), :basic, :case, true),
   WebUIOptionSpec(nothing, "se_max_iter", Int, :number, 50, (), :basic, :case, true),
   WebUIOptionSpec("state_estimation.robust_mode", "se_robust_mode", String, :select, "off", ("off", "staged", "replacement"), :basic, :case, true),
@@ -191,10 +216,18 @@ const WEBUI_OPTION_SPECS = WebUIOptionSpec[
   WebUIOptionSpec(nothing, "se_robust_k2", Float64, :number, 6.0, (), :basic, :case, true),
   WebUIOptionSpec("state_estimation.k_suppress", "se_k_suppress", Float64, :number, 4.0, (), :basic, :case, true),
   WebUIOptionSpec(nothing, "se_suppression_sigma", Float64, :number, 2000.0, (), :basic, :case, true),
-  WebUIOptionSpec("state_estimation.max_eliminations", "se_max_eliminations", Int, :number, 3, (), :basic, :case, true),
+  WebUIOptionSpec("state_estimation.max_eliminations", "se_max_eliminations", Int, :number, 5, (), :basic, :case, true),
   WebUIOptionSpec(nothing, "se_update_shunts", Bool, :checkbox, true, (), :basic, :case, true),
-  WebUIOptionSpec(nothing, "se_tap_estimation", Bool, :checkbox, true, (), :basic, :case, true),
+  WebUIOptionSpec("state_estimation.tap_estimation.enabled", "se_tap_estimation", Bool, :checkbox, true, (), :basic, :case, true),
+  WebUIOptionSpec("state_estimation.tap_estimation.fallback", "se_tap_fallback", Bool, :checkbox, true, (), :expert, :case, true),
+  # the impedance rule of the released regulators; a config key (case
+  # scope), so it rides in config_overrides like the other config fields
+  WebUIOptionSpec("state_estimation.tap_estimation.impedance_correction", "se_tap_impedance_correction", String, :select, "auto", ("auto", "off"), :expert, :case, true),
   WebUIOptionSpec("state_estimation.report_residual_correlation", "se_report_correlation", Bool, :checkbox, true, (), :basic, :case, true),
+  # the sigma of a zero-injection row under zero_injection = on, case
+  # scope like the switch; rides in config_overrides like the other
+  # config fields
+  WebUIOptionSpec("state_estimation.zero_injection_sigma_mva", "se_zero_injection_sigma_mva", Float64, :number, ZERO_INJECTION_SIGMA, (), :expert, :case, true),
   # default ON: a noise-free set puts J near 0 instead of near dof, which
   # reads like a broken statistic (the low-band note explains it, but the
   # recommended demo profile is noisy)
@@ -212,16 +245,27 @@ const WEBUI_OPTION_SPECS = WebUIOptionSpec[
   WebUIOptionSpec(nothing, "gen_truth_source", String, :select, "fresh_solve", ("fresh_solve", "from_run"), :basic, :case, true),
   WebUIOptionSpec(nothing, "gen_flow_ends", String, :select, "both", ("both", "one_balance_aware"), :basic, :case, true),
   WebUIOptionSpec(nothing, "gen_passive_sigma", Float64, :number, 0.05, (), :basic, :case, true),
-  WebUIOptionSpec(nothing, "gen_passive_as_zi", Bool, :checkbox, true, (), :basic, :case, true),
+  # the generator checkbox IS the zero-injection switch of the case: it is
+  # seeded from state_estimation.zero_injection, and a generation writes it
+  # into the case configuration, so the SE runs of the case (measurement
+  # CSV, case file, measurement table) follow the same setting
+  WebUIOptionSpec("state_estimation.zero_injection", "gen_passive_as_zi", Bool, :checkbox, true, (), :basic, :case, true),
   WebUIOptionSpec(nothing, "gen_seed", Int, :number, 42, (), :basic, :case, true),
   WebUIOptionSpec(nothing, "gen_critical_count", Int, :number, 0, (), :basic, :case, true),
+  # display resolution of the generated values (U kV, P MW, Q Mvar, I A,
+  # angles deg); 0.0 is no rounding, the set stays as without the option
+  WebUIOptionSpec(nothing, "gen_resolution_u_kv", Float64, :number, 0.0, (), :basic, :case, true),
+  WebUIOptionSpec(nothing, "gen_resolution_p_mw", Float64, :number, 0.0, (), :basic, :case, true),
+  WebUIOptionSpec(nothing, "gen_resolution_q_mvar", Float64, :number, 0.0, (), :basic, :case, true),
+  WebUIOptionSpec(nothing, "gen_resolution_i_a", Float64, :number, 0.0, (), :basic, :case, true),
+  WebUIOptionSpec(nothing, "gen_resolution_angle_deg", Float64, :number, 0.0, (), :basic, :case, true),
   WebUIOptionSpec(nothing, "performance_timing", String, :select, "compact", _WEBUI_PERFORMANCE_TIMING_VALUES, :basic, :case, true),
   WebUIOptionSpec(nothing, "detailed_result_csv", Bool, :checkbox, true, (), :basic, :case, true),
   # the ONE CSV setting (issue #386): a machine-scope configuration key like
   # the other output keys, saved to the configuration file, posted as a run
   # override like every other configuration field; a run type that does not
   # render the field (state estimation) reads the same configured value
-  WebUIOptionSpec("output.csv_format", "detailed_result_csv_format", String, :select, "technical", ("technical", "excel_de", "excel_us"), :basic, :session, false),
+  WebUIOptionSpec("output.csv_format", "detailed_result_csv_format", String, :select, "auto", ("auto", "technical", "excel_de", "excel_us"), :basic, :session, false),
   WebUIOptionSpec(nothing, "export_cgmes", Bool, :checkbox, false, (), :basic, :case, true),
 ]
 

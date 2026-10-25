@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -78,11 +78,19 @@ Fields:
 - `busIdx`: Bus index for bus measurements.
 - `branchIdx`: Branch index for branch flow measurements.
 - `direction`: Branch direction `:from` or `:to`, otherwise `:none`.
-- `linkIdx`: Bus-link index for link flow measurements (SE phase 3). A
-  link-referenced flow measurement never enters the WLS estimator: the link
-  is not part of the Ybus, so it constrains only the post-SE flow
-  allocation (`calcLinkFlowsSE!`).
+- `linkIdx`: Bus-link index for link flow measurements. On a closed link
+  the row is a WLS row of the estimator: its flow is a function of the
+  fused state (the nodal balance of the link cluster) plus, on a coupler
+  ring, the estimated circulation; on an open link it is excluded.
 - `id`: Optional measurement identifier.
+- `zero_injection`: the row is a zero-injection row, set by the code that
+  creates it (`addZeroInjectionMeasurements!`, the `zero_injection` source
+  token of a measurement table, the `zero_injection` key of an SCF 1.2
+  measurement row, the ZI rows of a measurement CSV v1 or an SCF 1.0 case
+  file, which carry no such field). With
+  `state_estimation.zero_injection = constraint` such rows are equality
+  constraints, and they are protected from bad-data elimination. The id
+  alone never decides it: a measurement table uses the meter mRID as id.
 """
 struct Measurement
   typ::MeasurementType
@@ -95,13 +103,14 @@ struct Measurement
   direction::Symbol
   id::String
   linkIdx::Union{Nothing,Int}
+  zero_injection::Bool
 end
 
-function Measurement(; typ::MeasurementType, value::Real, sigma::Real, active::Bool = true, busIdx::Union{Nothing,Int} = nothing, branchIdx::Union{Nothing,Int} = nothing, direction::Symbol = :none, id::AbstractString = "", linkIdx::Union{Nothing,Int} = nothing)
+function Measurement(; typ::MeasurementType, value::Real, sigma::Real, active::Bool = true, busIdx::Union{Nothing,Int} = nothing, branchIdx::Union{Nothing,Int} = nothing, direction::Symbol = :none, id::AbstractString = "", linkIdx::Union{Nothing,Int} = nothing, zero_injection::Bool = false)
   σ = Float64(sigma)
   σ <= 0.0 && error("Measurement sigma must be > 0.0")
   w = inv(σ * σ)
-  return Measurement(typ, Float64(value), σ, w, active, busIdx, branchIdx, direction, String(id), linkIdx)
+  return Measurement(typ, Float64(value), σ, w, active, busIdx, branchIdx, direction, String(id), linkIdx, zero_injection)
 end
 
 @inline function _default_measurement_id(typ::MeasurementType; busIdx::Union{Nothing,Int} = nothing, branchIdx::Union{Nothing,Int} = nothing, direction::Symbol = :none, linkIdx::Union{Nothing,Int} = nothing)
@@ -156,18 +165,18 @@ end
 end
 
 """
-    addMeasurement!(measurements; typ, value, sigma, active=true, busIdx=nothing, branchIdx=nothing, direction=:none, id="")
+    addMeasurement!(measurements; typ, value, sigma, active=true, busIdx=nothing, branchIdx=nothing, direction=:none, id="", zero_injection=false)
 
 Append a state-estimation measurement to `measurements` and return it.
 """
-function addMeasurement!(measurements::Vector; typ::MeasurementType, value::Real, sigma::Real, active::Bool = true, busIdx::Union{Nothing,Int} = nothing, branchIdx::Union{Nothing,Int} = nothing, direction::Symbol = :none, id::AbstractString = "", linkIdx::Union{Nothing,Int} = nothing)
+function addMeasurement!(measurements::Vector; typ::MeasurementType, value::Real, sigma::Real, active::Bool = true, busIdx::Union{Nothing,Int} = nothing, branchIdx::Union{Nothing,Int} = nothing, direction::Symbol = :none, id::AbstractString = "", linkIdx::Union{Nothing,Int} = nothing, zero_injection::Bool = false)
   if !isnothing(linkIdx) && (typ != PflowMeas && typ != QflowMeas)
     error("linkIdx is only valid for flow measurements (PflowMeas/QflowMeas)")
   end
   if typ == VmMeas || typ == VaMeas || typ == PinjMeas || typ == QinjMeas
     isnothing(busIdx) && error("Bus measurement requires busIdx")
   elseif (typ == PflowMeas || typ == QflowMeas) && !isnothing(linkIdx)
-    # link flow measurement (SE phase 3): allocation input, never a WLS row.
+    # link flow measurement (0.60.0): a weighted WLS row of the estimator.
     # Positive from link.fromBus to link.toBus; only :from is accepted (one
     # measured quantity per link and kind is enough at zero impedance).
     isnothing(branchIdx) || error("Link flow measurement must not carry a branchIdx")
@@ -190,7 +199,7 @@ function addMeasurement!(measurements::Vector; typ::MeasurementType, value::Real
   end
 
   meas_id = isempty(id) ? _default_measurement_id(typ; busIdx = busIdx, branchIdx = branchIdx, direction = direction, linkIdx = linkIdx) : String(id)
-  meas = Measurement(typ = typ, value = value, sigma = sigma, active = active, busIdx = busIdx, branchIdx = branchIdx, direction = direction, id = meas_id, linkIdx = linkIdx)
+  meas = Measurement(typ = typ, value = value, sigma = sigma, active = active, busIdx = busIdx, branchIdx = branchIdx, direction = direction, id = meas_id, linkIdx = linkIdx, zero_injection = zero_injection)
   push!(measurements, meas)
   return meas
 end
@@ -232,7 +241,7 @@ end
 """
     addPmuPhasorMeasurement!(measurements; net, busName, vm_pu, va_deg, sigmaVm=0.002, sigmaVa=0.02, active=true, idPrefix="PMU")
 
-Append a complete PMU voltage-phasor measurement — magnitude and angle — for
+Append a complete PMU voltage-phasor measurement (magnitude and angle) for
 one bus and return the pair `(vmMeas, vaMeas)`.
 
 The magnitude enters as an ordinary `VmMeas` (p.u.); PMU accuracy is
@@ -290,9 +299,9 @@ end
 
 Append an active-power flow measurement identified by `branchNr` or a unique
 `fromBus`/`toBus` branch pair, or, with `linkNr`, on a bus link (SE phase 3):
-positive from `link.fromBus` to `link.toBus`, `direction = :from` only. A
-link flow measurement never enters the WLS estimator; it is consumed by the
-post-SE flow allocation (`calcLinkFlowsSE!`).
+positive from `link.fromBus` to `link.toBus`, `direction = :from` only. On
+a closed link it is a WLS row of the estimator (normalized residual, bad-data
+elimination); `calcLinkFlowsSE!` gives the link flows after the estimate.
 """
 function addPflowMeasurement!(measurements::Vector; net::Net, value::Real, sigma::Real, direction::Symbol = :from, branchNr::Union{Nothing,Int} = nothing, fromBus::Union{Nothing,String} = nothing, toBus::Union{Nothing,String} = nothing, linkNr::Union{Nothing,Int} = nothing, active::Bool = true, id::AbstractString = "")
   if !isnothing(linkNr)
@@ -407,8 +416,9 @@ end
 """
     addShuntQMeasurement!(measurements; net, busName, value, sigma, active=true, id="")
 
-Append a shunt-bay reactive-power measurement in MVar for the shunt at
-`busName` (sign convention identical to the solved `q_shunt` results).
+Append a shunt-bay reactive-power measurement in MVar for the shunts at
+`busName`: the sum over every in-service shunt at that bus (sign convention
+identical to the solved `q_shunt` results).
 Errors when the bus carries no shunt. This is the direct measurement that
 releases a shunt susceptance for estimation (SE phase 2, case A; see
 `setShuntEstimation!`).
@@ -487,39 +497,24 @@ function findPassiveBuses(net::Net; atol::Float64 = 1e-9, includeSlack::Bool = f
 end
 
 """
-    ZERO_INJECTION_SIGMA
-
-Default sigma of a zero-injection pseudo-measurement.
-
-A passive bus injects nothing, so the row is a CONSTRAINT rather than a
-reading, and the sigma only says how hard it is enforced. The former 1e-6
-means a weight of 1e12, and on a large network that is not "tight", it is
-crushing: on a 25000-bus case with 27268 such rows the estimation did not
-converge in 30 iterations, reported an objective of 3.8e15 per degree of
-freedom and losses 2069 percent above the reference. The same set with 1e-3
-converges in 7 iterations to J/dof 4.97 and losses within 0.02 percent.
-
-1e-3 still binds the bus far tighter than any real transducer (the tightest
-real rows in that set carry 0.01), while leaving the normal equations
-solvable.
-"""
-const ZERO_INJECTION_SIGMA = 1.0e-3
-
-"""
-    addZeroInjectionMeasurements!(measurements; net, sigma=ZERO_INJECTION_SIGMA, busNames=nothing, busIdxs=nothing, active=true, idPrefix="ZI") -> Vector{Measurement}
+    addZeroInjectionMeasurements!(measurements; net, sigma=<state_estimation.zero_injection_sigma_mva>, busNames=nothing, busIdxs=nothing, active=true, idPrefix="ZI") -> Vector{Measurement}
 
 Append active- and reactive-power zero-injection pseudo-measurements for the
-selected buses and return the newly added measurements.
+selected buses and return the newly added measurements. `sigma` (MW, Mvar)
+defaults to the active `state_estimation.zero_injection_sigma_mva`
+(default `ZERO_INJECTION_SIGMA`).
 
 Selection rules:
 - If `busIdxs` is provided, those indices are used.
 - Else if `busNames` is provided, names are resolved to indices.
 - Else passive buses are detected automatically via `findPassiveBuses(net)`.
 
-These pseudo-measurements are the current way to encode equality constraints
-`P_inj = 0` and `Q_inj = 0` in the WLS estimator.
+The rows state `P_inj = 0` and `Q_inj = 0`. With
+`state_estimation.zero_injection = on` the estimator weights them with
+`1/sigma^2`, with `constraint` it solves them as equality constraints and
+`sigma` is not used.
 """
-function addZeroInjectionMeasurements!(measurements::Vector; net::Net, sigma::Real = ZERO_INJECTION_SIGMA, busNames::Union{Nothing,Vector{String}} = nothing, busIdxs::Union{Nothing,Vector{Int}} = nothing, active::Bool = true, idPrefix::AbstractString = "ZI")
+function addZeroInjectionMeasurements!(measurements::Vector; net::Net, sigma::Real = state_estimation_config().zero_injection_sigma_mva, busNames::Union{Nothing,Vector{String}} = nothing, busIdxs::Union{Nothing,Vector{Int}} = nothing, active::Bool = true, idPrefix::AbstractString = "ZI")
   selected = if !isnothing(busIdxs)
     copy(busIdxs)
   elseif !isnothing(busNames)
@@ -533,26 +528,74 @@ function addZeroInjectionMeasurements!(measurements::Vector; net::Net, sigma::Re
   added = Measurement[]
   for busIdx in selected
     1 <= busIdx <= length(net.nodeVec) || error("Bus index $(busIdx) out of bounds")
-    push!(added, addMeasurement!(measurements; typ = PinjMeas, value = 0.0, sigma = sigma, active = active, busIdx = busIdx, id = "$(idPrefix)_PINJ_bus_$(busIdx)"))
-    push!(added, addMeasurement!(measurements; typ = QinjMeas, value = 0.0, sigma = sigma, active = active, busIdx = busIdx, id = "$(idPrefix)_QINJ_bus_$(busIdx)"))
+    push!(added, addMeasurement!(measurements; typ = PinjMeas, value = 0.0, sigma = sigma, active = active, busIdx = busIdx, id = "$(idPrefix)_PINJ_bus_$(busIdx)", zero_injection = true))
+    push!(added, addMeasurement!(measurements; typ = QinjMeas, value = 0.0, sigma = sigma, active = active, busIdx = busIdx, id = "$(idPrefix)_QINJ_bus_$(busIdx)", zero_injection = true))
   end
   return added
 end
 
-function addZeroInjectionMeasurements!(net::Net; sigma::Real = ZERO_INJECTION_SIGMA, busNames::Union{Nothing,Vector{String}} = nothing, busIdxs::Union{Nothing,Vector{Int}} = nothing, active::Bool = true, idPrefix::AbstractString = "ZI")
+function addZeroInjectionMeasurements!(net::Net; sigma::Real = state_estimation_config().zero_injection_sigma_mva, busNames::Union{Nothing,Vector{String}} = nothing, busIdxs::Union{Nothing,Vector{Int}} = nothing, active::Bool = true, idPrefix::AbstractString = "ZI")
   return addZeroInjectionMeasurements!(_net_measurements(net); net = net, sigma = sigma, busNames = busNames, busIdxs = busIdxs, active = active, idPrefix = idPrefix)
 end
 
-# Complex shunt-bay power in MVA at busIdx: S = |V|^2 * conj(G + jB) * base,
-# the exact Ybus stamping term (same expression as updateShuntPowers!). The
-# susceptance defaults to the model value; `shuntB` (busIdx -> B in pu)
-# overrides it for shunts whose B is an estimator state (SE phase 2).
+# Formats without a source field (measurement CSV v1, read by the converter
+# and the run artifact reader; the measurement rows of an SCF 1.0 or 1.1
+# file; SCF 1.2 writes the flag itself) store a zero-injection row only as the
+# row addZeroInjectionMeasurements! wrote: an injection row with value 0
+# and the id ZI_PINJ_bus_<k> / ZI_QINJ_bus_<k>. Their readers set
+# `zero_injection` on exactly that shape; every other path takes the flag
+# from the code that adds the row or from the table's source token.
+_zero_injection_written_row(typ::MeasurementType, value::Real, id::AbstractString)::Bool = (typ == PinjMeas || typ == QinjMeas) && value == 0 && occursin(r"^ZI_[PQ]INJ_bus_\d+$", id)
+
+# The switch state_estimation.zero_injection applied to a measurement list:
+# ZI rows at every passive bus (findPassiveBuses: no generation, load or
+# shunt; the slack excluded) that carries no PinjMeas/QinjMeas row yet,
+# active or not. A bus with an injection row keeps it as its statement,
+# and a list that already holds ZI rows is left as it is, so applying the
+# switch twice adds nothing. Isolated buses are skipped: they are outside
+# every energized island, and a row there would make an island "measured"
+# that no other row observes. A bus typed Isolated that a closed link joins
+# to a fed bus (`_linkFedIsolatedBuses`, a busbar with couplers only) is not
+# skipped: it is a member of its fused node, and without its rows the
+# estimator drops the zero injections of the whole link cluster as a
+# partial sum. Returns the number of rows added (two per
+# bus). `sigma` is the sigma of the rows; the SE service passes the value
+# of its effective configuration (case file first), which is not the
+# process default it runs under. Used by the measurement-table entry
+# (applyMeasurementSet!) and the SE service.
+function _add_missing_zero_injections!(measurements::Vector, net::Net; sigma::Real = state_estimation_config().zero_injection_sigma_mva)::Int
+  measured = Set{Int}(m.busIdx for m in measurements if m.typ in (PinjMeas, QinjMeas) && m.busIdx !== nothing)
+  fed = _linkFedIsolatedBuses(net)
+  buses = Int[b for b in findPassiveBuses(net) if !(b in measured) && (getNodeType(net.nodeVec[b]) != Isolated || haskey(fed, b))]
+  isempty(buses) && return 0
+  return length(addZeroInjectionMeasurements!(measurements; net = net, busIdxs = buses, sigma = sigma))
+end
+
+# Summed admittance in pu of the in-service shunts at busIdx. The power flow
+# stamps every shunt of shuntVec, while shuntDict keeps only the last shunt
+# added at a bus (a CGMES bus with two compensators has two shunts), so a
+# shunt measurement at a bus covers all of them. `b`, when given, replaces
+# the susceptance of the shunt shuntDict names (the one setShuntEstimation!
+# releases, SE phase 2).
+function _bus_shunt_y_pu(net::Net, busIdx::Int, b::Union{Nothing,Float64} = nothing)::ComplexF64
+  registered = get(net.shuntDict, busIdx, 0)
+  y = zero(ComplexF64)
+  for (si, sh) in enumerate(net.shuntVec)
+    (sh.busIdx == busIdx && sh.status == 1) || continue
+    y += (si == registered && b !== nothing) ? complex(real(sh.y_pu_shunt), b) : sh.y_pu_shunt
+  end
+  return y
+end
+
+# Complex shunt-bay power in MVA at busIdx: S = |V|^2 * conj(G + jB) * base
+# over all in-service shunts at the bus, the exact Ybus stamping terms (same
+# expression as updateShuntPowers!). The susceptance defaults to the model
+# value; `shuntB` (busIdx -> B in pu) overrides it for a shunt whose B is an
+# estimator state (SE phase 2).
 @inline function _shunt_bay_S_MVA(net::Net, busIdx::Int, V::Vector{ComplexF64}, shuntB::Union{Nothing,Dict{Int,Float64}})
   haskey(net.shuntDict, busIdx) || error("Shunt measurement at bus $(busIdx): no shunt registered at this bus")
-  sh = net.shuntVec[net.shuntDict[busIdx]]
-  b = shuntB !== nothing && haskey(shuntB, busIdx) ? shuntB[busIdx] : imag(sh.y_pu_shunt)
-  y = complex(real(sh.y_pu_shunt), b)
-  return abs2(V[busIdx]) * conj(y) * net.baseMVA
+  b = shuntB !== nothing && haskey(shuntB, busIdx) ? shuntB[busIdx] : nothing
+  return abs2(V[busIdx]) * conj(_bus_shunt_y_pu(net, busIdx, b)) * net.baseMVA
 end
 
 ## complex three-phase end current in ampere at the referenced branch end
@@ -591,7 +634,8 @@ function _end_current_A(net::Net, br, direction::Symbol, V::Vector{ComplexF64}):
 end
 
 ## resolve the branch a row evaluates against: the tap overlay's scratch
-## branch (released trafo at the cascade position) or the model branch
+## branch (released trafo at the step positions of the state) or the model
+## branch
 @inline function _prediction_branch(net::Net, bridx::Int, tapOverlay)
   tapOverlay !== nothing && haskey(tapOverlay, bridx) && return tapOverlay[bridx].branch
   return net.branchVec[bridx]
@@ -645,17 +689,108 @@ end
   end
 end
 
+# Injection a meter at a bus of a closed-link cluster reads: the solved
+# generation minus load of the bus itself. The Y-bus injection there is NOT
+# that value, because the link is not in the Y-bus: it carries the link
+# flow as well (sp_case188, Falkwik_380 with its coupler section: 103.8 MW
+# from the Y-bus against 160 MW generation). The estimator sums the
+# injections of a cluster (LINKAGG row), so Y-bus values of every member
+# would still add up, but a passive member replaced by a zero-injection row
+# breaks the sum: a noise-free set did not fit (J 3859). Per cluster the
+# device values must add up to the Y-bus total; a cluster where they do not
+# (an injection the node fields do not carry, e.g. a voltage-dependent
+# shunt) keeps the Y-bus values and is reported. A link-fed isolated member
+# (couplers only, `is_iso` but not `is_dead`) has no Y-bus row and no
+# branch: its Y-bus term is the draw of its shunts at V, which the Y-bus
+# leaves out with the bus.
+function _link_cluster_device_injections(net::Net, Sbus_MVA::AbstractVector{ComplexF64}, V::AbstractVector{ComplexF64}, is_iso::Function, is_dead::Function, iso_shift::Function)::Dict{Int,ComplexF64}
+  out = Dict{Int,ComplexF64}()
+  parent = collect(eachindex(net.nodeVec))
+  root(b) = parent[b] == b ? b : (parent[b] = root(parent[b]))
+  linked = Set{Int}()
+  for l in net.linkVec
+    l.status == 1 || continue
+    (is_dead(l.fromBus) || is_dead(l.toBus)) && continue
+    push!(linked, l.fromBus, l.toBus)
+    parent[root(l.fromBus)] = root(l.toBus)
+  end
+  isempty(linked) && return out
+  clusters = Dict{Int,Vector{Int}}()
+  for b in sort!(collect(linked))
+    push!(get!(clusters, root(b), Int[]), b)
+  end
+  # under a distributed slack a participating bus delivers its schedule plus
+  # its share of lambda_P; the solved bus field carries the share only at a
+  # reference bus (the schedule elsewhere), so take the delivered value the
+  # result tables report (sp_case188 Falkwik_380: 160 MW scheduled, 156.1 MW
+  # delivered)
+  _, ds_shares = _distributed_slack_bus_shares(net)
+  for (_, members) in sort!(collect(clusters); by = first)
+    dev = Dict{Int,ComplexF64}()
+    for b in members
+      nd = net.nodeVec[b]
+      share = get(ds_shares, b, nothing)
+      p_gen = share === nothing ? something(nd._pƩGen, 0.0) : last(_distributed_slack_bus_pgen(net, b, share[2]))
+      dev[b] = complex(p_gen - something(nd._pƩLoad, 0.0), something(nd._qƩGen, 0.0) - something(nd._qƩLoad, 0.0))
+    end
+    ybus_total = sum((is_iso(b) ? abs2(V[b]) * conj(_bus_shunt_y_pu(net, b)) * net.baseMVA : Sbus_MVA[iso_shift(b)]) for b in members)
+    dev_total = sum(values(dev))
+    if abs(dev_total - ybus_total) <= 1e-3 * max(1.0, abs(ybus_total))
+      merge!(out, dev)
+    else
+      names = join((net.nodeVec[b].comp.cName for b in members), ", ")
+      @warn "generateMeasurementsFromPF: the generation and load at the link cluster $(names) do not add up to its solved injection ($(dev_total) against $(ybus_total) MVA); its injection rows keep the Y-bus values, which include the link flows"
+    end
+  end
+  return out
+end
+
+# Display resolution of generated measurements, the step an online system
+# delivers its values in (for example U 0.1 kV, P and Q 0.1 MW). The keys
+# are measurement types, the values steps in the units of the measurement
+# table: VmMeas in kV (the pu value is converted with the bus Vn and back),
+# PinjMeas and PflowMeas in MW, QinjMeas, QflowMeas and ShuntQMeas in Mvar,
+# ImagMeas in A, VaMeas and IaMeas in degrees. A missing type or a step of 0
+# leaves the value as it is. Only the value changes; the sigma stays, the
+# rounding is part of the measurement error (uniform, standard deviation
+# step / sqrt(12)).
+function _round_to_resolution(x::Float64, step::Float64)::Float64
+  # n * step carries binary noise (3 * 0.1 = 0.30000000000000004); rounding
+  # to the decimals of the step gives the double nearest to the decimal
+  y = round(x / step) * step
+  for d in 0:12
+    round(step; digits = d) == step && return round(y; digits = d)
+  end
+  return y
+end
+
+function _round_measurement_to_resolution(net::Net, m::Measurement, resolution::AbstractDict{MeasurementType,Float64})::Measurement
+  step = get(resolution, m.typ, 0.0)
+  step > 0.0 || return m
+  if m.typ == VmMeas
+    vn = net.nodeVec[m.busIdx].comp.cVN
+    z = _round_to_resolution(m.value * vn, step) / vn
+  else
+    z = _round_to_resolution(m.value, step)
+  end
+  return Measurement(typ = m.typ, value = z, sigma = m.sigma, active = m.active, busIdx = m.busIdx, branchIdx = m.branchIdx, direction = m.direction, id = m.id, linkIdx = m.linkIdx, zero_injection = m.zero_injection)
+end
+
 """
     generateMeasurementsFromPF(net; kwargs...) -> Vector{Measurement}
 
 Generate synthetic measurements from the current solved network state.
+At a bus joined to others by a closed link the injection rows carry the
+bus's own solved generation minus load, the value a meter there reads,
+not the Y-bus injection, which includes the link flow.
 
 Keyword options:
 - `includeVm`, `includePinj`, `includeQinj`, `includePflow`, `includeQflow`
 - `includeImag`: add branch current-magnitude measurements in ampere for both
   ends (default `false`; auxiliary only, see `addImagMeasurement!`)
-- `includeShuntQ`: add shunt-bay reactive-power measurements in MVar for every
-  in-service shunt (default `false`; sign convention of the `q_shunt` results)
+- `includeShuntQ`: add shunt-bay reactive-power measurements in MVar, one per
+  bus with an in-service shunt, summed over the shunts at that bus (default
+  `false`; sign convention of the `q_shunt` results)
 - `includeVa`: add PMU voltage-angle measurements (degrees, default `false`)
 - `vaBusIdxs`: restrict Va measurements to these bus indices (default: all buses)
 - `vaRefOffsetDeg`: common angle offset added to all generated Va values,
@@ -674,6 +809,14 @@ Keyword options:
 - `sigmaFloor`: the per-type floors for `relativeSigma` (default
   `measurementSigmaFloors()`)
 - `rng`: random number generator
+- `resolution`: round every generated value (after the noise) to a step per
+  measurement type, as an online system delivers it, for example
+  `Dict(VmMeas => 0.1, PflowMeas => 0.1)`. Steps in table units: `VmMeas`
+  in kV, P types in MW, Q types (also `ShuntQMeas`) in Mvar, `ImagMeas` in
+  A, `VaMeas` and `IaMeas` in degrees. The sigma stays as computed: the
+  rounding is part of the measurement error, and a step coarser than about
+  `sigma * sqrt(12)` adds visible error. `nothing` (default) or a missing
+  type keeps the value unrounded.
 """
 function generateMeasurementsFromPF(
   net::Net;
@@ -693,6 +836,7 @@ function generateMeasurementsFromPF(
   relativeSigma::Bool = false,
   sigmaFloor::Dict{MeasurementType,Float64} = measurementSigmaFloors(),
   rng::AbstractRNG = Random.default_rng(),
+  resolution::Union{Nothing,Dict{MeasurementType,Float64}} = nothing,
 )
   # per-row sigma: absolute from stddev, or (relative mode) a fraction of
   # the reading with the per-type floor; the angle types Va and Ia stay
@@ -703,13 +847,24 @@ function generateMeasurementsFromPF(
   # createYBUS drops isolated nodes (its rows are iso-shifted), so the
   # injection computation must run in that compressed space; V stays in full
   # bus numbering for the voltage and branch-flow rows. Isolated buses get
-  # no measurements at all: they carry no defined state.
+  # no measurements at all: they carry no defined state. A link-fed isolated
+  # bus (`_linkFedIsolatedBuses`, couplers only) is the exception: it has the
+  # voltage of its fed partner and its own device injection, and no Y-bus
+  # row (it has no branch).
   iso_sorted = sort(net.isoNodes)
   is_iso(b::Int) = insorted(b, iso_sorted)
   iso_shift(b::Int) = b - (searchsortedfirst(iso_sorted, b) - 1)
+  fed = _linkFedIsolatedBuses(net)
+  is_dead(b::Int) = is_iso(b) && !haskey(fed, b)
+  for (b, partner) in fed
+    V[b] = V[partner]
+  end
   Vc = isempty(iso_sorted) ? V : V[[i for i in eachindex(V) if !is_iso(i)]]
   Sbus_pu = calc_injections(createYBUS(net = net), Vc)
   Sbus_MVA = Sbus_pu .* net.baseMVA
+  # buses of a closed-link cluster read their own generation minus load
+  linkInj = _link_cluster_device_injections(net, Sbus_MVA, V, is_iso, is_dead, iso_shift)
+  injMVA(i::Int) = get(linkInj, i, Sbus_MVA[iso_shift(i)])
 
   m = Measurement[]
   nbus = length(net.nodeVec)
@@ -717,7 +872,7 @@ function generateMeasurementsFromPF(
   vaSelected = isnothing(vaBusIdxs) ? nothing : Set(vaBusIdxs)
 
   for i = 1:nbus
-    is_iso(i) && continue
+    is_dead(i) && continue
     if includeVm
       σ = rowσ(VmMeas, abs(V[i]))
       z = abs(V[i]) + (noise ? randn(rng) * σ : 0.0)
@@ -728,14 +883,17 @@ function generateMeasurementsFromPF(
       z = rad2deg(angle(V[i])) + vaRefOffsetDeg + (noise ? randn(rng) * σ : 0.0)
       push!(m, Measurement(typ = VaMeas, value = z, sigma = σ, busIdx = i, id = "Va_bus_$(i)"))
     end
+    # a link-fed bus whose cluster kept the Y-bus values (warned in
+    # _link_cluster_device_injections) has no injection value of its own
+    (is_iso(i) && !haskey(linkInj, i)) && continue
     if includePinj
-      σ = rowσ(PinjMeas, real(Sbus_MVA[iso_shift(i)]))
-      z = real(Sbus_MVA[iso_shift(i)]) + (noise ? randn(rng) * σ : 0.0)
+      σ = rowσ(PinjMeas, real(injMVA(i)))
+      z = real(injMVA(i)) + (noise ? randn(rng) * σ : 0.0)
       push!(m, Measurement(typ = PinjMeas, value = z, sigma = σ, busIdx = i, id = "Pinj_bus_$(i)"))
     end
     if includeQinj
-      σ = rowσ(QinjMeas, imag(Sbus_MVA[iso_shift(i)]))
-      z = imag(Sbus_MVA[iso_shift(i)]) + (noise ? randn(rng) * σ : 0.0)
+      σ = rowσ(QinjMeas, imag(injMVA(i)))
+      z = imag(injMVA(i)) + (noise ? randn(rng) * σ : 0.0)
       push!(m, Measurement(typ = QinjMeas, value = z, sigma = σ, busIdx = i, id = "Qinj_bus_$(i)"))
     end
   end
@@ -782,19 +940,24 @@ function generateMeasurementsFromPF(
   end
 
   if includeShuntQ
+    # one row per bus: ShuntQMeas covers every in-service shunt at its bus
+    shunt_buses = Int[]
     for sh in net.shuntVec
       sh.status == 1 || continue
       is_iso(sh.busIdx) && continue
-      i = sh.busIdx
+      sh.busIdx in shunt_buses || push!(shunt_buses, sh.busIdx)
+    end
+    for i in shunt_buses
       # same analytic bay power as the ShuntQMeas prediction (and as
       # updateShuntPowers!), so the roundtrip is exact
-      q_MVar = imag(abs2(V[i]) * conj(sh.y_pu_shunt) * net.baseMVA)
+      q_MVar = imag(abs2(V[i]) * conj(_bus_shunt_y_pu(net, i)) * net.baseMVA)
       σ = rowσ(ShuntQMeas, q_MVar)
       push!(m, Measurement(typ = ShuntQMeas, value = q_MVar + (noise ? randn(rng) * σ : 0.0), sigma = σ, busIdx = i, id = "ShuntQ_bus_$(i)"))
     end
   end
 
-  return m
+  resolution === nothing && return m
+  return Measurement[_round_measurement_to_resolution(net, x, resolution) for x in m]
 end
 
 """
@@ -842,7 +1005,9 @@ function deriveShuntPseudoMeasurements!(net::Net; sigmaFloor::Union{Nothing,Floa
       @warn "deriveShuntPseudoMeasurements!: shunt at bus $(i) skipped (no active Vm measurement at the bus; the voltage enters Q quadratically and nominal voltage is not an acceptable substitute)"
       continue
     end
-    b_model = imag(sh.y_pu_shunt)
+    # the bay current covers every in-service shunt at the bus: the sign
+    # comes from their summed susceptance
+    b_model = imag(_bus_shunt_y_pu(net, i))
     if b_model == 0.0
       @warn "deriveShuntPseudoMeasurements!: shunt at bus $(i) skipped (model susceptance is zero, no sign for the derived Q)"
       continue
@@ -906,7 +1071,7 @@ function addMeasurementNoise!(
       stddev[m.typ]
     end
     net.measurements[k] = Measurement(typ = m.typ, value = m.value + σ * randn(rng), sigma = σ, active = m.active,
-                                      busIdx = m.busIdx, branchIdx = m.branchIdx, direction = m.direction, id = m.id, linkIdx = m.linkIdx)
+                                      busIdx = m.busIdx, branchIdx = m.branchIdx, direction = m.direction, id = m.id, linkIdx = m.linkIdx, zero_injection = m.zero_injection)
   end
   return Measurement[m for m in net.measurements]
 end
@@ -950,10 +1115,11 @@ measurements including the shunt-bay `ImagMeas`, `from_bus`/`to_bus` plus
 Buses are written by NAME (matched whitespace-insensitively on read) or,
 with `busReference = :mrid`, by their preserved CGMES mRID (ENTSO-E UUID;
 name fallback where none is recorded; MATPOWER/DTF nets have no mRIDs and
-always use bus numbers/names). The reader resolves names, component
-ids/names, and mRIDs. Values use round-trip-exact Float64 formatting
-(UTF-8), so `readMeasurementsCSV!` restores a bitwise-equal measurement
-vector. `format` (`technical`, `excel_de`, `excel_us`, default the active
+always use bus numbers/names). `convertMeasurementsV1` resolves names,
+component ids/names, and mRIDs. Values use round-trip-exact Float64
+formatting (UTF-8), so the converter reads back a bitwise-equal
+measurement vector. The reader `readMeasurementsCSV!` was removed in
+0.50.0; the converter reads every v1 file. `format` (`technical`, `excel_de`, `excel_us`, default the active
 `output.csv_format`) sets the delimiter and the decimal separator like every
 other CSV a run writes; the numbers keep their shortest round-trip form in
 every format, and the reader tells the format from the header line.
@@ -970,17 +1136,14 @@ skips them. `footerComments` lines are written as `#` comments AFTER the
 data rows (bulky per-row blocks such as the generator's truth values),
 so the file opens with its data; the reader skips comment lines wherever
 they stand. `extraHeader`/`extraCells` append diagnostic columns behind
-`id` (the state-estimation run writes `bad_data` and `status`);
-`extraCells(i, m)` returns the cells of the i-th measurement, and the
-reader ignores the extra columns.
+`id`; `extraCells(i, m)` returns the cells of the i-th measurement, and the
+converter ignores the extra columns.
 """
 function writeMeasurementsCSV(net::Net; file::AbstractString, headerComments::Vector{String} = String[], footerComments::Vector{String} = String[], busReference::Symbol = :name, format = result_csv_format(), extraHeader::Vector{String} = String[], extraCells = nothing)
-  # Diagnostic columns behind `id` (the state-estimation run writes
-  # `bad_data` and `status`): `extraHeader` names them, `extraCells(i, m)`
-  # returns their cells for the i-th measurement (the index is what the
-  # diagnostics report, ids may be empty). The reader takes the fixed
-  # columns and ignores whatever follows, so the annotated artifact still
-  # reads back as the same measurement set.
+  # Diagnostic columns behind `id` (until 0.50.0 the state-estimation run
+  # wrote `bad_data` and `status` there): `extraHeader` names them,
+  # `extraCells(i, m)` returns their cells for the i-th measurement. The
+  # converter takes the fixed columns and ignores whatever follows.
   (isempty(extraHeader) || extraCells !== nothing) || error("writeMeasurementsCSV: extraHeader needs extraCells")
   busReference in (:name, :mrid) || error("writeMeasurementsCSV: busReference must be :name or :mrid")
   # The file follows output.csv_format like every other CSV a run writes
@@ -1108,33 +1271,48 @@ function _measurement_type_from_name(s::AbstractString)
 end
 
 """
-    readMeasurementsCSV!(net; file, replace=true) -> NamedTuple
+    MEASUREMENT_CSV_V1_REMOVED
 
-Read a measurement CSV v1 file (see `writeMeasurementsCSV`) into
-`net.measurements`. The import is ATOMIC: the whole file is parsed and
-validated first, and any error (unknown version comment, unknown type name,
-malformed row, unresolvable bus/branch/link) aborts with a line-precise
-message (`file:line: reason`) leaving `net.measurements` untouched; there is
-never a partial import. `replace = true` (default) replaces the stored
-measurements, `replace = false` appends.
-
-Returns `(counts = Dict{MeasurementType,Int}, total, skipped)`; `skipped`
-counts empty and comment lines after the version line.
+The message for a measurement CSV v1 file where a measurement set is read:
+its reader `readMeasurementsCSV!` was removed in 0.50.0. The SE service and
+the Web UI refuse such a file with it, and the Web UI shows it at the file.
+It names the converter.
 """
-function readMeasurementsCSV!(net::Net; file::AbstractString, replace::Bool = true)
+const MEASUREMENT_CSV_V1_REMOVED = "The measurement CSV v1 (# sparlectra-measurements v1) is no longer read since Sparlectra 0.50.0. Convert the file once to a measurement table with convertMeasurementsV1(v1_file, net; out) or `sparlectra convert-measurements <case> <v1.csv>`."
+
+# true when the first line of `file` is the version comment of the
+# measurement CSV v1
+function _is_measurement_csv_v1(file::AbstractString)::Bool
+  isfile(file) || return false
+  line = open(io -> readline(io; keep = false), file, "r")
+  # a byte order mark (Windows editors write one) is not part of the line
+  return strip(chopprefix(line, "﻿")) == "# " * _MEASUREMENT_CSV_VERSION
+end
+
+# The private parse of a measurement CSV v1, for convertMeasurementsV1; the
+# public reader readMeasurementsCSV! was removed in 0.50.0. Every row as a
+# Measurement (sigma as written, not lifted), its line number in the file,
+# the count per type, the skipped comment and empty lines, and the names of
+# the columns behind `id` (the verdict columns bad_data and status of a run
+# artifact written before 0.50.0). Errors name file and line; nothing is
+# changed in `net`.
+function _read_measurements_csv_v1(net::Net, file::AbstractString)
   lines = readlines(file)
   isempty(lines) && error("$(file): empty file, expected the version comment '# $(_MEASUREMENT_CSV_VERSION)'")
-  vline = strip(lines[1])
+  # a byte order mark before the version comment is skipped
+  vline = strip(chopprefix(lines[1], "﻿"))
   expected = "# " * _MEASUREMENT_CSV_VERSION
   vline == expected || error("$(file):1: unknown measurement file version ('$(vline)'; expected '$(expected)')")
 
   parsed = Measurement[]
+  parsed_lines = Int[]
   counts = Dict{MeasurementType,Int}()
   skipped = 0
   headerSeen = false
   hasBranchNr = true
   delimiter = ','
   nextra = 0
+  extra_header = String[]
   for (ln, raw) in enumerate(lines)
     ln == 1 && continue
     line = strip(raw)
@@ -1154,6 +1332,7 @@ function readMeasurementsCSV!(net::Net; file::AbstractString, replace::Bool = tr
       if header == _MEASUREMENT_CSV_HEADER || startswith(header, _MEASUREMENT_CSV_HEADER * ",")
         hasBranchNr = true
         nextra = header == _MEASUREMENT_CSV_HEADER ? 0 : count(==(','), header) - count(==(','), _MEASUREMENT_CSV_HEADER)
+        extra_header = String[strip(c) for c in split(header, ",")[12:end]]
       elseif header == _MEASUREMENT_CSV_HEADER_NO_BRANCH_NR
         hasBranchNr = false
       else
@@ -1218,53 +1397,18 @@ function readMeasurementsCSV!(net::Net; file::AbstractString, replace::Bool = tr
       else
         isempty(dirStr) || error("direction must be empty for a bus measurement")
         busIdx = geNetBusIdx(net = net, busName = _measurement_csv_bus_key(net, bus))
-        Measurement(typ = typ, value = value, sigma = sigma, active = active, busIdx = busIdx, id = id)
+        Measurement(typ = typ, value = value, sigma = sigma, active = active, busIdx = busIdx, id = id, zero_injection = _zero_injection_written_row(typ, value, id))
       end
     catch e
       msg = e isa ErrorException ? e.msg : sprint(showerror, e)
       error("$(file):$(ln): $(msg)")
     end
     push!(parsed, m)
+    push!(parsed_lines, ln)
     counts[typ] = get(counts, typ, 0) + 1
   end
   headerSeen || error("$(file): missing header line '$(_MEASUREMENT_CSV_HEADER)'")
-
-  # A zero-injection row is a constraint, and older sets wrote it with sigma
-  # 1e-6, i.e. weight 1e12. On a large network that does not bind the bus, it
-  # crushes the normal equations: a 25000-bus set with 27268 such rows did not
-  # converge in 30 iterations and reported an objective of 3.8e15 per degree of
-  # freedom. The same set at ZERO_INJECTION_SIGMA converges in 7 iterations to
-  # J/dof 4.97 (and to 1.00 once the documented tap deviations are released).
-  # Reading therefore lifts a constraint row to the current floor and says so;
-  # ordinary telemetry is untouched, its tightest rows are orders of magnitude
-  # above this.
-  lifted = 0
-  for (i, m) in enumerate(parsed)
-    m.sigma < ZERO_INJECTION_SIGMA || continue
-    parsed[i] = Measurement(typ = m.typ, value = m.value, sigma = ZERO_INJECTION_SIGMA, busIdx = m.busIdx, branchIdx = m.branchIdx, direction = m.direction, id = m.id, active = m.active)
-    lifted += 1
-  end
-  lifted > 0 && @info "measurement set: $(lifted) constraint row(s) had a sigma below $(ZERO_INJECTION_SIGMA) and were read at that value (a tighter weight makes the normal equations unsolvable at scale)"
-
-  # atomic take-over only after the whole file validated
-  if replace
-    empty!(net.measurements)
-  end
-  append!(net.measurements, parsed)
-
-  # A generated set holds each physical quantity once. Two readings of the same
-  # quantity are legal in real telemetry (redundant transducers), but a set that
-  # doubles EVERY quantity is the signature of a corrupted file, and it inflates
-  # J without any single residual looking wrong - which then reads as a topology
-  # error. Name it here instead of letting the estimate mislead.
-  # checked on the RESULT, not on the parsed rows: with `replace = false` the
-  # doubling arises from the combination, which is exactly how a set gets
-  # corrupted (generated rows appended onto rows the case already carried)
-  duplicates = _duplicate_measured_quantities(net.measurements)
-  if !isempty(duplicates)
-    @warn "$(basename(file)): $(sum(values(duplicates))) measurement(s) repeat a quantity already measured; a set that repeats every quantity is usually a corrupted file and inflates J." duplicates
-  end
-  return (counts = counts, total = length(parsed), skipped = skipped, duplicates = duplicates)
+  return (measurements = parsed, lines = parsed_lines, counts = counts, skipped = skipped, extra_header = extra_header)
 end
 
 """

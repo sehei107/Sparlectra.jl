@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -96,14 +96,14 @@ end
     electricalIslandComponents(net) -> Vector{Vector{Int}}
 
 Connected bus components of `net` counting **both** in-service branches and
-closed links as connections — the electrical view.
+closed links as connections, the electrical view.
 
 `_active_ac_island_components` deliberately walks `branchVec` only, because
 the solver runs on a net whose link clusters are already contracted. On a raw
 imported net that is misleading: parts joined by a closed switch appear as
 separate islands (a CGMES delivery with retained switches can show several
 "islands" that are one electrical island). Use this helper whenever islands
-are judged on a net that has not been link-merged — diagnostics, and the
+are judged on a net that has not been link-merged: diagnostics, and the
 importer's slack decisions.
 """
 function electricalIslandComponents(net::Net)::Vector{Vector{Int}}
@@ -145,6 +145,21 @@ function electricalIslandComponents(net::Net)::Vector{Vector{Int}}
   return sort!(collect(values(groups)); by = xs -> minimum(xs))
 end
 
+# Station of a bus: the representative of its closed-link contraction
+# cluster (a bus without links is its own station), and the member buses per
+# station. Shared by the state-estimation topology checks (findings and the
+# stage-2 clustering aggregate over stations, not raw buses) and the
+# correlated contingency events (a busbar section is a bus, a station its
+# cluster).
+function _station_map(net::Net)
+  reps = _active_link_representative_map(net)
+  members = Dict{Int,Vector{Int}}()
+  for b in eachindex(reps)
+    push!(get!(members, reps[b], Int[]), b)
+  end
+  return reps, members
+end
+
 """Bus index → electrical island number (see [`electricalIslandComponents`](@ref))."""
 function electricalIslandOfBus(net::Net)::Dict{Int,Int}
   out = Dict{Int,Int}()
@@ -152,6 +167,43 @@ function electricalIslandOfBus(net::Net)::Dict{Int,Int}
     for b in comp
       out[b] = i
     end
+  end
+  return out
+end
+
+# The islands the power flow solves on a net that is not link-merged. The
+# branch-only isolation marking types a bus Isolated that hangs on the
+# network through closed switches alone, and electricalIslandComponents
+# splits the network at such a bus. The solver does not: _merged_pf_net
+# contracts every closed-link group onto one node, through that bus as well,
+# and refreshBusTypesFromProsumers! types the merged node from the units of
+# all members. The same calls build the partition here. Returns
+# `(islands, held, refs)`, per island: the raw bus indices of all members of
+# its merged nodes (switch-only buses included), sorted; whether a merged
+# node is Slack or PV; the members of its Slack nodes. Used by the CGMES
+# importer (island slacks, machine controls, the EnergySource notice), the
+# SV comparison and QSTS (frozen buses, start values, angle alignment).
+function _power_flow_islands(net::Net)
+  wnet, reps, merged = _merged_pf_net(net)
+  # without a closed link wnet is the net itself: its types are those of
+  # the caller, and the call must not alter them
+  merged && refreshBusTypesFromProsumers!(wnet)
+  members = Dict{Int,Vector{Int}}()
+  for b in eachindex(reps)
+    push!(get!(Vector{Int}, members, reps[b]), b)
+  end
+  comps = _active_ac_island_components(wnet)
+  islands = [sort!(reduce(vcat, (members[r] for r in comp); init = Int[])) for comp in comps]
+  held = [any(r -> wnet.nodeVec[r]._nodeType in (Slack, PV), comp) for comp in comps]
+  refs = [sort!(reduce(vcat, (members[r] for r in comp if wnet.nodeVec[r]._nodeType == Slack); init = Int[])) for comp in comps]
+  return islands, held, refs
+end
+
+# Bus index -> island number of _power_flow_islands.
+function _power_flow_island_of_bus(net::Net)::Dict{Int,Int}
+  out = Dict{Int,Int}()
+  for (i, comp) in enumerate(first(_power_flow_islands(net))), b in comp
+    out[b] = i
   end
   return out
 end
@@ -389,6 +441,12 @@ function _validate_single_reference_per_island!(net::Net, report)
   )
 end
 
+# Net prosumer indices of the units of one island, in the order the island
+# net holds them (_prepare_island_net copies them in this order). Maps the
+# unit indices of an island solve back, e.g. the distributed-slack
+# participation table.
+_island_prosumer_indices(net::Net, busset) = [k for (k, ps) in enumerate(net.prosumpsVec) if Int(ps.comp.cFrom_bus) in busset]
+
 """
 Cut one island out of `net` as a standalone `Net` that the solver can run on
 unchanged. Every bus index is renumbered to 1..n_island, so all index-carrying
@@ -449,7 +507,7 @@ function _prepare_island_net(net::Net, row)
   # Prosumers and shunts are bus-local, so island membership follows from their
   # bus alone. cTo_bus is set to the same bus: for a bus-local element both
   # terminals are the same node.
-  inet.prosumpsVec = [deepcopy(ps) for ps in net.prosumpsVec if Int(ps.comp.cFrom_bus) in busset]
+  inet.prosumpsVec = [deepcopy(net.prosumpsVec[k]) for k in _island_prosumer_indices(net, busset)]
   for ps in inet.prosumpsVec
     newbus = busmap[Int(ps.comp.cFrom_bus)]
     ps.comp.cFrom_bus = newbus
@@ -484,8 +542,10 @@ function _prepare_island_net(net::Net, row)
   # are dropped, not moved.
   inet.slackVec = [busmap[b] for b in net.slackVec if b in busset]
   # Isolated buses were filtered out when the components were built, so the
-  # island net starts without any.
+  # island net starts without any; the marking record holds net-wide bus
+  # numbers and goes with them.
   empty!(inet.isoNodes)
+  empty!(inet._marked_iso)
 
   # MATPOWER-like reference promotion: an island that brought no Slack of its
   # own gets one PV bus turned into the angle reference. detect_ac_islands has
@@ -582,4 +642,34 @@ function _sync_island_solution!(net::Net, inet::Net, row)
   for (bus, side) in inet.qLimitEvents
     net.qLimitEvents[row.buses[bus]] = side
   end
+end
+
+# The Q-limit outcome of one rectangular island solve, handed to the net:
+# the bus types the solve set (PV to PQ at a reached limit, a new reference
+# under the classic modes) and the scheduled Q the classic modes clamp on
+# the unit (rectangular_qlimit_outer_loop.jl). Without it a clamped bus of
+# an island-wise run stayed PV on the net and the report took the node Q of
+# the base solve: two_islands_prio under classic_simultaneous with a
+# -5 .. 5 MVAr band at Brunntal_110 and Kesselau_110 reported 9.645 and
+# -30.325 MVAr for the two machines clamped at +5 and -5 MVAr. The
+# reference an island without one promotes (_prepare_island_net) belongs to
+# the island solve, not to the net: that bus keeps the type of the net
+# while it stays the reference, and takes PQ when a classic mode clamped it
+# and moved the reference on (Fennwiese_110 of the same run, clamped at its
+# Qmax of 30 MVAr, was reported with the 41.80 MVAr of the base solve). Called
+# by the rectangular island path only; the DC path (no Q limits) and the
+# APSLF path, which share _sync_island_solution!, are left as they are.
+function _sync_island_qlimit_outcome!(net::Net, inet::Net, row)
+  # the island units in the order _prepare_island_net copied them
+  for (k, ips) in zip(_island_prosumer_indices(net, Set(row.buses)), inet.prosumpsVec)
+    ps = net.prosumpsVec[k]
+    ps.qVal == ips.qVal || (ps.qVal = ips.qVal)
+  end
+  promoted = row.n_ref == 0 ? row.chosen_ref_bus : 0
+  for (new, bus) in enumerate(row.buses)
+    t = getNodeType(inet.nodeVec[new])
+    bus == promoted && t == Slack && continue
+    t in (Slack, PV, PQ) && (net.nodeVec[bus]._nodeType = t)
+  end
+  return nothing
 end

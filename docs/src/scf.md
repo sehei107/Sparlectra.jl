@@ -1,19 +1,18 @@
 # Sparlectra Case Format (SCF)
 
-A single self-describing case file (`.scf.json`) that a power-grid-model
-(PGM) installation can read directly, carrying everything Sparlectra needs
-beyond the PGM model: slack strategy, the tap-changer cascade, component
-names and source ids, and state-estimation measurements. It runs through
-the framework, the service and the Web UI like a MATPOWER or CGMES case.
-The case's own settings travel in a case configuration file next to it
-(`<stem>.config.yaml` for an SCF case, `<file name>.config.yaml` for
-every other format).
+One self-describing case file (`.scf.json`): a power-grid-model (PGM)
+input dataset that a PGM installation reads directly, plus a `sparlectra`
+block with what PGM has no model for (slack strategy, tap changers,
+component names and source ids, state-estimation measurements, study
+definitions). The framework, the service and the Web UI run it like a
+MATPOWER or CGMES case. The case's own settings travel in a case
+configuration file next to it, `<stem>.config.yaml`.
 
 **Use**
 
 | | |
 |---|---|
-| Write | `exportSCF(net; file, ...)`, `write_case_config(file, Dict(...))` for the case configuration file |
+| Write | `exportSCF(net; file, ...)`; `write_case_config(file, Dict(...))` for the case configuration file |
 | Read | `importSCF(file)`; without building the network `load_case_config(file)`, `scf_case_config(file)`, `scf_case_studies(file)` |
 | Typed form | `SCFCase` with `read_scf_json`, `write_scf_json`, `build_net`, `net_to_scfcase`; dict entry points `scf_to_net`, `net_to_scf` |
 | CLI | `sparlectra export`, with `--pgm` for the plain PGM dataset |
@@ -34,13 +33,10 @@ exportSCF(net; file = "case118.scf.json",
 write_case_config("case118.scf.json", Dict("power_flow.mode" => "auto"))
 ```
 
-In the Web UI, **Export as SCF case file** writes `<case>.scf.json` into
-the case directory, picks up a `<case>.measurements.csv` next to it, and
-stores the form's configuration overrides in the case configuration file.
-**Save case as** saves the current case under a new name instead:
-`<name>.scf.json`, `<name>.config.yaml` and the bound
-`<name>.measurements.csv` sets, with an overwrite guard and an optional
-solved `start_state` ([Save case as](webui_reference.md#Save-case-as)).
+The Web UI export picks up a `<case>.measurements.csv` next to the case
+and stores the form's overrides in the case configuration file;
+**Save case as** writes the same set under a new name
+([Save case as](webui_reference.md#Save-case-as)).
 
 ## Reading a case file
 
@@ -51,42 +47,34 @@ runpf!(net, 30, 1e-8, 0)
 
 The reader builds the network through the public constructors (`addBus!`,
 `addPIModelACLine!`, `addPIModelTrafo!`, `addProsumer!`, `addShunt!`,
-`addLink!`, the shared tap-nameplate application) and finishes with
-`validate!`. Before that, the schema check refuses unknown top-level keys,
+`addLink!`) and ends with `validate!`. It refuses unknown top-level keys,
 unknown keys inside `sparlectra` and unsupported component types by name,
-and the reference check requires unique ids and a resolvable `from_node`,
-`node`, `measured_object`, `regulated_object`, `branch` and `star_node`
-of the right kind. Without building the network, `load_case_config(file)`
-returns the dotted keys of the case configuration file,
-`scf_case_config(file)` those of the deprecated in-file block,
-`scf_case_studies(file)` the study definitions.
+and requires unique ids and resolvable `from_node`, `node`,
+`measured_object`, `regulated_object`, `branch` and `star_node` references
+of the right kind. `load_case_config(file)`, `scf_case_config(file)` and
+`scf_case_studies(file)` return the case configuration file, the
+deprecated in-file block and the study definitions without building the
+network.
 
 ## Configuration precedence
 
-A case that ships a `<stem>.config.yaml` is self-contained, for every
-input format alike: its case-scope keys resolve from explicit
-`config_overrides` (API, CLI, Web UI form), then the case configuration
-file, then the packaged template defaults; the machine's YAML
-configuration supplies machine-scope keys only
+A case that ships a `<stem>.config.yaml` computes the same numbers on every
+installation: its case-scope keys resolve from explicit `config_overrides`
+(API, CLI, Web UI form), then the case configuration file, then the
+packaged defaults; the machine's YAML supplies machine-scope keys only
 ([Merge precedence](configuration.md#Merge-precedence)).
 `effective_config.yaml` of each run records what took effect.
 
-**Notes**
-
-- A case file decides how its network is computed, not how the
-  installation behaves: `matpower_import.*`, `cgmes_import.*`,
-  `power_flow.*`, `state_estimation.*` and `short_circuit.*` may travel
-  with the case; `output.*`, `benchmark.*`, `runtime.*`, `webui.*` and
-  `matpower_export.*` stay in the configuration file
-  (`scf_is_case_config_key(key)` answers per key). A key outside that
-  scope is refused by name on read.
-- The in-file block `sparlectra.config` is deprecated: the writer does not
-  emit it, the reader applies it below the case configuration file with a
-  warning naming the new place. A file from before Sparlectra 0.11.0
-  (`meta.created_by`) with machine-scope keys there still loads; the keys
-  are dropped and named in the run log and the Web UI.
-- The Web UI form is seeded from the case file and posts every option as
-  an explicit override ([Case-specific settings](webui_reference.md#Case-specific-settings)).
+Case-scope keys are `matpower_import.*`, `cgmes_import.*`,
+`powsybl_import.*`, `power_flow.*`, `state_estimation.*` and
+`short_circuit.*`; `output.*`, `benchmark.*`, `runtime.*`, `webui.*` and
+`matpower_export.*` stay in the machine configuration
+(`scf_is_case_config_key(key)` answers per key). A key outside the case
+scope is refused by name on read. The in-file block `sparlectra.config` is
+deprecated: the writer does not emit it, the reader applies it below the
+case configuration file with a warning naming the new place. The Web UI
+form is seeded from the case file and posts every option as an explicit
+override ([Case-specific settings](webui_reference.md#Case-specific-settings)).
 
 ## The reference: single, distributed, or a source
 
@@ -111,7 +99,8 @@ configuration supplies machine-scope keys only
 
 The factors are the network's own participation factors (MATPOWER `APF`,
 CGMES `normalPF`). They travel with the model but do not switch the
-feature on; the case has to ask for it in its `config` block:
+feature on; the case has to ask for it in its configuration (these keys,
+in `<stem>.config.yaml` or in the deprecated in-file block shown here):
 
 ```json
 "config": {
@@ -120,38 +109,56 @@ feature on; the case has to ask for it in its `config` block:
 }
 ```
 
-`imported` reads exactly those factors. `explicit` weights
-(`power_flow.distributed_slack.weights`) stay in the YAML configuration: a
-weight list keyed by bus name is a run setting, not network data. See
-[Power-Flow Configuration](powerflow_configuration.md).
+`imported` reads exactly those factors; `explicit` weights
+(`power_flow.distributed_slack.weights`) are a run setting and stay in the
+YAML configuration ([Power-Flow Configuration](powerflow_configuration.md)).
 
-Which appliance holds the reference is a flag of the appliance,
-`extra.<appliance>.reference_pri`. Which one takes it over when an island
-has none, or when the slack is lost in N-1, is its reference priority,
-`extra.<appliance>.reference_priority`: an integer with the CGMES semantics
-(1 is the strongest, larger is weaker), written only where one is stated.
-The field is optional: a file without it, every file written before 0.30.2
-included, reads unchanged with no priority on any unit. See
-[Reference priority](slack_vs_source.md#Reference-priority).
+`extra.<appliance>.reference_pri` flags the appliance that holds the
+reference. `extra.<appliance>.reference_priority` says which one takes it
+over when an island has none or the slack is lost in N-1: an integer with
+the CGMES semantics (1 is the strongest, larger is weaker), written only
+where one is stated; a file without it reads with no priority on any unit
+([Reference priority](slack_vs_source.md#Reference-priority)).
 
 Generator costs from a MATPOWER case (`mpc.gencost`) sit on their machine
 as `extra.<machine>.gencost`: `{"p": [...], "q": [...]}`, each a MATPOWER
 cost row (`MODEL`, `STARTUP`, `SHUTDOWN`, `NCOST`, then points or
-coefficients), `q` optional. No calculation reads them; they are kept so a
-MATPOWER export writes the block back unchanged. See
-[Generator costs](@ref matpower_gencost).
+coefficients), `q` optional. No calculation reads them; a MATPOWER export
+writes the block back unchanged ([Generator costs](@ref matpower_gencost)).
+
+### [Dynamic unit data](@id scf_dynamics)
+
+Since revision 1.3 a machine can carry its [`DynamicData`](@ref) as
+`extra.<machine>.dynamics`, one key per field under the field name. A
+field at `nothing` is left out, the fields with a numeric default are
+written with their value, `unit_type` is `"synchronous"`,
+`"grid_following"` or `"grid_forming"`:
+
+```json
+"dynamics": {"inertia_s": 4.25, "damping_pu": 0.0, "droop_pu": 0.05,
+             "deadband_hz": 0.0, "primary_reserve_mw": 0.0,
+             "agc_participation": 0.0, "secondary_reserve_mw": 0.0,
+             "unit_type": "synchronous", "black_start": false}
+```
+
+A machine without dynamic data has no block, and a case without any writes
+the bytes it wrote before. On read a missing key takes the default of
+[Dynamic Unit Data](@ref dynamic_data), a missing `unit_type` follows the
+inertia. An unknown key, a value of the wrong type or a value against the
+rules of its field fails with an `ArgumentError` naming the machine and the
+key. Write and read keep every value bit for bit. No calculation reads the
+block.
 
 ## Importers and the typed case
 
-Every input format has its own importer that builds the network directly
-(an SCF file through `build_net`); converting a case into an SCF file is
-always an explicit action (the SCF export, the Case page's export button,
-the shipped-case builders), so imported values stay bit-exact.
+Every importer builds its network directly (an SCF file through
+`build_net`); converting a case into an SCF file is always an explicit
+export, so imported values stay bit-exact.
 
 `SCFCase` is the in-memory form of one document (the PGM `data` section
-as typed component vectors, the `sparlectra` block as sub-objects):
+as typed component vectors, the `sparlectra` block as sub-objects).
 `read_scf_json(path)` parses and validates a file into it,
-`write_scf_json(case, path)` serializes it back to the canonical bytes,
+`write_scf_json(case, path)` serializes it to the canonical bytes,
 `build_net(case)` constructs the network and applies the run
 configuration's net parameters exactly once, `net_to_scfcase(net)` is the
 export direction (same keywords as `exportSCF`). `importSCF` and
@@ -161,37 +168,31 @@ points.
 ## The round trip
 
 A network written by Sparlectra, read back and written again gives two
-byte-identical files, and a run on the re-read network reproduces the
-original numerically: identical power-flow iterations and bus voltages,
-identical state-estimation objective, degrees of freedom and state
-(checked on the tracked fixture and on case14, case57, case118, case300). Bus and branch order, the source system's bus numbers, tap
-ratios, shunt susceptances including their sign, controllers,
-measurements and the power-flow result come back bit for bit.
-
-A network imported from MATPOWER, CGMES or DTF and exported as a case
-file keeps its electrical model and its solution, but not every detail of
-the source file (CGMES mRIDs are recorded where available, MATPOWER
-comments and column layout are not).
+byte-identical files: bus and branch order, the source system's bus
+numbers, tap ratios, shunt susceptances with their sign, controllers,
+measurements and the power-flow result come back bit for bit, and a run
+on the re-read network gives the same power-flow iterations and voltages
+and the same state-estimation objective, degrees of freedom and state. A
+network imported from MATPOWER, CGMES or DTF keeps its electrical model
+and solution, not every detail of the source file (CGMES mRIDs are
+recorded, MATPOWER comments and column layout are not).
 
 **Notes**
 
-- Per-unit values can land one ulp away when no exact preimage exists
-  (`0.05403` with a 0.01 impedance base has none); the Y-bus deviation is
-  at the 1e-16 level.
+- Per-unit values can land one ulp away when no exact SI preimage exists;
+  the Y-bus deviation is at the 1e-16 level.
 - Tap regulation bands snap to the step grid: the operating tap ratio is
   exact, a band edge can move by less than one step. A neutral ratio
-  outside its own band (MATPOWER case57) is kept and named in a warning
-  on load. On `case13659pegase` a phase tap changer band moves by one
-  step on the second write; the model is unaffected, the third write
-  equals the second.
+  outside its own band is kept and named in a warning on load. On
+  `case13659pegase` one phase-tap band moves by one step on the second
+  write; the third write equals the second.
 - An unlimited branch rating (MATPOWER `rateA = 0`, arriving as `Inf`) is
   absent from the PGM dataset (no `i_n` is no limit there) and travels as
   `"inf"` in the namespaced block; any other non-finite number is a hard
   error naming the key.
 - An unlimited reactive band is stated by absence: `max_q_mvar` and
   `min_q_mvar` are written only when finite, in both blocks; a missing and
-  an infinite limit give the same `qmin_pu`/`qmax_pu` and the same power
-  flow.
+  an infinite limit give the same power flow.
 - Impedances are written from the base (physical) values; exporting a
   FACTS-compensated operating point is a hard error naming
   `restoreBaseImpedances!`.
@@ -222,35 +223,25 @@ explicit `qu_control`/`pu_control` object wins over it. A setpoint alone
 does not promote a machine: the reader restores the `regulated` flag the
 file states.
 
-!!! details "Design"
-    Three choices make the byte-identical contract possible. Internal
-    order is part of the identity (it fixes generated ids and
-    floating-point summation order), so `extra` records each element's
-    internal index and `measurements.rows` each row's position. The PGM
-    sensor stays the authority for measured values, but one sigma per
-    sensor in SI cannot express two row sigmas (P and Q) and the SI
-    conversion is not always bit-reversible, so `measurements.rows`
-    carries the internal sigmas and a value only where the SI value would
-    not read back exactly.
-
-    Both sides compute the impedance base from
-    `u_rated` (V) and `s_base` (VA) with the same formula, and the writer
-    emits the SI value that reads back into exactly the per-unit value it
-    started from (checking the neighbouring floats).
-
-    PGM requires integer ids: the writer walks the components in a fixed
-    type order and, inside a type, in lexicographic name order, so the
-    same network, or a case rebuilt from its source, gets the same ids.
-    Floats use the shortest round-trip representation; the file is
-    pretty-printed with one key per line (only lists of plain scalars
-    inline), so a diff points at the changed field. Older version 1
-    files that wrote each component as one compact line differ from a
-    re-export in whitespace only.
+Ids are deterministic: the writer walks the components in a fixed type
+order and, inside a type, in lexicographic name order, so the same
+network, or a case rebuilt from its source, gets the same ids. `extra`
+records each element's internal index, and `measurements.rows` lists the
+measurements in their internal order, because internal order fixes
+generated ids and summation order. The writer emits the SI value that
+reads back into exactly the per-unit value it started from (both sides
+derive the impedance base from `u_rated` and `s_base` with the same
+formula); `measurements.rows` carries the sigma of each measurement (one
+PGM sensor sigma cannot express a P and a Q sigma) and a value only where
+the SI value would not read back exactly.
+Floats use the shortest round-trip representation; the file is
+pretty-printed with one key per line (lists of plain scalars inline), so
+a diff points at the changed field.
 
 ### Fields that are not written
 
 A field whose value equals its documented default is left out and the
-reader puts it back; this is limited to the namespaced block, `data`
+reader puts it back; this applies to the namespaced block only, `data`
 keeps every attribute PGM requires.
 
 | Field | Default | Meaning when absent |
@@ -264,8 +255,14 @@ keeps every attribute PGM requires.
 | `extra.<machine>.regulated`, `apu_node` | `false` | |
 | `extra.<machine>.reference_priority` | `0` | no reference priority stated |
 | `extra.<machine>.gencost` | absent | no generator cost data |
+| `extra.<machine>.dynamics` | absent | no dynamic data (`ProSumer.dynamics = nothing`) |
 | `extra.<branch>.meta.sn_mva` | absent | no rating recorded |
 | `components.tap_changer[].tap_est_mode` | `"none"` | the tap is not released for estimation |
+| `components.tap_changer[].controllers[].pos` | absent | the step was not transferred: the changer sits at its middle position, the neutral position 0, and the import names it in an info line |
+| `tap_changer_models.<id>.ratio.step`, `.phase.step`, `.estimation.changers[].step` | absent | the changer sits at its middle position, `neutral_step` (`neutral` in `estimation`), named in an info line |
+| `components.tap_changer[].controllers[].step_assumed`, `tap_changer_models.<id>.ratio.step_assumed`, `.phase.step_assumed`, `.estimation.changers[].step_assumed` | `false` | `pos` or `step` is a step of the source. The writer puts `true` on a changer whose step was not transferred: `pos` or `step` then holds the assumed middle position, and the reader marks the changer again and names it in an info line, so a written middle position never reads back as a real step. A tap controller or a QSTS carry that moves the changer takes the mark off, the step it reaches is a step |
+| `components.tap_changer[].controllers[].grid` | `"fraction"` | ratio positions on the fraction grid `ratio_base / (1 + pos * step)`; `"linear"` for a CGMES changer |
+| `components.tap_changer[].controllers[].declared` | `true` | the changer is nameplate data; a declared phase changer joins the mass release of the tap estimation. The writer puts `false` on a controller no nameplate row declared (the default ratio or phase grid of a transformer), so the re-read keeps that state |
 | `components.transformer3w[].status` | `1` | in service |
 | `roles.slack.normalize` | `true` | participation factors are normalized |
 
@@ -310,35 +307,103 @@ The Sparlectra Y-bus stamps the tap on the **from** side, so
 `r_pu`/`x_pu` are referenced to the **to** side, like PGM's
 `generic_branch`.
 
+### [Unit system](@id scf_units)
+
+The numbers in `data` are base SI units:
+
+| Field group | Fields | Unit |
+|---|---|---|
+| line impedance | `line.r1`, `line.x1` | ohm |
+| line capacitance | `line.c1` | farad |
+| line loss factor | `line.tan1` (conductance over susceptance) | 1 |
+| line conductance without capacitance | `line.g1` (optional) | siemens |
+| conductance, susceptance | `g1`, `b1` of `generic_branch` and `shunt` | siemens |
+| power | `p_specified`, `q_specified` | W, var |
+| voltage base | `node.u_rated` | V (line to line) |
+| current rating | `line.i_n` | A |
+| power rating | `generic_branch.sn`, `meta.s_base` | VA |
+| angle | `theta` | rad |
+
+`sparlectra.meta.units` declares in which unit system the branch and
+shunt parameters are stated. Two values exist:
+
+- `"si"`: the values in `data` are the ones the network is built from.
+  This is what a file without the key means, so every file written before
+  the key existed reads unchanged.
+- `"pu"`: the impedances and admittances are stated per unit in a `pu`
+  block of the component's `extra` entry, and the network is built from
+  them. The `data` section stays a complete SI view for PGM readers.
+
+A `pu` block holds `r_pu`, `x_pu`, `b_pu`, `g_pu` for a `line` or
+`generic_branch` (total shunt values, on the base of the **to** node) and
+`g_pu`, `b_pu` for a `shunt`. The base is the one the file already
+carries: `meta.s_base` and the `u_rated` of the node; a `"pu"` file without
+`meta.s_base` or with a node without a positive `u_rated` is an
+`ArgumentError` naming the field, and so is a branch or shunt without its
+`pu` block. Powers, voltages, ratings and angles stay in SI in both
+systems. Powers and voltages convert by a power of ten and read back
+exactly. Ratings and phase-shift angles do not always: a line rating
+travels as `i_n` in A, a transformer rating as `sn` in VA, a shift as
+`theta` in rad, and a rating like 200 MVA can read back as
+200.00000000000003 MVA, a shift like -0.06138 degrees as
+-0.06137999999999999 degrees. The difference is in the last bit only.
+
+The declaration exists because a per-unit value converted to ohm and back
+does not always return the same number: in about one value in ten no SI
+value maps back exactly. A case that comes from per-unit data therefore
+keeps it per unit, and the only conversion happens when the network is
+built.
+
+An SI file (excerpt, node 2 rated 110 kV, 100 MVA base, 50 Hz):
+
+```json
+"data": { "line": [ { "id": 7, "from_node": 1, "to_node": 2, "r1": 1.2342, "x1": 3.0976, "c1": 1.1312e-7 } ] },
+"sparlectra": { "meta": { "s_base": 100000000.0 } }
+```
+
+The same line in a `"pu"` file:
+
+```json
+"data": { "line": [ { "id": 7, "from_node": 1, "to_node": 2, "r1": 1.2342, "x1": 3.0976, "c1": 1.1312e-7 } ] },
+"sparlectra": {
+  "meta": { "s_base": 100000000.0, "units": "pu" },
+  "extra": { "7": { "name": "ACL_1", "pu": { "r_pu": 0.0102, "x_pu": 0.0256, "b_pu": 0.0043, "g_pu": 0.0 } } }
+}
+```
+
+`exportSCF` writes SI by default and `"pu"` with `units = :pu`; the
+MATPOWER adapter (`convert_case`) and the Web UI export of a MATPOWER case
+write `"pu"`. A strict PGM file (`strict_pgm = true`) has no `sparlectra`
+block and is always SI.
+
 ### The `sparlectra` block
 
 | Key | Content |
 |---|---|
-| `format_version` | schema version of the block (`1.0`) |
-| `meta` | case name, `s_base` in VA, `f_nom` in Hz, source format and reference, producer, and `intended_calculations` as the file's contract |
+| `format_version` | schema version of the block (`1.3`) |
+| `meta` | case name, `s_base` in VA, `units` (`"si"` or `"pu"`, see [Unit system](@ref scf_units)), `f_nom` (system frequency in Hz, optional; the writer always states the frequency of the net; on read it sets the frequency of the net and wins over `model.nominal_frequency_hz`, which applies only when `f_nom` is absent, default 50 Hz; a value that is not a positive number is an `ArgumentError` naming `meta.f_nom`; see [System frequency](@ref system_frequency)), source format and reference, producer, `intended_calculations` as the file's contract, and for a CGMES delivery `cgmes_ids`, the mRID registry of the import keyed by structural identity, which the reader restores so a re-export keeps the mRIDs |
 | `roles` | what PGM cannot express: `slack.mode` (`single`, `distributed`, `source`) with its nodes or participation factors, auxiliary nodes, isolated nodes |
-| `extra` | per-component annotations keyed by id: `name` (the reference name every other section resolves against), `external_id` (CGMES mRID, MATPOWER index), bus/branch index, node type, ratings |
-| `components.tap_changer` | the tap cascade PGM has no model for: per controller the step grid, position, band, and nameplate angle, plus the neutral ratio and angle |
+| `extra` | per-component annotations keyed by id: `name` (the reference name every other section resolves against), `external_id` (CGMES mRID, MATPOWER index), bus/branch index, node type, ratings, and in a `"pu"` file the `pu` block of each branch and shunt |
+| `components.tap_changer` | the tap changers PGM has no model for: per controller the step grid, position, band, and nameplate angle, plus the neutral ratio and angle. Ratio positions count on the fraction grid `ratio_base / (1 + pos * step)` (nameplate data), or with `grid: "linear"` on the grid of a CGMES changer, `ratio_base + pos * step`. `step_assumed: true` marks a position that was not transferred and is the assumed middle position |
 | `components.transformer3w` | three-winding transformer: either the grouping of three existing `generic_branch` legs (their star node, and which end is hv/mv/lv; the electrical values stay in the legs and are never duplicated) or a nameplate that describes the transformer directly, see below |
 | `components.sc_source` | IEC 60909 source data (external network injections, machines) that PGM's `source` cannot carry beyond `sk`/`rx_ratio` |
 | `components.shunt_state` | what PGM's `g1`/`b1` cannot say: whether a shunt is in service, whether it is a voltage-dependent injection rather than an admittance, and whether its susceptance is released as a state-estimation state. Only deviating shunts produce a row |
 | `transformer_types` | named transformer nameplates in CGMES `PowerTransformerEnd` vocabulary, referenced by `components.transformer3w` entries |
-| `branch_shunt_split` | per branch id, only for a branch whose two terminal shunt arms differ: `g_from_pu`, `b_from_pu`, `g_to_pu`, `b_to_pu` in pu on the branch base. The `data` section keeps the PGM totals (`c1`, `b1`); on load the row overrides the symmetric half. Absent block: symmetric, so every older file reads as before |
-| `tap_changer_models` | per branch id, the typed tap-changer models of the from-side winding: `ratio` (the `PowerTransformerTaps` inputs: `vn_kv`, `step`, `low_step`, `high_step`, `neutral_step`, `voltage_increment_kv`, `neutral_u_kv`, `convention`), `phase` (`kind` `symmetrical`, `asymmetrical` or `tabular`, the steps, `voltage_step_increment`, `step_phase_shift_increment`, `winding_connection_angle_deg`, `x_min`, `x_max`, `convention`, and `table` rows `step`, `ratio`, `angle_deg`, `x_pu` for `tabular`), and `tap_changer_model` when the impedance correction is on. On load the models are restored onto the winding and the resolver derives ratio, shift and grid from them; `components.tap_changer` rows still describe the grid for readers that know no model. The 0.19 spelling `extra[<id>].phase_taps` is read for one more release |
-| `components.controllers` | FACTS and regulation, in the declarative `control.controllers` schema verbatim: same type names, same keyword names. The reader hands the entries to `applyConfiguredControllers!`, so there is one construction path and no second vocabulary |
-| `contingencies` | legacy N-1 study definition: `mode` (`explicit`, `all_branches`, `all_branches_plus`), the case list with their outages, exclusions. Still read, mapped onto the scenario model at load time; the writer emits `scenarios` only |
-| `scenarios` | the scenario model: `mode` (`explicit`, `n1_branches`, `n1_generators`, `n1_all`), `exclusions`, and the ordered scenario list, each scenario `name`, `weight` and its `ops` (`op` = `status`/`set`/`scale`, `target` component class, `id` the SCF component id, plus `value`, `field`, `factor` as the op needs). The N-1 modes expand through the same generators `runContingencies!` uses, so N-1 is the special case of the model; see [N-1 Contingency Analysis](contingency.md) and the Web UI's scenario editor |
+| `branch_shunt_split` | per branch id, only for a branch whose two terminal shunt arms differ: `g_from_pu`, `b_from_pu`, `g_to_pu`, `b_to_pu` in pu on the branch base. The `data` section keeps the PGM totals (`c1`, `b1`); on load the row overrides the symmetric half. Absent block: symmetric |
+| `tap_changer_models` | per branch id, the typed tap-changer models of the from-side winding: `ratio` (the `PowerTransformerTaps` inputs: `vn_kv`, `step`, `low_step`, `high_step`, `neutral_step`, `voltage_increment_kv`, `neutral_u_kv`, `convention`, `step_assumed`), `phase` (`kind` `symmetrical`, `asymmetrical` or `tabular`, the steps, `voltage_step_increment`, `step_phase_shift_increment`, `winding_connection_angle_deg`, `x_min`, `x_max`, `convention`, `step_assumed`, and `table` rows `step`, `ratio`, `angle_deg`, `x_pu` for `tabular`), `tap_changer_model` when the impedance correction is on, and `base_ratio`, `base_shift_deg`, the winding ratio and shift the models move from (`k` and `theta` of the data row carry the steps). On load the models are restored onto the winding and the resolver derives ratio, shift and grid from them; an entry without `base_ratio` or `base_shift_deg` takes `k` or `theta` as the base; `components.tap_changer` rows still describe the grid for readers that know no model. The older spelling `extra[<id>].phase_taps` is still read, with a warning. The optional key `estimation` carries the tap changer set the state estimation uses for the branch, as an import that knows the changers stored it (CGMES): `origin` (`cgmes` or `powsybl`, any other value is refused on write and read), `ratio_n`, `shift_n_deg` and the `changers` with `name`, `mrid`, `kind`, `role`, `side`, `neutral`, `low`, `high`, `step`, `impedance` and, where set, `additive`, `du`, `alpha_deg`, `dphi_deg`, `step_abs`, `outside_du`, `rx_correction`, `step_assumed`, `x_curve` (`x_min`, `x_max`, `a_max_deg`, `form`) and `table` rows (`step`, `ratio`, `angle_deg`, `r`, `x`, `g`, `b`). An empty `changers` list means the transformer has no tap changer. An entry with only this key runs no resolver; a file without it reads as before |
+| `components.controllers` | FACTS and regulation, in the declarative `control.controllers` schema verbatim: same type names, same keyword names. The reader hands the entries to `applyConfiguredControllers!`, so there is one construction path. The shunt of a shunt voltage controller is not written as a `shunt` row; its entry carries the present susceptance as `bs_start_mvar` and, where they deviate, the shunt's `status`, `model` and `estimate` in a `shunt_state` object with the keys of a `components.shunt_state` row |
+| `contingencies` | removed in 0.40.0. A file that still carries the block fails on load with a message naming the `scenarios` block and the Web UI scenario editor |
+| `scenarios` | the scenario model: `mode` (`explicit`, `n1_branches`, `n1_generators`, `n1_all`), `exclusions`, `events` (correlated event classes generated next to the list: `double_circuits`, `busbars`, `substations`, `links`, `name_groups`, `pairs`), and the ordered scenario list, each scenario `name`, `weight`, an optional `kind` (written when it is not `explicit`) and its `ops` (`op` = `status`/`set`/`scale`, `target` component class, `id` the SCF component id, plus `value`, `field`, `factor` as the op needs). The N-1 modes and the event classes expand through the same generators `runContingencies!` uses ([N-1 Contingency Analysis](contingency.md)); a scenario of status-0 ops only runs as one outage event |
 | `short_circuit` | IEC 60909 study definition: `case` (`max`/`min`), optional `c_factor`, `sweep` (`all_buses`/`explicit`) and, for an explicit sweep, the `buses` list of node ids |
-| `measurements.rows` | what PGM sensors cannot carry: the Sparlectra row ids and sigmas behind each sensor, their positions in the measurement vector, active flags where they deviate, and a value only where the SI conversion is not bit-reversible |
-| `config` | case-specific dotted configuration keys (same allowlist the API and Web UI use) |
+| `measurements.rows` | one row per measured value with the semantics of the [measurement table](state_estimation_measurement_table.md), in the order of the measurement vector; see [Measurements](#Measurements) |
+| `config` | case-specific dotted configuration keys (same allowlist the API and Web UI use); deprecated in favour of the case configuration file |
 | `start_state` | opt-in bus voltages as start values, never as results |
 
 The study blocks are validated on load (an unknown mode, an out-of-band
 `c_factor` or an empty outage list fails on read, not at the start of a
-long sweep); `scf_case_studies(file)` reads them without building the
-network.
+long sweep).
 
-An example of the two blocks for one transformer branch with id 12:
+The two blocks for one transformer branch with id 12:
 
 ```json
 "branch_shunt_split": {
@@ -367,7 +432,12 @@ marked `source_id_kind: cgmes_mrid`, otherwise the internal component
 id). With `"name": "Ostheim_110", "external_id": "H1"` the import uses
 the place name everywhere, restores `external_id` and `component_name`
 onto the network, and a re-export preserves both byte for byte, as the
-[shipped demo cases](demo_cases.md) do.
+[shipped demo cases](demo_cases.md) do. Branches, links, appliances and
+shunts take `name` and `external_id` as their component name and id in
+the same way, so results, measurement tables and contingency rows show
+the names of the file (`Lindhof_110_20`, not the generated
+`B_2WT_110_4_5`). A `generic_branch` without a `tap_changer` row has no
+tap changer.
 
 ### Three-winding transformers without writing legs
 
@@ -421,9 +491,7 @@ form the CGMES import produces; the reader converts to per unit with the
 highest `rated_u` as the voltage base. Not taken from CIM: the magnetising
 conductance `g` (the losses sit in `r`), `phaseAngleClock` and
 `connectionKind` (the vector group, not evaluated by the balanced
-positive-sequence model), and the tap changers.
-
-A `RatioTapChanger` or
+positive-sequence model), and the tap changers. A `RatioTapChanger` or
 `PhaseTapChanger` lives in its own `components.tap_changer` entry,
 referenced by the group's `tap_changer`; controller `index` 1 is the
 ratio changer, `index` 2 the phase changer, each with step size, live
@@ -460,46 +528,40 @@ grouping states which leg is which end:
 }
 ```
 
-`leg_direction` says it outright: every leg runs from the star node to its
-terminal, and the roles follow the terminal voltages, highest first. A
+`leg_direction` says that every leg runs from the star node to its
+terminal (`terminal_to_star` for the reverse, `mixed` when the legs
+differ, as for a CGMES leg with a tap changer), and the roles follow the
+terminal voltages, highest first. A
 CGMES delivery keeps its own names from the `PowerTransformer` and its
 ends; the generated names appear only for a nameplate-built transformer.
 
 ### Running the studies
 
 A study run on a case file executes what the file defines and applies the
-file's own `config` block.
+file's own configuration.
 
 | Study | File block | Entry | Result |
 |---|---|---|---|
-| N-1 and scenarios | `scenarios`: an ordered list of named, weighted patch scenarios (a scenario may combine several status, setpoint and scaling operations, so a double outage is one scenario) plus the N-1 modes that expand at load time; the legacy `contingencies` block is mapped onto it at load time (`mode` and exclusions carry over, every listed case becomes one scenario), the writer emits `scenarios` only | `runScenarios!`; the service with `scenario_source = file_block`; the Web UI's scenario editor writes the block | the per-scenario `weight` is honored, `run.log` records where the case list came from |
+| N-1 and scenarios | `scenarios` (a scenario may combine several status, setpoint and scaling operations, so a double outage is one scenario) | `runScenarios!`; the service with `scenario_source = file_block`; the Web UI's scenario editor writes the block | the per-scenario `weight` is honored, `run.log` records where the case list came from |
 | State estimation | `measurements` | the run needs no separate CSV; an explicitly picked CSV wins | `measurements.csv` is still written as the run's artifact |
 | Short circuit | `short_circuit`: `case` (`max` or `min`), optional `c_factor`, the sweep | `sweep: explicit` takes a `buses` list of node ids resolved through `extra`; without an explicit sweep PGM's own `data.fault` rows name the faulted node | both cases are always evaluated (`short_circuit_max.csv`, `short_circuit_min.csv`); `case` only decides where the headline numbers come from |
 
 **Notes**
 
-- The legacy service path (no scenario source in the request) runs the
-  `contingencies` block as written: `explicit` the listed cases,
-  `all_branches` the sweep minus `exclude`, `all_branches_plus` the sweep
-  plus the listed extras; outages resolve through `extra[<id>].name`, and
-  a case with more than one outage is refused.
-- The Web UI measurement selector of a case file offers "(from the case
-  file)" first, even without a cached CSV; a file without measurements
-  says so.
+- Scenarios are a feature of this format. Converting a case to MATPOWER,
+  CGMES or PowSyBl does not carry the `scenarios` block.
 - An unknown bus id in an explicit sweep fails the run; a `fault_type`
   other than `three_phase` or a non-zero `r_f`/`x_f` is refused on load
   (balanced bolted fault only). The file's `c_factor` applies at the
   configuration default and loses against an explicit
   `short_circuit.c_factor`.
 - Source data is in `components.sc_source` (empty fields are written as
-  `null`). A machine the file names no source row for is a source as
-  well, as in every other format: it enters with the default reactance,
-  the rows it feeds are flagged, and the run ends with status `warning`.
-  The reference unit of a bus that carries a feeder row is that feeder and
-  is not counted twice. An export writes the rows of the file only. A file
-  whose sources carry neither data nor a rated power is refused, and the
-  Web UI's **Short circuit** button checks the same before it enables
-  itself ([Short-Circuit Analysis](@ref short_circuit_source_data)).
+  `null`). A machine without a source row enters with the default
+  reactance, the rows it feeds are flagged and the run ends with status
+  `warning`; a file whose sources carry neither data nor a rated power is
+  refused ([Short-Circuit Analysis](@ref short_circuit_source_data)). The
+  reference unit of a bus with a feeder row is that feeder, not counted
+  twice. An export writes the rows of the file only.
 
 ## Source formats
 
@@ -508,7 +570,7 @@ way, with the payload its importer put into the network.
 
 | Source | What the file carries |
 |---|---|
-| MATPOWER | bus and branch names, the `mpc.sparlectra` extensions (tap-changer nameplates as `components.tap_changer`, busbar couplers as `data.link`), branch kinds, ratings |
+| MATPOWER | branch and shunt parameters per unit (`meta.units = "pu"`) when written by the Web UI export or `convert_case`, bus and branch names, the `mpc.sparlectra` extensions (tap-changer nameplates as `components.tap_changer`, busbar couplers as `data.link`), branch kinds, ratings |
 | CGMES | mRIDs as `external_id`, the three-winding star grouping with its auxiliary node, IEC 60909 source data, the reference names of the topological nodes |
 | DTF | station reference names, transformer tap data, ratings |
 
@@ -519,18 +581,50 @@ together.
 
 ## Measurements
 
-Measurement rows map onto PGM sensors: a bus `Vm` (plus `Va` if present)
-becomes one `sym_voltage_sensor`, a `Pinj`/`Qinj` pair one
-`sym_power_sensor` with `measured_terminal_type = node`, a `Pflow`/`Qflow`
-pair one branch power sensor, current magnitude/angle one
-`sym_current_sensor`; a missing half of a pair is `null`, and the rows
-behind each sensor are listed in `measurements.rows`.
-`measurements.provenance` records generator and seed, whether the values
-carry noise, the per-row truth values and the applied tap deviations; the
-last two let a run write `se_deltas.csv` and warn when a documented tap
-deviation cannot be absorbed with tap estimation off.
-`addMeasurementNoise!(net)` perturbs an ideal set in place with each row's
-own sigma. Measurement model, file formats and generators:
+The measurements of a case travel twice: as PGM sensors in `data`, in SI,
+for a PGM reader, and as `sparlectra.measurements.rows` with the semantics
+of the [measurement table](state_estimation_measurement_table.md), which
+Sparlectra reads.
+
+PGM sensors: a bus voltage (plus its angle if present) becomes one
+`sym_voltage_sensor`, a bus balance P/Q pair one `sym_power_sensor` with
+`measured_terminal_type = node`, a branch-end P/Q pair one branch power
+sensor, a current magnitude/angle pair one `sym_current_sensor` (magnitude
+and sigma in A); a missing half of a pair is `null`. The shunt bay has no
+PGM sensor.
+
+`measurements.rows` holds one entry per measured value, in the order of
+the measurement vector (the WLS objective sums in that order):
+
+| Key | Content |
+|---|---|
+| `type` | `U`, `P`, `Q`, `Va` at a node; `P`, `Q`, `I`, `Ia` at a terminal |
+| `node` | node id: `U`, `Va`, and `P`/`Q` as the bus balance (injection positive) |
+| `terminal` | `{"branch": id, "side": "from"}` (or `"to"`) for a branch end; `{"shunt_bay": node id}` for the shunt bay of a node: `Q` is the sum over its shunts, `I` and `Ia` the bay current |
+| `sensor` | the PGM sensor that carries the reading; absent for a shunt-bay row |
+| `id` | the Sparlectra measurement id; absent when it equals the default id of its location, which the reader restores: `Vm_bus_<k>`, `Pflow_branch_<k>_from` and so on, where `k` is the bus or branch number inside Sparlectra (the index recorded in `extra`), not the node or branch id of the file |
+| `value` | in kV (`U`), MW, MVAr, A or degrees; written only where the sensor value would not read back bit for bit, and always for a shunt-bay row |
+| `sigma` | in the same unit |
+| `valid` | `false` for an inactive measurement; absent means `true` |
+| `zero_injection` | `true` for a zero-injection row (a `P` or `Q` balance at a node, the source token `zero_injection` of the table); absent means `false`. From 1.2 on the id decides nothing; a 1.0 file marks such a row only by the id `ZI_PINJ_bus_<k>` / `ZI_QINJ_bus_<k>` with value 0, and the reader keeps that rule for 1.0 |
+
+Units carry no base, as in the table: only `U` is divided by the rated
+voltage of the node (`u_rated` / 1000) on reading. A `U` value or sigma
+that no 64-bit float divides back to its per-unit value is written with up
+to 18 significant digits. The reader keeps the text of `value` and `sigma`
+in `measurements.rows` only, and divides such a `U` text at 256 bits, as
+the table does; every other number of the file is read as a 64-bit float.
+A row without `value` or `sigma` takes it from its sensor; a sensor no row
+names is read after the rows with the id `Vm_<node id>` (`Pinj_<node id>`,
+`Imag_<branch id>`, ... with the ids of the file). A bus link flow has no row:
+the file has no sensor for a bus link, and the export names such rows in a
+warning (the measurement table carries them on the terminals of the link).
+
+Two places where the block differs from the table: it is keyed by the ids
+of the file instead of names or mRIDs, and the shunt bay is keyed by its
+node (the measurement is the sum over the shunts of the bus) and also
+carries a current angle `Ia`, which the table has no place for. Provenance,
+noise, file formats and generators:
 [Measurements](state_estimation_measurements.md).
 
 ## Interoperability
@@ -538,45 +632,50 @@ own sigma. Measurement model, file formats and generators:
 | Level | What you get |
 |---|---|
 | **PGM-readable** | the `data` section alone is a valid PGM input dataset |
-| **Sparlectra-complete** | the full file: slack strategy, tap cascade, names, measurement detail, configuration |
-| **Lossy toward PGM** | a PGM reader loses the tap cascade detail (the live ratio survives in `k`/`theta`), the slack strategy (it sees `source` components), the names, and the configuration |
+| **Sparlectra-complete** | the full file: slack strategy, tap changers, names, measurement detail, configuration |
+| **Lossy toward PGM** | a PGM reader loses the tap changer detail (the live ratio survives in `k`/`theta`), the slack strategy (it sees `source` components), the names, and the configuration |
 | **Strict PGM** | `exportSCF(net; strict_pgm = true)`, the "Export as plain PGM" button, or `sparlectra export --pgm` writes the dataset alone, for a consumer that reads PGM and nothing else |
 
 Strict mode drops the namespaced block, names what it dropped in a
-warning, and rewrites a slack generator as a PGM `source` (PGM's reference
-is a source; a generator left in place would make the node inject twice).
+warning (always `f_nom`: PGM has no frequency field, the line `c1` is
+written with the frequency of the net, and a reader of the file takes
+`model.nominal_frequency_hz`), and rewrites a slack generator as a PGM
+`source` (PGM's reference is a source; a generator left in place would
+make the node inject twice).
 
 A file written by power-grid-model has no `sparlectra` block; its
 in-service `source` components become the reference, and since PGM's
 `source` is Sparlectra's external network injection, a case that arrives
-with a source leaves with a source. Its `sk` and `rx_ratio` (a voltage
-source behind that impedance) are read as feeder data, so a short circuit
-runs on the file as it stands, and `power_flow.external_grid` with
-`source: auto` ([Power-Flow Configuration](powerflow_configuration.md))
-moves the reference behind $z = U_n^2 / S_k''$ and reproduces what PGM
-computes; the default stays the ideal slack. An export writes
-`sk`/`rx_ratio` back whenever the network carries them.
-`data/scf/pgm_interop.json` is that case as a tracked fixture with a
-`generic_branch`.
+with a source leaves with a source. Its `sk` and `rx_ratio` are read as
+feeder data, so a short circuit runs on the file as it stands, and
+`power_flow.external_grid` with `source: auto`
+([Power-Flow Configuration](powerflow_configuration.md)) moves the
+reference behind $z = U_n^2 / S_k''$ and reproduces what PGM computes; the
+default stays the ideal slack. An export writes `sk`/`rx_ratio` back
+whenever the network carries them. Its `sym_current_sensor` rows are read
+in A, as PGM defines them (`i_measured = 50.0` is 50 A); before 0.50.0
+Sparlectra divided them by 1000.
+
+## Time series
+
+A time series on a case file is a zip with the unchanged case, a manifest
+and one table of patch operations for all steps; see
+[SCF time series](@ref scf_time_series). The case file has no series
+block.
 
 ## Version and compatibility
 
-`sparlectra.format_version` is always written with the current revision,
-and a reader accepts exactly its own. Backward compatibility across
-revisions is not promised: a breaking change is named in the changelog; a
-case file is an exchange and archive format for the version that wrote
-it.
+`sparlectra.format_version` is always written with the current revision.
+A reader accepts its own and the older revisions listed below. Backward
+compatibility across revisions is not promised: a breaking change is named
+in the changelog; a case file is an exchange and archive format for the
+version that wrote it.
 
 | SCF revision | Reader behaviour |
 |---|---|
-| `1.0` | the current revision: accepted, written by every export |
-| `1.1` | the pre-release name of the same structure: read as `1.0` with an info message asking for a re-export |
+| `1.3` | the current revision: accepted, written by every export. Adds the optional block `extra.<machine>.dynamics` ([Dynamic unit data](@ref scf_dynamics)) |
+| `1.2` | accepted and read as written: it differs from 1.3 only by the missing `dynamics` block. Current sensors carry A, `measurements.rows` follows the measurement table |
+| `1.0` | accepted; its `i_measured` and `i_sigma` are 1000 times too large and are divided by 1000 on reading, giving the value that was exported; its `measurements.rows` (one entry per sensor with `sparlectra_ids`, `sigmas`, `positions`) and `measurements.shunt_bay_rows` are read as before |
+| `1.1` | the pre-release name of `1.0`: read as `1.0` with an info message asking for a re-export |
 | any other value | refused by name, stating what it found, what it expected, and that the case has to be re-exported |
 | field absent | refused the same way; a dataset written by power-grid-model has no namespaced block and skips the check |
-
-!!! details "Why exact equality"
-    While the format still moves, a reader that guessed at an older file
-    would be more dangerous than one that refuses it. Before publication
-    the rule has to become an explicit compatibility statement (a minor
-    increment stays readable, a major increment does not); the revision is
-    a single string today, so that change is itself breaking.

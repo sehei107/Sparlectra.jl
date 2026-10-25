@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ Write `self_check_residuals.csv` from the per-bus start-state mismatch rows the
 rectangular solver captured into `profile[:initial_residual_rows]` (see
 `_capture_initial_residual_rows!`; captured only on diagnostics/self-check
 runs). One row per bus with the start voltages, the P residual, the Q residual
-(PQ buses only — PV/slack second equations are voltage setpoints), the
+(PQ buses only: PV/slack second equations are voltage setpoints), the
 per-bus SV coverage on CGMES imports (`has_sv`, `true` for other formats), and
 transformer-terminal/shunt counts for attribution grouping. When the same bus
 was captured more than once (e.g. a rescue re-solve), the last capture wins.
@@ -217,11 +217,11 @@ function _write_diagnosis_narrative(io::IO, result::SparlectraRunResult)
   end
 
   trend_text = if trend === :diverging_to_nonfinite
-    "The mismatch trend is diverging to a non-finite value — later iterations moved away from a solution rather than toward one."
+    "The mismatch trend is diverging to a non-finite value: later iterations moved away from a solution rather than toward one."
   elseif trend === :oscillatory
-    "The mismatch trend is oscillatory — successive iterations alternate between improving and worsening, which often indicates step control is fighting an unstable region rather than making steady progress."
+    "The mismatch trend is oscillatory: successive iterations alternate between improving and worsening, which often indicates step control is fighting an unstable region rather than making steady progress."
   elseif trend === :stagnant
-    "The mismatch trend is stagnant — recent iterations made little to no progress, which often indicates the step control is stuck rather than diverging."
+    "The mismatch trend is stagnant: recent iterations made little to no progress, which often indicates the step control is stuck rather than diverging."
   elseif trend === :monotonic
     "The mismatch trend is monotonically improving but did not reach tolerance within the configured iteration budget."
   else
@@ -245,17 +245,17 @@ function _write_diagnosis_narrative(io::IO, result::SparlectraRunResult)
   if !isempty(flagged_rows)
     push!(
       recommendations,
-      "Branch anomalies were found at the worst-mismatch bus (see \"Branch anomalies at worst-mismatch bus\" below) — review the flagged branch parameters and the MATPOWER import conventions (model.auto_profile, matpower_import shift_sign/shift_unit/ratio) before adjusting solver settings.",
+      "Branch anomalies were found at the worst-mismatch bus (see \"Branch anomalies at worst-mismatch bus\" below). Review the flagged branch parameters and the MATPOWER import conventions (model.auto_profile, matpower_import shift_sign/shift_unit/ratio) before adjusting solver settings.",
     )
   end
   if trend === :diverging_to_nonfinite || autodamp_failure === true
-    push!(recommendations, "Try a different start profile (power_flow.start_mode.angle_mode/voltage_mode) before tuning step control further — a poor start is a common cause of floor-hitting autodamp behavior.")
+    push!(recommendations, "Try a different start profile (power_flow.start_mode.angle_mode/voltage_mode) before tuning step control further. A poor start is a common cause of floor-hitting autodamp behavior.")
   end
   if trend === :oscillatory
     push!(recommendations, "Consider enabling power_flow.merit (line search) or power_flow.trust_region (step_mode=:dogleg) to stabilize oscillatory steps.")
   end
   if trend === :stagnant
-    push!(recommendations, "Check power_flow.qlimits and wrong-branch detection settings — a stagnant trend can indicate the active-set/outer loop, not the Newton step itself, is stuck.")
+    push!(recommendations, "Check power_flow.qlimits and wrong-branch detection settings. A stagnant trend can indicate the active-set/outer loop, not the Newton step itself, is stuck.")
   end
   if kappa isa Float64 && kappa >= 1e10
     push!(
@@ -295,7 +295,7 @@ end
     _write_execution_failure_diagnostics(path, reason, message)
 
 Write a best-effort `diagnose.log` when a run fails before a
-`SparlectraRunResult` is available — e.g. `run_sparlectra` throwing for an
+`SparlectraRunResult` is available, e.g. `run_sparlectra` throwing for an
 AC-island failure with a non-finite mismatch before the first Newton
 iteration (`stage=before_nr`), or an unsupported MATPOWER DC-line
 convention. Without this, `run_diagnostics = true` silently produced no
@@ -401,9 +401,11 @@ _q_limit_events_csv_wanted(net::Net)::Bool = length(net.qLimitLog) > Q_LIMIT_EVE
 
 function _write_q_limit_detail_artifacts(output_path::AbstractString, net::Net; format = "technical", events_only::Bool = false)::Vector{String}
   artifacts = String[]
-  events = [(iteration = ev.iter, bus = ev.bus, side = String(ev.side)) for ev in net.qLimitLog]
+  # kind: hit (PV->PQ), group_revert (PV->PQ of a jointly released group)
+  # or release (PQ->PV, side = the limit the bus was clamped at)
+  events = [(iteration = ev.iter, bus = ev.bus, side = String(ev.side), kind = String(ev.kind)) for ev in net.qLimitLog]
   if !isempty(events)
-    _write_namedtuple_csv(joinpath(output_path, "q_limit_events.csv"), events, (:iteration, :bus, :side); format = format)
+    _write_namedtuple_csv(joinpath(output_path, "q_limit_events.csv"), events, (:iteration, :bus, :side, :kind); format = format)
     push!(artifacts, "q_limit_events.csv")
   end
   events_only && return artifacts
@@ -491,7 +493,7 @@ function _write_q_limit_log_artifact(output_path::AbstractString, result::Sparle
       println(io, "qlimit_enforcement_started : ", getproperty(rect_status, :qlimit_enforcement_started))
       println(io, "final_outcome              : ", getproperty(rect_status, :final_outcome))
       println(io, "outer_iterations           : ", getproperty(rect_status, :matpower_outer_iterations))
-      println(io, "PV->PQ Q-limit events      : ", length(result.net.qLimitLog))
+      println(io, "PV->PQ Q-limit events      : ", qlimit_pv_to_pq_event_count(result.net))
       println(io, "PQ->PV re-enable events    : 0")
       println(io)
     else
@@ -500,7 +502,7 @@ function _write_q_limit_log_artifact(output_path::AbstractString, result::Sparle
       println(io, "Q-limit handling enabled    : true")
       println(io, "active-set switching used   : true")
       println(io, "classical outer-loop used   : false")
-      println(io, "PV->PQ Q-limit events      : ", length(result.net.qLimitLog))
+      println(io, "PV->PQ Q-limit events      : ", qlimit_pv_to_pq_event_count(result.net))
       println(io, "PQ->PV re-enable events    : ", hasproperty(result.diagnostics, :qlimit_reenable_events) ? result.diagnostics.qlimit_reenable_events : 0)
       println(io)
     end
@@ -522,7 +524,7 @@ function _write_q_limit_log_artifact(output_path::AbstractString, result::Sparle
       numerical_converged = result.numerical_converged,
       final_mismatch = result.final_mismatch,
       q_limit_active_set_ok = hasproperty(result.diagnostics, :q_limit_active_set_ok) ? result.diagnostics.q_limit_active_set_ok : false,
-      pv_pq_switching_events = hasproperty(result.diagnostics, :pv_pq_switching_events) ? result.diagnostics.pv_pq_switching_events : length(result.net.qLimitLog),
+      pv_pq_switching_events = hasproperty(result.diagnostics, :pv_pq_switching_events) ? result.diagnostics.pv_pq_switching_events : qlimit_pv_to_pq_event_count(result.net),
       qlimit_active_set_changes = hasproperty(result.diagnostics, :qlimit_active_set_changes) ? result.diagnostics.qlimit_active_set_changes : 0,
       qlimit_reenable_events = hasproperty(result.diagnostics, :qlimit_reenable_events) ? result.diagnostics.qlimit_reenable_events : 0,
       oscillating_buses = hasproperty(result.diagnostics, :oscillating_buses) ? result.diagnostics.oscillating_buses : 0,

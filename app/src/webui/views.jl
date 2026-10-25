@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,7 +48,7 @@ function _webui_case_import_message(imported::Vector{String}, rejected)::String
     push!(lines, marker * entry)
   end
   for item in rejected
-    push!(lines, "❌ $(first(item)) — $(last(item))")
+    push!(lines, "❌ $(first(item)): $(last(item))")
   end
   isempty(lines) && push!(lines, "No files were selected for import.")
   header = isempty(imported) ? "" : "Imported $(length(imported)) file$(length(imported) == 1 ? "" : "s")"
@@ -110,7 +110,7 @@ function _webui_power_mode_lu_select(profile_values)
   return replace(select, "<select " => attrs; count = 1)
 end
 
-# --- Q-limit block (task 0.20.2) ------------------------------------------
+# --- Q-limit block (0.20.2) -----------------------------------------------
 # Grey-out markers read by the form script: data-qlimit-field (every field of
 # the block; off while the handling is off), data-qlimit-active-set-field
 # (no effect in the classic modes, whose inner solves run without Q limits
@@ -330,13 +330,13 @@ const WEBUI_STATUS_AUTO_REFRESH_SECONDS = 2
 const _WEBUI_ACTIVE_RUN_STATUSES = Set(("queued", "running", "aborting"))
 
 function _format_elapsed_duration(seconds)::String
-  seconds === nothing && return "—"
+  seconds === nothing && return "-"
   elapsed = try
     Float64(seconds)
   catch
     tryparse(Float64, string(seconds))
   end
-  (elapsed === nothing || !isfinite(elapsed)) && return "—"
+  (elapsed === nothing || !isfinite(elapsed)) && return "-"
   milliseconds_total = max(0, round(Int, elapsed * 1000))
   total_seconds, milliseconds = divrem(milliseconds_total, 1000)
   hours, remainder = divrem(total_seconds, 3600)
@@ -453,7 +453,7 @@ function _webui_layout(title::AbstractString, content::AbstractString; show_back
   return """<!doctype html>
 <html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <title>$(_webui_escape(title)) · Sparlectra</title><link rel=\"stylesheet\" href=\"/static/sparlectra.css\"></head>
-<body><header class=\"site-header\"><a class=\"brand\" href=\"/powerflow\"><img class=\"brand-logo\" src=\"/assets/logo.png\" alt=\"Sparlectra.jl logo\">$(runtime_info)</a><nav><a href=\"/powerflow/case\">Case</a><a href=\"/powerflow/settings\">Settings</a><a href=\"/powerflow\">Runs</a><a href=\"/powerflow/history\">Run history</a><a href=\"/webui/operation-log\">Operation Log</a><a href=\"/help\">Help</a>$(_webui_help_search_form(""; header = true))<a class=\"project-docs-link\" href=\"$(_webui_escape(_webui_docs_base_url()))\" target=\"_blank\" rel=\"noopener noreferrer\"><svg class=\"github-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.64 5.47 7.72.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.51-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.2-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.4 7.4 0 0 1 8 3.93c.68 0 1.36.09 2 .27 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.96.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.5 0 1.08-.01 1.95-.01 2.22 0 .22.15.47.55.39A8.15 8.15 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z\"/></svg><span>Project Docs</span></a>$(header_info)<a href=\"/webui/last-errors\">Last errors</a><form method="post" action="/webui/shutdown" class="exit-form"><button type="submit" class="exit-button">Stop Web UI</button></form></nav></header>
+<body><header class=\"site-header\"><a class=\"brand\" href=\"/powerflow\"><img class=\"brand-logo\" src=\"/assets/logo.png\" alt=\"Sparlectra.jl logo\">$(runtime_info)</a><nav><a href=\"/powerflow/case\">Case</a><a href=\"/powerflow/settings\">Settings</a><a href=\"/powerflow\">Runs</a><a href=\"/powerflow/history\">Run history</a><a href=\"/webui/operation-log\">Operation Log</a><a href=\"/help\">Help</a>$(_webui_help_search_form(""; header = true))<a class=\"project-docs-link\" href=\"$(_webui_escape(_webui_docs_base_url()))\" target=\"_blank\" rel=\"noopener noreferrer\"><svg class=\"github-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.64 5.47 7.72.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.51-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.2-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.4 7.4 0 0 1 8 3.93c.68 0 1.36.09 2 .27 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.96.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.5 0 1.08-.01 1.95-.01 2.22 0 .22.15.47.55.39A8.15 8.15 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z\"/></svg><span>Project Docs</span></a>$(header_info)<a href=\"/webui/last-errors\">Last errors</a><form method="post" action="/webui/shutdown" class="exit-form"><input type="hidden" name="window_width"><input type="hidden" name="window_height"><input type="hidden" name="window_x"><input type="hidden" name="window_y"><input type="hidden" name="window_hidden"><button type="submit" class="exit-button">Stop Web UI</button></form><script>document.querySelector('form.exit-form').addEventListener('submit', function () { this.window_width.value = window.outerWidth; this.window_height.value = window.outerHeight; this.window_x.value = window.screenX; this.window_y.value = window.screenY; this.window_hidden.value = document.hidden ? '1' : '0'; });</script></nav></header>
 $(latency_banner)<main class="$(main_class)"$(refresh_attrs)>$(back_button)<h1>$(_webui_escape(title))</h1>$(content)</main><footer>$(_webui_escape(version_text)) · Local PowerFlow Web UI · loopback access only</footer>
 <script>
 (function () {
@@ -483,7 +483,7 @@ $(latency_banner)<main class="$(main_class)"$(refresh_attrs)>$(back_button)<h1>$
           // Terminal page reached. Do a REAL reload: scripts inside a
           // DOMParser-imported <main> are inert per the HTML spec (never
           // executed), so swapping the final page in place would render it
-          // with dead JS — the case-combobox arrow, solver toggles and every
+          // with dead JS: the case-combobox arrow, solver toggles and every
           // other in-page handler would not react until the user forced a
           // navigation (the reported "works only after typing + Enter").
           window.location.reload();
@@ -528,6 +528,7 @@ function _webui_powerflow_info_menu(; output_root::AbstractString, config_file::
 <dt>Julia</dt><dd><code>$(_webui_escape(string(VERSION)))</code></dd>
 <dt>Commit</dt><dd><code>$(_webui_escape(commit_text))</code></dd>
 <dt>Started from</dt><dd><code>$(_webui_escape(flavor_text))</code> <a href=\"/webui/sysimage\">Sysimage</a></dd>
+<dt>Updates</dt><dd><form method=\"post\" action=\"/webui/update/check\" class=\"update-check-form\" data-busy=\"Checking…\"><button type=\"submit\" class=\"link-button\">Check for updates</button></form> $(_webui_help_link("webui.update_check", "Check for updates"))$(_webui_info_last_update(operation_log))</dd>
 <dt>Output root</dt><dd><code>$(_webui_escape(output_root))</code></dd>
 <dt>Config file</dt><dd><code>$(_webui_escape(config_file))</code></dd>
 <dt>Case cache</dt><dd><code>$(_webui_escape(case_directory))</code></dd>
@@ -668,13 +669,22 @@ end
 # route while the user types, so there is one search and it needs neither
 # a network nor a library.
 
-# Markdown of a section as plain text for matching and for the snippet.
+# Markdown of a section as plain text for matching and for the snippet. A
+# formula becomes its plain text (`_webui_tex_plain`) and keeps its `|`; a
+# code span is matched first, so a `$` inside one is not a formula.
 function _webui_help_plain_text(markdown::AbstractString)::String
   text = replace(String(markdown), r"```.*?```"s => " ")
   text = replace(text, r"\[([^\]]*)\]\([^)]*\)" => s"\1")
   text = replace(text, r"^\s*\|?[-:| ]+\|?\s*$"m => " ")
-  text = replace(text, r"[`*|#>]" => " ")
-  return String(strip(replace(text, r"\s+" => " ")))
+  io = IOBuffer()
+  last = 1
+  for m in eachmatch(r"`[^`]*`|\$[^$]+\$", text)
+    print(io, replace(SubString(text, last, prevind(text, m.offset)), r"[`*|#>]" => " "))
+    print(io, startswith(m.match, "`") ? replace(m.match, r"[`*|#>]" => " ") : _webui_tex_plain(SubString(m.match, 2, prevind(m.match, lastindex(m.match)))))
+    last = m.offset + ncodeunits(m.match)
+  end
+  print(io, replace(SubString(text, last), r"[`*|#>]" => " "))
+  return String(strip(replace(String(take!(io)), r"\s+" => " ")))
 end
 
 # The words of a query: lowercase, at most eight, each at least two
@@ -979,7 +989,7 @@ place: saved-settings precedence (`webui_form_state`), the case list and
 effective case directory, the combobox value split (list value vs free-typed
 value), the format hint (delegating to `_detect_case_format`, see
 `_webui_case_format_hint`), short-circuit button gating, and the SCF-only
-scenario gate. Stage 4A extracts this from `render_powerflow_form` so the
+scenario gate. It is extracted from `render_powerflow_form` so the
 Case, Settings, and Runs pages consume one shared context instead of
 re-deriving it (and drifting apart) per page.
 """
@@ -992,8 +1002,9 @@ function _webui_case_context(;
   submitted_form = nothing,
   show_case_settings_notice::Bool = true,
   apply_case_levels::Bool = true,
+  case_scope_from_defaults::Bool = false,
 )
-  profile_values = webui_form_state(; selected_casefile, selected_config_file, sidecar_profile = case_profile, submitted_form, case_directory, apply_case_levels)
+  profile_values = webui_form_state(; selected_casefile, selected_config_file, sidecar_profile = case_profile, submitted_form, case_directory, apply_case_levels, case_scope_from_defaults)
   profile_path = String(get(profile_values, "_profile_path", ""))
   profile_location = isempty(profile_path) ? "the case configuration file" : "<code>$(_webui_escape(profile_path))</code>"
   profile_notice = if isempty(profile_path) || !show_case_settings_notice
@@ -1059,7 +1070,7 @@ function _webui_case_context(;
   # "Short circuit" button gating (selectable only when
   # the data is there): CGMES case + a delivery that actually carries
   # short-circuit source data. An unresolvable path (e.g. a cgmes: alias not
-  # fetched yet) stays enabled — the service run reports missing data with an
+  # fetched yet) stays enabled: the service run reports missing data with an
   # explicit reason either way.
   sc_is_cgmes = case_format_value == "cgmes" || format_hint == :cgmes
   # a case file (#342) carries its own IEC 60909 sources, so it qualifies too
@@ -1083,6 +1094,10 @@ function _webui_case_context(;
   # the scenario gate is a NAMING convention, not format detection: only the
   # canonical <case>.scf.json name carries an editable scenarios block
   scen_is_scf = endswith(lowercase(String(selected_casefile)), ".scf.json")
+  # the QSTS button runs an SCF time series only; the format hint read the
+  # content (_detect_case_format), so a renamed series qualifies and a
+  # CGMES zip does not
+  qsts_state = format_hint === :scf_series ? "series" : "no-series"
   # A saved case_format that contradicts the case file is not applied (see
   # _webui_case_form_defaults), and the page says so where the format is
   # chosen; otherwise the user would have to open the case configuration
@@ -1096,7 +1111,39 @@ function _webui_case_context(;
   else
     ""
   end
-  return (; profile_values, profile_path, profile_notice, case_file_notice, case_format_notice, casefiles, effective_case_directory, for002_candidates, existing_value, manual_value, effective_case_value, format_hint, case_format_value, dat_case_assistance, sc_state, scen_is_scf)
+  # which format-bound options the pages render (see _WEBUI_FIELD_CASE_FORMATS)
+  option_format = _webui_case_option_format(effective_case_value, case_format_value, format_hint)
+  # the frequency select renders for every format; only the SCF/PGM import
+  # reads the key (line c1 in farad), the other formats get it disabled.
+  # An SCF/PGM file or the base case of an SCF time series locks it too
+  # when it states its own meta.f_nom (the file wins on import) or has no
+  # line c1 the frequency could turn into a susceptance. Decided by file
+  # content, not by option_format, so the page locks exactly when the
+  # save (_webui_case_save_plan) drops the key; a chosen case_format that
+  # does not fit the file would otherwise split the two.
+  case_frequency, frequency_usable = _webui_case_frequency_state(effective_case_value, effective_case_directory; application_root)
+  frequency_applies = frequency_usable && case_frequency === nothing
+  return (; profile_values, profile_path, profile_notice, case_file_notice, case_format_notice, casefiles, effective_case_directory, for002_candidates, existing_value, manual_value, effective_case_value, format_hint, case_format_value, dat_case_assistance, sc_state, scen_is_scf, qsts_state, option_format, frequency_applies, case_frequency)
+end
+
+# The case format that decides which format-bound options a page renders:
+# the format chosen in the selector when it names one, else the detected
+# format, else the extension of a case that resolves to no file yet.
+# nothing (no case, or a name that says nothing) renders every option. An
+# SCF time series (:scf_series, detected by content) is a format of its own:
+# its base case reads like an SCF file, and only it reads the QSTS options.
+function _webui_case_option_format(case_value::AbstractString, case_format_value, format_hint::Symbol)::Union{Nothing,Symbol}
+  value = strip(String(case_value))
+  isempty(value) && return nothing
+  chosen = lowercase(strip(_webui_form_string(case_format_value)))
+  chosen in ("matpower", "dtf_for001", "cgmes", "powsybl") && return Symbol(chosen)
+  # scf and pgm name the same reader
+  chosen in ("scf", "pgm") && return :scf
+  format_hint in (:matpower, :dtf_for001, :cgmes, :powsybl, :scf, :scf_series) && return format_hint
+  ext = lowercase(splitext(value)[2])
+  ext in (".m", ".jl") && return :matpower
+  ext == ".json" && return :scf
+  return nothing
 end
 
 # Shared page scripts: the former run-page monolith's inline script is split into
@@ -1198,11 +1245,15 @@ document.addEventListener('DOMContentLoaded', function () {
     // client-side CGMES markers mirror the server heuristic where the browser
     // can: explicit cgmes: alias input or a .zip delivery (directory paths
     // resolve server-side only)
-    const isCgmesCase = new RegExp('^cgmes:', 'i').test(effectiveValue) || new RegExp('\\\\.zip\$', 'i').test(effectiveValue);
+    // an SCF time series is a zip as well; the server read the content of
+    // the case the page was rendered for (data-format-hint), so that case
+    // is no CGMES delivery whatever the extension says
+    const isSeriesCase = caseInput !== null && caseInput.getAttribute('data-format-hint') === 'scf_series' && effectiveValue === caseInputInitial;
+    const isCgmesCase = !isSeriesCase && (new RegExp('^cgmes:', 'i').test(effectiveValue) || new RegExp('\\\\.zip\$', 'i').test(effectiveValue));
     const isPowsyblCase = new RegExp('\\\\.(powsybl|xiidm)\$', 'i').test(effectiveValue);
     if (caseFormat !== null) {
       // Auto-set formats must fall BACK to auto when the typed case stops
-      // matching — otherwise a CGMES selection sticks after switching to a
+      // matching, otherwise a CGMES selection sticks after switching to a
       // MATPOWER case. Only formats this automation set itself are
       // reverted; a manual choice stays untouched.
       if (isDatCase) {
@@ -1238,14 +1289,14 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   updateDatCaseAssistance();
   // bfcache restores (back-navigation from a result page) skip
-  // DOMContentLoaded — re-evaluate the case-dependent gating there too.
+  // DOMContentLoaded. Re-evaluate the case-dependent gating there too.
   window.addEventListener('pageshow', updateDatCaseAssistance);
   const hideCaseLoadingBanner = function () {
     const banner = document.getElementById('case-loading-banner');
     if (banner !== null) banner.hidden = true;
   };
   // A page restored from the back/forward cache keeps the DOM as it was when
-  // the user navigated away — including the loading state. Clear it, or the
+  // the user navigated away, including the loading state. Clear it, or the
   // form looks (and on a stricter style would be) stuck after Back.
   window.addEventListener('pageshow', function () {
     document.querySelectorAll('.case-loading').forEach(function (el) { el.classList.remove('case-loading'); });
@@ -1255,7 +1306,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // Selecting a case reloads the whole page from the server (its saved
     // settings have to be applied). On a large case directory that takes a
     // moment during which the visible fields still show the OLD case's
-    // values and then jump — so say plainly that a reload is running instead
+    // values and then jump, so say plainly that a reload is running instead
     // of letting the user watch settings change under their hands.
     const form = (caseInput !== null && caseInput.form !== null ? caseInput.form : null) || document.querySelector('main');
     if (form !== null) {
@@ -1270,7 +1321,7 @@ document.addEventListener('DOMContentLoaded', function () {
         banner.id = 'case-loading-banner';
         banner.className = 'alert info case-loading-banner';
         banner.setAttribute('role', 'status');
-        banner.innerHTML = '<span class="submit-spinner" aria-hidden="true"></span> Loading case settings — please wait…';
+        banner.innerHTML = '<span class="submit-spinner" aria-hidden="true"></span> Loading case settings, please wait…';
         form.parentNode.insertBefore(banner, form);
       }
       banner.hidden = false;
@@ -1457,6 +1508,8 @@ const _WEBUI_ADAPTER_FIELD_PRESENTATION = Dict{String,NamedTuple}(
   "cgmes_start_values" => (label = "CGMES start values", title = "auto uses the delivery's own SvVoltage state when it carries one and falls back to the flat start otherwise; sv and flat force one of the two.", attrs = " data-cgmes-start-values-field", input_attrs = "", option_labels = Dict("auto" => "Automatic (SV state when available, default)", "sv" => "Imported SV state", "flat" => "Flat start")),
   "cgmes_require_boundary" => (label = "Require boundary set", title = "Fail the CGMES import when topology references stay unresolved (boundary set missing). Uncheck to import an incomplete delivery anyway.", attrs = " data-cgmes-start-values-field", input_attrs = "", option_labels = nothing),
   "cgmes_infer_base_voltages" => (label = "Infer missing base voltages", title = "Reconstruct missing nominal voltages from SV voltages and transformer ratings when the delivery has no BaseVoltage catalog. Pair with an unchecked boundary set.", attrs = " data-cgmes-start-values-field", input_attrs = "", option_labels = nothing),
+  "cgmes_equivalent_injection_as_source" => (label = "Equivalent injections as source", title = "Import an EquivalentInjection on the SV angle reference node or on a boundary node as a voltage-regulating source at the SV voltage of its node, with the short-circuit power from its r/x; the one on the SV angle reference is the slack. Off, the injection stays as mapped.", attrs = " data-cgmes-start-values-field", input_attrs = "", option_labels = nothing),
+  "cgmes_read_dynamics" => (label = "Read dynamic data (DY profile)", title = "Read the DY profile and give the machines their dynamic data (inertia, damping, rating, droop). No calculation reads it; off, the DY file is skipped.", attrs = " data-cgmes-start-values-field", input_attrs = "", option_labels = nothing),
   "cgmes_hvdc_mode" => (label = "HVDC converters", title = "HVDC converter model: fixed injections reproduce the delivery snapshot; a paired controller couples both converters of a link and makes the transfer steerable.", attrs = " data-cgmes-start-values-field", input_attrs = "", option_labels = Dict("injections" => "Fixed injections (Stage 0, default)", "paired_control" => "Paired controller (steerable link)")),
   "powsybl_import_hvdc_mode" => (label = "HVDC converters", title = "HVDC converter model of a PowSyBl network: fixed injections reproduce the OpenLoadFlow snapshot (rectifier draw and inverter delivery with the loss factors); a paired controller is not implemented yet and is rejected at import.", attrs = " data-powsybl-import-field", input_attrs = "", option_labels = Dict("fixed_injection" => "Fixed injections (default)", "paired_control" => "Paired controller (not implemented)")),
   "powsybl_import_remote_regulation" => (label = "Remote voltage regulation", title = "A generator that regulates another bus: hold_local keeps it PV at its own bus with the target voltage, pq makes it a fixed injection, remote attaches an outer-loop machine voltage control on the regulated bus (reproduces OpenLoadFlow).", attrs = " data-powsybl-import-field", input_attrs = "", option_labels = Dict("hold_local" => "Hold the target at the unit's own bus (default)", "pq" => "Fixed P and Q", "remote" => "Outer-loop control of the regulated bus")),
@@ -1467,7 +1520,7 @@ const _WEBUI_ADAPTER_FIELD_PRESENTATION = Dict{String,NamedTuple}(
   "matpower_import_ratio" => (label = "Transformer ratio convention", title = "", attrs = " data-matpower-import-field", input_attrs = "", option_labels = nothing),
   "matpower_import_shift_sign" => (label = "Phase-shift sign", title = "", attrs = " data-matpower-import-field", input_attrs = " step=\"2\" min=\"-1\" max=\"1\"", option_labels = nothing),
   "matpower_import_shift_unit" => (label = "Phase-shift unit", title = "", attrs = " data-matpower-import-field", input_attrs = "", option_labels = nothing),
-  "matpower_import_bus_shunt_model" => (label = "Bus-shunt model", title = "", attrs = " data-matpower-import-field", input_attrs = "", option_labels = nothing),
+  "matpower_import_bus_shunt_model" => (label = "Bus-shunt model", title = "", attrs = "", input_attrs = "", option_labels = nothing),
   "matpower_import_dcline_mode" => (label = "DC-line mode", title = "Model of active mpc.dcline rows: pf_injections adds two fixed terminal injections per row; paired_control also couples each pair as a steerable HVDC link.", attrs = " data-matpower-import-field", input_attrs = "", option_labels = nothing),
   "matpower_import_pv_voltage_source" => (label = "PV voltage source", title = "", attrs = " data-matpower-import-field", input_attrs = "", option_labels = nothing),
   "matpower_import_compare_voltage_reference" => (label = "Voltage reference comparison", title = "", attrs = " data-matpower-import-field", input_attrs = "", option_labels = nothing),
@@ -1476,6 +1529,64 @@ const _WEBUI_ADAPTER_FIELD_PRESENTATION = Dict{String,NamedTuple}(
   "matpower_export_write_solution" => (label = "Export Solution", title = "", attrs = "", input_attrs = "", option_labels = nothing),
 )
 
+# The case formats a format-bound option is read by; a field not listed
+# applies to every format. A page does not render a field whose list misses
+# the format of the selected case (_webui_case_option_format), and its saved
+# value stays in the case configuration file: the save only writes fields
+# the form posts. Readers: matpower_import.* and model.auto_profile only on
+# the MATPOWER import (acpflow/import_context.jl, matpower/converter.jl);
+# model.bus_shunt_model in the MATPOWER, DTF and CGMES constructors (an SCF
+# file records the model of each shunt); model.tap_changer_model in the
+# MATPOWER and DTF builds; cgmes_import.* and powsybl_import.* in their own
+# adapters; the DTF outage run fields only on the DTF branch of the run
+# (api/run_api.jl); the QSTS mode of the Runs page only on an SCF time
+# series (api/run_qsts_service.jl). matpower_export.write_solution and the MATPOWER export
+# artifact act on every format. The system frequency renders for every
+# format and is disabled where the format does not read it
+# (frequency_applies of _webui_case_context).
+const _WEBUI_FIELD_CASE_FORMATS = Dict{String,Vector{Symbol}}(
+  "cgmes_start_values" => [:cgmes],
+  "cgmes_require_boundary" => [:cgmes],
+  "cgmes_infer_base_voltages" => [:cgmes],
+  "cgmes_read_dynamics" => [:cgmes],
+  "cgmes_equivalent_injection_as_source" => [:cgmes],
+  "cgmes_hvdc_mode" => [:cgmes],
+  "powsybl_import_hvdc_mode" => [:powsybl],
+  "powsybl_import_remote_regulation" => [:powsybl],
+  "powsybl_import_multi_slack" => [:powsybl],
+  "powsybl_import_slack_ids" => [:powsybl],
+  "powsybl_import_base_mva" => [:powsybl],
+  "matpower_import_auto_profile" => [:matpower],
+  "matpower_import_ratio" => [:matpower],
+  "matpower_import_shift_sign" => [:matpower],
+  "matpower_import_shift_unit" => [:matpower],
+  "matpower_import_dcline_mode" => [:matpower],
+  "matpower_import_pv_voltage_source" => [:matpower],
+  "matpower_import_compare_voltage_reference" => [:matpower],
+  "matpower_import_apply_bus_names" => [:matpower],
+  "matpower_import_bus_shunt_model" => [:matpower, :dtf_for001, :cgmes],
+  "transformer_tap_changer_model" => [:matpower, :dtf_for001],
+  "qsts_mode_choice" => [:scf_series],
+)
+
+# the DTF outage run on the Runs page (request fields, not configuration):
+# one section, shown or left out as a whole
+const _WEBUI_DTF_OUTAGE_FIELDS = ["for002_reference_file", "dtf_outage_selection_mode", "dtf_outage_selection", "write_outage_artifacts", "write_outage_matpower_exports"]
+for _f in _WEBUI_DTF_OUTAGE_FIELDS
+  _WEBUI_FIELD_CASE_FORMATS[_f] = [:dtf_for001]
+end
+
+_webui_field_applies(field::AbstractString, option_format::Union{Nothing,Symbol})::Bool =
+  option_format === nothing || option_format in get(_WEBUI_FIELD_CASE_FORMATS, String(field), [option_format])
+
+# the line under a section that lost options to the case format, so nothing
+# disappears without a word; data-hidden-options carries the count
+function _webui_hidden_options_note(n::Integer; what::AbstractString = "this case format")::String
+  n > 0 || return ""
+  return string("<p class=\"field-hint span-2 hidden-options-note\" data-hidden-options=\"", n, "\">",
+    n == 1 ? "1 option does not" : string(n, " options do not"), " apply to ", what, ".</p>")
+end
+
 # per-section field order (presentation) plus the extras that widen the
 # form surface beyond the conversion struct: the auto-profile
 # recommendation, the run-side comparison convention, the model default
@@ -1483,7 +1594,7 @@ const _WEBUI_ADAPTER_FIELD_PRESENTATION = Dict{String,NamedTuple}(
 # convention; each is an :adapter-scope spec without a same-named struct
 # field
 const _WEBUI_ADAPTER_SECTIONS = (
-  (adapter = CGMESAdapter(), key = :cgmes, prefix = "cgmes_import.", order = ("cgmes_start_values", "cgmes_require_boundary", "cgmes_infer_base_voltages", "cgmes_hvdc_mode"), extras = ()),
+  (adapter = CGMESAdapter(), key = :cgmes, prefix = "cgmes_import.", order = ("cgmes_start_values", "cgmes_require_boundary", "cgmes_infer_base_voltages", "cgmes_read_dynamics", "cgmes_equivalent_injection_as_source", "cgmes_hvdc_mode"), extras = ()),
   (adapter = PowsyblAdapter(), key = :powsybl, prefix = "powsybl_import.", order = ("powsybl_import_hvdc_mode", "powsybl_import_remote_regulation", "powsybl_import_multi_slack", "powsybl_import_slack_ids", "powsybl_import_base_mva"), extras = ()),
   (adapter = MatpowerAdapter(), key = :matpower, prefix = "matpower_import.", order = ("matpower_import_auto_profile", "matpower_import_ratio", "matpower_import_shift_sign", "matpower_import_shift_unit", "matpower_import_bus_shunt_model", "matpower_import_dcline_mode", "matpower_import_pv_voltage_source", "matpower_import_compare_voltage_reference", "transformer_tap_changer_model", "matpower_import_apply_bus_names", "matpower_export_write_solution"), extras = ("matpower_import_auto_profile", "matpower_import_bus_shunt_model", "matpower_import_compare_voltage_reference", "matpower_export_write_solution")),
   (adapter = DTFAdapter(), key = :dtf, prefix = "", order = (), extras = ()),
@@ -1537,8 +1648,8 @@ end
 const _WEBUI_MATPOWER_CONVENTION_FIELDS = ("matpower_import_auto_profile", "matpower_import_ratio", "matpower_import_shift_sign", "matpower_import_shift_unit", "matpower_import_bus_shunt_model")
 const _WEBUI_MATPOWER_CONVENTIONS_HINT = "The standard MATPOWER reading (degrees, sign +1, ratio as stored, bus shunt as admittance) passes the independent power-balance check on every case of the study; change these only for a file you know to deviate. With the scan off and every value standard, nothing about conventions is logged."
 
-function _webui_matpower_conventions_active(profile_values)::Bool
-  for f in _WEBUI_MATPOWER_CONVENTION_FIELDS
+function _webui_matpower_conventions_active(profile_values; fields = _WEBUI_MATPOWER_CONVENTION_FIELDS)::Bool
+  for f in fields
     spec = _webui_option_spec(f)
     default = _webui_option_default(f)
     value = spec.control == :number ? _webui_input_value(profile_values, f, default) : _webui_selected(profile_values, f, default)
@@ -1548,33 +1659,39 @@ function _webui_matpower_conventions_active(profile_values)::Bool
 end
 
 """
-    _webui_adapter_options_html(key, profile_values) -> String
+    _webui_adapter_options_html(key, profile_values; option_format = nothing) -> String
 
 The generated option group of one adapter section: the field
 set is derived from `options_type(adapter)` and the :adapter-scope specs,
 the order and wording come from the presentation table, both pinned by
-load-time asserts. Returns "" for an adapter without form options (DTF,
-PGM).
+load-time asserts. Fields that do not apply to `option_format` (the
+selected case's format, `nothing` for all) are left out, see
+`_WEBUI_FIELD_CASE_FORMATS`; `_webui_adapter_hidden_count` counts them.
+Returns "" for an adapter without form options (DTF, PGM) or without a
+field for the format.
 """
-function _webui_adapter_options_html(key::Symbol, profile_values)::String
+function _webui_adapter_options_html(key::Symbol, profile_values; option_format::Union{Nothing,Symbol} = nothing)::String
   for sec in _WEBUI_ADAPTER_SECTIONS
     sec.key == key || continue
-    isempty(sec.order) && return ""
+    order = [f for f in sec.order if _webui_field_applies(f, option_format)]
+    isempty(order) && return ""
     # visibility follows the spec section: :basic
     # fields render directly, :expert fields fold into a nested details
-    basics = [f for f in sec.order if _webui_option_spec(f).section == :basic]
-    experts = [f for f in sec.order if _webui_option_spec(f).section == :expert && !(f in _WEBUI_MATPOWER_CONVENTION_FIELDS)]
-    conventions = [f for f in sec.order if f in _WEBUI_MATPOWER_CONVENTION_FIELDS]
+    basics = [f for f in order if _webui_option_spec(f).section == :basic]
+    experts = [f for f in order if _webui_option_spec(f).section == :expert && !(f in _WEBUI_MATPOWER_CONVENTION_FIELDS)]
+    conventions = [f for f in order if f in _WEBUI_MATPOWER_CONVENTION_FIELDS]
     parts = String[_webui_adapter_option_html(f, profile_values) for f in basics]
     if !isempty(experts) || !isempty(conventions)
       # the experimental convention block (0.30.0): its fields default to
       # the standard MATPOWER reading; the Advanced details open by itself
       # when a case configuration (a sidecar) carries a non-standard value
       # or the scan, so an active experimental setting is never hidden
-      active = _webui_matpower_conventions_active(profile_values)
+      active = _webui_matpower_conventions_active(profile_values; fields = conventions)
+      # outside a MATPOWER case only the bus-shunt model is left in the block
+      legend = option_format in (nothing, :matpower) ? "MATPOWER conventions (experimental)" : "Conventions (experimental)"
       block = isempty(conventions) ? "" : string(
         "<fieldset class=\"matpower-conventions-experimental\" title=\"", _webui_escape(_WEBUI_MATPOWER_CONVENTIONS_HINT), "\">",
-        "<legend>MATPOWER conventions (experimental)</legend>",
+        "<legend>", legend, "</legend>",
         join((_webui_adapter_option_html(f, profile_values) for f in conventions), "\n"), "</fieldset>")
       push!(parts, string("<details class=\"span-2 expert-section adapter-expert\"", active ? " open" : "", "><summary>Advanced</summary>",
         join((_webui_adapter_option_html(f, profile_values) for f in experts), "\n"), block, "</details>"))
@@ -1582,6 +1699,55 @@ function _webui_adapter_options_html(key::Symbol, profile_values)::String
     return join(parts, "\n")
   end
   return ""
+end
+
+# the number of fields of an adapter section the case format leaves out
+function _webui_adapter_hidden_count(key::Symbol, option_format::Union{Nothing,Symbol})::Int
+  for sec in _WEBUI_ADAPTER_SECTIONS
+    sec.key == key && return count(f -> !_webui_field_applies(f, option_format), sec.order)
+  end
+  return 0
+end
+
+# The system frequency select of the Case page: its own section, rendered
+# for every case format. `applies` leaves it enabled (an SCF/PGM case with a
+# line c1 in farad and no meta.f_nom, or no case). Otherwise it is disabled
+# and holds one option: the file's frequency (`file_value`, an SCF file
+# stating meta.f_nom) or "not used" (no capacitance in farad: MATPOWER,
+# DTF, CGMES, PowSyBl, an SCF file without line c1 or in pu). A disabled
+# select is not posted, and the case save drops the key for such a case
+# (_webui_case_save_plan). The value comes from the form state, which takes
+# an SCF file's meta.f_nom over the configuration (webui_form_state).
+function _webui_system_frequency_html(profile_values; applies::Bool = true, file_value::Union{Nothing,Float64} = nothing)::String
+  field = "model_nominal_frequency_hz"
+  spec = _webui_option_spec(field)
+  selected = file_value === nothing ? _webui_selected(profile_values, field, spec.default) : file_value
+  label(v) = isinteger(v) ? string(round(Int, v), " Hz") : string(v, " Hz")
+  opts = if file_value !== nothing
+    _webui_option(file_value, string(label(file_value), " from the case file"), selected)
+  elseif !applies
+    sel = tryparse(Float64, _webui_form_string(selected))
+    _webui_option(something(sel, spec.default), "not used", something(sel, spec.default))
+  else
+    values = collect(Any, spec.allowed_values)
+    # a configuration may hold another frequency (59.5, say); it is listed,
+    # or the browser would preselect 50 and post it
+    sel = tryparse(Float64, _webui_form_string(selected))
+    sel === nothing || any(v -> v == sel, values) || push!(values, sel)
+    join((_webui_option(v, label(v), selected) for v in values), "")
+  end
+  stored = applies ? "" : field in get(profile_values, "_case_file_fields", String[]) ?
+    " The case settings store a value for this key; it has no effect, and the next save of the case options removes it." : ""
+  hint = file_value !== nothing ? "Taken from the case file (<code>meta.f_nom</code>), which wins over the key on import; the key is not saved for this case." : applies ?
+    "Turns the <code>c1</code> of SCF and PGM lines into susceptance where the file states no frequency of its own. The short circuit does not depend on it." :
+    "No line of this case gives a capacitance in farad (SCF/PGM <code>c1</code>); MATPOWER, DTF, CGMES and PowSyBl give line charging as susceptance. The key changes nothing here and is not saved for this case."
+  return string(
+    "<fieldset class=\"model-section\" data-model-section>",
+    "<legend>Network model</legend>",
+    "<label", applies ? "" : " class=\"disabled\"", ">", _webui_field_label(field, "System frequency"),
+    "<select id=\"", field, "\" name=\"", field, "\"", applies ? "" : " disabled", ">", opts, "</select></label>",
+    "<p class=\"field-hint span-2\">", hint, stored, "</p>",
+    "</fieldset>")
 end
 
 """
@@ -1615,6 +1781,14 @@ function render_case_page(;
   effective_case_value = ctx.effective_case_value
   case_format_value = ctx.case_format_value
   dat_case_assistance = ctx.dat_case_assistance
+  # format-bound options the selected case does not read are not rendered
+  # (_WEBUI_FIELD_CASE_FORMATS); each section says how many it left out
+  fmt = ctx.option_format
+  show_cgmes = _webui_field_applies("cgmes_start_values", fmt)
+  show_powsybl = _webui_field_applies("powsybl_import_hvdc_mode", fmt)
+  input_format_note = _webui_hidden_options_note(_webui_adapter_hidden_count(:cgmes, fmt) + _webui_adapter_hidden_count(:powsybl, fmt))
+  import_conventions_note = _webui_hidden_options_note(_webui_adapter_hidden_count(:matpower, fmt))
+  import_conventions_legend = fmt in (nothing, :matpower) ? "MATPOWER import conventions" : "Import conventions"
   error_html = _webui_error_alert_html(error_message)
   # a freshly exported file is offered right here: it was written next to the
   # case (where a run finds it), and this is the way back out to the browser
@@ -1628,7 +1802,7 @@ function render_case_page(;
     label = has_settings ? "$(casefile) ★" : casefile
     "<li role=\"option\" data-case-option=\"$(_webui_escape(casefile))\" title=\"Right-click to delete this case from the case directory\">$(_webui_escape(label))</li>"
   end for casefile in ctx.casefiles), "")
-  case_input = "<span class=\"case-combobox\" data-case-combobox><input id=\"casefile\" name=\"casefile\" autocomplete=\"off\" spellcheck=\"false\" role=\"combobox\" aria-expanded=\"false\" aria-controls=\"case-combobox-list\" data-case-settings-reload=\"true\" value=\"$(_webui_escape(effective_case_value))\" placeholder=\"case14.m or /path/to/FOR001.DAT\"><button type=\"button\" id=\"case-combobox-toggle\" class=\"case-combobox-toggle\" aria-label=\"Show available cases\" tabindex=\"-1\">&#9662;</button><ul id=\"case-combobox-list\" class=\"case-combobox-list\" role=\"listbox\" hidden>$(case_options)</ul></span>"
+  case_input = "<span class=\"case-combobox\" data-case-combobox><input id=\"casefile\" name=\"casefile\" autocomplete=\"off\" spellcheck=\"false\" role=\"combobox\" aria-expanded=\"false\" aria-controls=\"case-combobox-list\" data-case-settings-reload=\"true\" value=\"$(_webui_escape(effective_case_value))\" placeholder=\"case14.m or /path/to/FOR001.DAT\" data-format-hint=\"$(ctx.format_hint)\"><button type=\"button\" id=\"case-combobox-toggle\" class=\"case-combobox-toggle\" aria-label=\"Show available cases\" tabindex=\"-1\">&#9662;</button><ul id=\"case-combobox-list\" class=\"case-combobox-list\" role=\"listbox\" hidden>$(case_options)</ul></span>"
   config_default = isempty(selected_config_file) ? DEFAULT_SPARLECTRA_CONFIG_PATH : selected_config_file
   info_menu = _webui_powerflow_info_menu(; output_root, config_file = config_default, case_directory = effective_case_directory, operation_log)
   import_form = """
@@ -1643,7 +1817,7 @@ function render_case_page(;
   case_form = """
 <form id=\"case-select-form\" method=\"post\" action=\"/powerflow/resolve-case\" class=\"panel form-grid case-select-form\">
 <input type=\"hidden\" name=\"config_file\" value=\"$(_webui_escape(config_default))\">
-<label class="span-2">$(_webui_field_label("casefile", "Case file"))$(case_input)<button type="submit" id="resolve-case-button" formaction="/powerflow/resolve-case" formmethod="post" formnovalidate hidden>Resolve case</button><small class="field-hint">Cases from <code>$(_webui_escape(effective_case_directory))</code> — pick one from the list, or type a case name/path and press Enter to download it into the list.<br>MATPOWER: a case name such as <code>case118.m</code>. CGMES: <code>cgmes:</code> plus one of $(join(("<code>" * a * "</code>" for a in sort(collect(keys(CGMESImporter.CGMES_TESTSET_ALIASES)))), ", ")) — fetches the ENTSO-E test configuration including its boundary set.</small></label>
+<label class="span-2">$(_webui_field_label("casefile", "Case file"))$(case_input)<button type="submit" id="resolve-case-button" formaction="/powerflow/resolve-case" formmethod="post" formnovalidate hidden>Resolve case</button><small class="field-hint">Cases from <code>$(_webui_escape(effective_case_directory))</code>. Pick one from the list, or type a case name/path and press Enter to download it into the list.<br>MATPOWER: a case name such as <code>case118.m</code>. CGMES: <code>cgmes:</code> plus one of $(join(("<code>" * a * "</code>" for a in sort(collect(keys(CGMESImporter.CGMES_TESTSET_ALIASES)))), ", ")). Fetches the ENTSO-E test configuration including its boundary set.</small></label>
 $(dat_hint_html)
 <div class=\"actions case-export-actions\">$(_webui_help_link("webui.scf_export", "Case export")) <button type=\"submit\" class=\"secondary-button\" formaction=\"/powerflow/export-scf\" formmethod=\"post\" formnovalidate title=\"Write the selected case as an SCF file (.scf.json) into the case directory: a PGM dataset plus the sparlectra block (names, taps, measurements, options).\">Export as SCF case file</button><button type=\"submit\" class=\"secondary-button\" formaction=\"/powerflow/export-scf\" formmethod=\"post\" formnovalidate name=\"scf_strict_pgm\" value=\"true\" title=\"Write the plain PGM dataset (.pgm.json) for a PGM-only consumer: no sparlectra block, so names, slack roles, taps, measurements and options are lost.\">Export as plain PGM</button><a class=\"button secondary-button case-download-link\" href=\"/powerflow/case/download?case=$(_webui_urlencode(selected_casefile))\" title=\"Download the selected case file from the case directory. After an export, pick the .scf.json or .pgm.json in the selector to download it.\">Download selected case</a></div>
 <div class=\"actions case-save-as-actions\" title=\"Save the current case, its settings and any bound measurement set under a new name - a copy, nothing switched live.\"><label for=\"save_as_name\">Save case as</label> <input type=\"text\" id=\"save_as_name\" name=\"save_as_name\" placeholder=\"new case name\" pattern=\"[^/\\\\]+\"> <label class=\"inline-check\"><input type=\"checkbox\" name=\"save_as_overwrite\" value=\"true\"> overwrite</label> <label class=\"inline-check\" title=\"Solve the case once and write the solved voltages into the copy as its start state.\"><input type=\"checkbox\" name=\"save_as_start_state\" value=\"true\"> start from the solved state</label> <button type=\"submit\" class=\"secondary-button\" formaction=\"/powerflow/case/save-as\" formmethod=\"post\" formnovalidate title=\"Write &lt;name&gt;.scf.json, &lt;name&gt;.config.yaml (saved settings plus unsaved changes) and any bound measurement set as copies, then select the new case.\">Save case as</button></div>
@@ -1660,17 +1834,21 @@ $(ctx.case_format_notice)<details$(dtf_details_attrs)>
 <fieldset>
 <label>$(_webui_field_label("case_format", "Case input format"))<select name="case_format"><option value="auto"$(_webui_form_string(case_format_value) == "auto" ? " selected" : "")>Auto</option><option value="matpower"$(_webui_form_string(case_format_value) == "matpower" ? " selected" : "")>MATPOWER</option><option value="dtf_for001"$(_webui_form_string(case_format_value) == "dtf_for001" ? " selected" : "")>DTF diagnostics (experimental/internal)</option><option value="cgmes"$(_webui_form_string(case_format_value) == "cgmes" ? " selected" : "")>CGMES (ENTSO-E, folder or ZIP)</option><option value="scf"$(_webui_form_string(case_format_value) == "scf" ? " selected" : "")>Sparlectra Case Format (.scf.json)</option><option value="pgm"$(_webui_form_string(case_format_value) == "pgm" ? " selected" : "")>power-grid-model JSON (input.json)</option><option value="powsybl"$(_webui_form_string(case_format_value) == "powsybl" ? " selected" : "")>PowSyBl (IIDM file)</option></select></label>
 <p class="field-help">SCF and power-grid-model JSON are read by the same importer; the <code>sparlectra</code> block is optional, so a plain power-grid-model dataset loads as well. <em>Auto</em> already resolves every <code>.json</code> to that reader, so these two entries only matter when the extension does not say it.</p>
-$(_webui_adapter_options_html(:cgmes, profile_values))
-$(_webui_adapter_options_html(:powsybl, profile_values))
-<p class="field-help" data-powsybl-import-field>PowSyBl only: a <code>.xiidm</code> file is read as it is. <a href="/help/reference#webui_powsybl" target="_blank" rel="noopener noreferrer">Help on PowSyBl IIDM files</a>.</p>
-<p class="field-help" data-cgmes-start-values-field>CGMES only: <em>Flat start</em> lets the solver earn the solution itself; <em>Imported SV state</em> starts Newton-Raphson from the delivery's own SvVoltage solution (competing start-value machines are forced off). The SV comparison check (<code>sv_compare.csv</code>) runs either way.</p>
+$(_webui_adapter_options_html(:cgmes, profile_values; option_format = fmt))
+$(_webui_adapter_options_html(:powsybl, profile_values; option_format = fmt))
+$(show_powsybl ? "<p class=\"field-help\" data-powsybl-import-field>PowSyBl only: a <code>.xiidm</code> file is read as it is. <a href=\"/help/reference#webui_powsybl\" target=\"_blank\" rel=\"noopener noreferrer\">Help on PowSyBl IIDM files</a>.</p>" : "")
+$(show_cgmes ? "<p class=\"field-help\" data-cgmes-start-values-field>CGMES only: <em>Flat start</em> lets the solver earn the solution itself; <em>Imported SV state</em> starts Newton-Raphson from the delivery's own SvVoltage solution (competing start-value machines are forced off). The SV comparison check (<code>sv_compare.csv</code>) runs either way.</p>" : "")
+$(input_format_note)
 </fieldset>
 </details>
+$(_webui_system_frequency_html(profile_values; applies = ctx.frequency_applies, file_value = ctx.case_frequency))
 <fieldset class=\"import-section\" data-import-conventions-section>
-<legend>MATPOWER import conventions</legend>
+<legend>$(import_conventions_legend)</legend>
 <p class=\"field-hint span-2\" data-import-conventions-hint hidden>Not applicable to the selected CGMES or PowSyBl case: these options steer MATPOWER (and DTF) parsing only. The CGMES and PowSyBl importers read the delivery's own conventions; Export Solution stays available.</p>
-$(_webui_adapter_options_html(:matpower, profile_values))
+$(_webui_adapter_options_html(:matpower, profile_values; option_format = fmt))
+$(import_conventions_note)
 </fieldset>
+$(isempty(strip(effective_case_value)) ? "" : _webui_tap_exclusion_fieldset(_webui_tap_exclusion_table(effective_case_value, effective_case_directory, config_default)))
 <div class=\"span-2 actions\"><button class=\"secondary-button\" type=\"submit\">Save case options</button></div>
 </form>
 """
@@ -1713,6 +1891,16 @@ function _webui_settings_sections_html(; profile_values, config_default, profile
 <label class=\"check span-2\"><input name=\"contingency_warm_active_set\" type=\"hidden\" value=\"false\"><input name=\"contingency_warm_active_set\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "contingency_warm_active_set", _webui_option_default("contingency_warm_active_set")))>$(_webui_field_label("contingency_warm_active_set", "Warm active set (start outages from the base case's PV/PQ state)"))</label>
 <label class=\"check\"><input name=\"contingency_warm_cold_check\" type=\"hidden\" value=\"false\"><input name=\"contingency_warm_cold_check\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "contingency_warm_cold_check", _webui_option_default("contingency_warm_cold_check")))>$(_webui_field_label("contingency_warm_cold_check", "Cold check of tight outages"))</label>
 <label>$(_webui_field_label("contingency_warm_cold_check_margin_pu", "Cold check margin (pu)"))<input name="contingency_warm_cold_check_margin_pu" type="number" step="any" min="0" value="$(_webui_input_value(profile_values, "contingency_warm_cold_check_margin_pu", _webui_option_default("contingency_warm_cold_check_margin_pu")))"></label>
+<label class=\"check span-2\"><input name=\"contingency_events_enabled\" type=\"hidden\" value=\"false\"><input name=\"contingency_events_enabled\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "contingency_events_enabled", _webui_option_default("contingency_events_enabled")))>$(_webui_field_label("contingency_events_enabled", "Correlated events (SCF cases)"))</label>
+<label class=\"check\"><input name=\"contingency_events_double_circuits\" type=\"hidden\" value=\"false\"><input name=\"contingency_events_double_circuits\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "contingency_events_double_circuits", _webui_option_default("contingency_events_double_circuits")))>$(_webui_field_label("contingency_events_double_circuits", "Double circuits"))</label>
+<label class=\"check\"><input name=\"contingency_events_busbars\" type=\"hidden\" value=\"false\"><input name=\"contingency_events_busbars\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "contingency_events_busbars", _webui_option_default("contingency_events_busbars")))>$(_webui_field_label("contingency_events_busbars", "Busbar sections"))</label>
+<label class=\"check\"><input name=\"contingency_events_substations\" type=\"hidden\" value=\"false\"><input name=\"contingency_events_substations\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "contingency_events_substations", _webui_option_default("contingency_events_substations")))>$(_webui_field_label("contingency_events_substations", "Whole stations"))</label>
+<label class=\"check\"><input name=\"contingency_events_links\" type=\"hidden\" value=\"false\"><input name=\"contingency_events_links\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "contingency_events_links", _webui_option_default("contingency_events_links")))>$(_webui_field_label("contingency_events_links", "Couplers"))</label>
+<label class=\"check\"><input name=\"contingency_events_name_groups\" type=\"hidden\" value=\"false\"><input name=\"contingency_events_name_groups\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "contingency_events_name_groups", _webui_option_default("contingency_events_name_groups")))>$(_webui_field_label("contingency_events_name_groups", "Name groups"))</label>
+<label>$(_webui_field_label("contingency_events_max_members", "Event size limit"))<input name=\"contingency_events_max_members\" type=\"number\" step=\"1\" min=\"1\" value=\"$(_webui_input_value(profile_values, "contingency_events_max_members", _webui_option_default("contingency_events_max_members")))\"></label>
+<label class=\"check span-2\"><input name=\"contingency_pairs_enabled\" type=\"hidden\" value=\"false\"><input name=\"contingency_pairs_enabled\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "contingency_pairs_enabled", _webui_option_default("contingency_pairs_enabled")))>$(_webui_field_label("contingency_pairs_enabled", "N-2 pairs (SCF cases)"))</label>
+<label>$(_webui_field_label("contingency_pairs_rule", "Pair rule"))$(_webui_select("contingency_pairs_rule", _webui_option_allowed_values("contingency_pairs_rule"), _webui_selected(profile_values, "contingency_pairs_rule", _webui_option_default("contingency_pairs_rule"))))</label>
+<label>$(_webui_field_label("contingency_pairs_max_pairs", "Pair limit"))<input name=\"contingency_pairs_max_pairs\" type=\"number\" step=\"1\" min=\"1\" value=\"$(_webui_input_value(profile_values, "contingency_pairs_max_pairs", _webui_option_default("contingency_pairs_max_pairs")))\"></label>
 <p class=\"field-help\">N-1 and scenario runs only. <strong>Outage max iterations</strong> limits every outage solve; the base case keeps <strong>Maximum iterations</strong> above, so a smaller value here makes a long N-1 run faster. <code>flag</code> estimates every outage with one Woodbury-corrected Newton step on the base factorisation and solves in full only the outages whose estimate comes within the margin of a limit; <code>only</code> keeps the estimates. Off by default: a one-step estimate cannot see every outage class (a generator falling to PQ), so check the screened share on your network once before relying on it.</p>
 </fieldset>
 <fieldset class=\"distributed-slack-options\" data-nr-only-field>
@@ -1729,9 +1917,9 @@ function _webui_settings_sections_html(; profile_values, config_default, profile
 <details class=\"span-2 expert-section\">
 <summary>Advanced options</summary>
 $(config_maintenance)
-<fieldset class=\"step-control-expert\" data-ac-only-field>
+<fieldset class=\"step-control-expert\">
 <legend>Step control &amp; solver</legend>
-<label class=\"check\" title=\"Pick start-value, step-control and Q-limit strategy from the network, retrying with stronger strategies on non-convergence. Explicit options below always win.\"><input name=\"power_flow_mode\" type=\"hidden\" value=\"manual\"><input name=\"power_flow_mode\" type=\"checkbox\" value=\"auto\"$(_webui_selected(profile_values, "power_flow_mode", "manual") == "auto" ? " checked" : "")>$(_webui_field_label("power_flow_mode", "Auto mode (network-driven strategy)"))</label>
+<label class=\"check\" data-ac-only-field title=\"Pick start-value, step-control and Q-limit strategy from the network, retrying with stronger strategies on non-convergence. Explicit options below always win.\"><input name=\"power_flow_mode\" type=\"hidden\" value=\"manual\"><input name=\"power_flow_mode\" type=\"checkbox\" value=\"auto\"$(_webui_selected(profile_values, "power_flow_mode", "manual") == "auto" ? " checked" : "")>$(_webui_field_label("power_flow_mode", "Auto mode (network-driven strategy)"))</label>
 <details class=\"span-2 step-control-options\" data-step-control-group=\"autodamp\" data-ac-only-field>
 <summary>Autodamping &amp; merit-function line search</summary>
 <label class=\"check\"><input name=\"power_flow_autodamp\" type=\"hidden\" value=\"false\"><input name=\"power_flow_autodamp\" type=\"checkbox\" value=\"true\" data-autodamp-toggle$(_webui_checked(profile_values, "power_flow_autodamp", _webui_option_default("power_flow_autodamp")))>$(_webui_field_label("power_flow_autodamp", "Autodamping enabled"))</label>
@@ -1779,12 +1967,14 @@ $(_webui_qlimit_block_html(profile_values))
 <details id="apslf-start-options" class="span-2 apslf-start-options" data-apslf-start-options data-ac-only-field>
 <summary>Newton-Raphson start values</summary>
 <label class=\"check\"><input name=\"power_flow_flatstart\" type=\"hidden\" value=\"false\"><input name=\"power_flow_flatstart\" type=\"checkbox\" value=\"true\" data-flatstart-toggle$(_webui_checked(profile_values, "power_flow_flatstart", _webui_option_default("power_flow_flatstart")))>$(_webui_field_label("power_flow_flatstart", "Flat start"))</label>
-<p class=\"field-help\">Start every bus at 1.0 pu and 0 degrees and ignore the imported start voltages. The flat start sets only this profile: the start values below and the start projection still run from it when they are on; only the start angle and voltage modes are ignored (greyed) while it is set. A CGMES run starts flat as well unless its start values are set to sv on the Case page.</p>
-<label class=\"check\" data-nr-only-field data-flatstart-required-field><input name=\"power_flow_ratio_profile\" type=\"hidden\" value=\"false\"><input name=\"power_flow_ratio_profile\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "power_flow_ratio_profile", _webui_option_default("power_flow_ratio_profile")))>$(_webui_field_label("power_flow_ratio_profile", "Ratio profile as a start candidate"))</label>
-<p class=\"field-help\">Flat start only: the start projection also tries the flat profile with each voltage level scaled by the transformer ratios on its path from the slack, and keeps it when its mismatch is at least 10 percent lower. Greyed while the flat start is off.</p>
+<p class=\"field-help\">Start every bus at 1.0 pu and the slack angle and ignore the imported start voltages; only three-winding star points start at the ratio of their stiffest winding. The run switches the start projection, the DC start values, the start angle and voltage modes and the ratio profile off (greyed) while it is set; the ratio profile stays off in the rescue and auto stages as well. A CGMES run starts flat as well unless its start values are set to sv on the Case page.</p>
+<label class=\"check\" data-nr-only-field><input name=\"power_flow_rotate_behind_pst\" type=\"hidden\" value=\"false\"><input name=\"power_flow_rotate_behind_pst\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "power_flow_rotate_behind_pst", _webui_option_default("power_flow_rotate_behind_pst")))>$(_webui_field_label("power_flow_rotate_behind_pst", "Flat start turned behind phase shifters"))</label>
+<p class=\"field-help\">On a flat start, and on a stored start without angles, a bus that the slack reaches only across phase-shifting transformers starts at the slack angle plus the shifts of a path with the fewest shifters. A bus that a path without shifter reaches keeps the slack angle, since in a mesh the parallel path fixes its angle. Off (default): every bus starts at the slack angle.</p>
+<label class=\"check\" data-nr-only-field data-ratio-profile-field><input name=\"power_flow_ratio_profile\" type=\"hidden\" value=\"false\"><input name=\"power_flow_ratio_profile\" type=\"checkbox\" value=\"true\"$(_webui_checked(profile_values, "power_flow_ratio_profile", _webui_option_default("power_flow_ratio_profile")))>$(_webui_field_label("power_flow_ratio_profile", "Ratio profile as a start candidate"))</label>
+<p class=\"field-help\">A start projection candidate on a flat seed: the flat profile with each voltage level scaled by the transformer ratios on its path from the slack, kept when its mismatch is at least 10 percent lower. When it acts, it scales every PQ bus, not only three-winding star points. The flat start switches it off for the whole run. Without the flat start it acts only in the rescue ladder's alternate start (not with Start angle mode dc) and in the auto mode, so it is greyed in every other case.</p>
 <label class=\"check\" data-nr-only-field><input name=\"power_flow_apslf_start_enabled\" type=\"hidden\" value=\"false\"><input name=\"power_flow_apslf_start_enabled\" type=\"checkbox\" value=\"true\" data-apslf-start-toggle$(_webui_checked(profile_values, "power_flow_apslf_start_enabled", _webui_option_default("power_flow_apslf_start_enabled")))>$(_webui_field_label("power_flow_apslf_start_enabled", "Use APSLF start values"))</label>
 <label class=\"field-indent\">$(_webui_field_label("power_flow_apslf_start_order", "Highest coefficient (order)"))<input name=\"power_flow_apslf_start_order\" type=\"number\" min=\"1\" data-apslf-start-order value=\"$(_webui_input_value(profile_values, "power_flow_apslf_start_order", _webui_option_default("power_flow_apslf_start_order")))\"></label>
-<label class=\"check\" data-nr-only-field><input name=\"power_flow_dc_seed_unconditional\" type=\"hidden\" value=\"false\"><input name=\"power_flow_dc_seed_unconditional\" type=\"checkbox\" value=\"true\" data-dc-seed-toggle$(_webui_checked(profile_values, "power_flow_dc_seed_unconditional", _webui_option_default("power_flow_dc_seed_unconditional")))>$(_webui_field_label("power_flow_dc_seed_unconditional", "Use DC start values"))</label>
+<label class=\"check\" data-nr-only-field data-flatstart-inactive-field><input name=\"power_flow_dc_seed_unconditional\" type=\"hidden\" value=\"false\"><input name=\"power_flow_dc_seed_unconditional\" type=\"checkbox\" value=\"true\" data-dc-seed-toggle$(_webui_checked(profile_values, "power_flow_dc_seed_unconditional", _webui_option_default("power_flow_dc_seed_unconditional")))>$(_webui_field_label("power_flow_dc_seed_unconditional", "Use DC start values"))</label>
 </details>
 <label data-nr-only-field>$(_webui_field_label("power_flow_wrong_branch_detection", "Wrong-branch detection"))$(_webui_select("power_flow_wrong_branch_detection", _webui_option_allowed_values("power_flow_wrong_branch_detection"), _webui_selected(profile_values, "power_flow_wrong_branch_detection", _webui_option_default("power_flow_wrong_branch_detection"))))</label>
 <label data-nr-only-field data-dc-seed-inactive-field data-flatstart-inactive-field>$(_webui_field_label("power_flow_start_angle_mode", "Start angle mode"))$(_webui_select("power_flow_start_angle_mode", _webui_option_allowed_values("power_flow_start_angle_mode"), _webui_selected(profile_values, "power_flow_start_angle_mode", _webui_option_default("power_flow_start_angle_mode"))))</label>
@@ -1810,7 +2000,7 @@ $(_webui_qlimit_block_html(profile_values))
 <label>$(_webui_field_label("power_flow_external_grid_source", "Sk''/R-X source"))$(_webui_select("power_flow_external_grid_source", _webui_option_allowed_values("power_flow_external_grid_source"), _webui_selected(profile_values, "power_flow_external_grid_source", _webui_option_default("power_flow_external_grid_source"))))</label>
 <label>$(_webui_field_label("power_flow_external_grid_sk_mva", "Short-circuit power Sk'' [MVA]"))<input name=\"power_flow_external_grid_sk_mva\" type=\"number\" step=\"any\" min=\"0\" value=\"$(_webui_input_value(profile_values, "power_flow_external_grid_sk_mva", _webui_option_default("power_flow_external_grid_sk_mva")))\"></label>
 <label>$(_webui_field_label("power_flow_external_grid_rx", "R/X ratio"))<input name=\"power_flow_external_grid_rx\" type=\"number\" step=\"any\" min=\"0\" value=\"$(_webui_input_value(profile_values, "power_flow_external_grid_rx", _webui_option_default("power_flow_external_grid_rx")))\"></label>
-<p class=\"field-help\">The reference voltage moves to a hidden internal bus behind the feeder impedance <code>z = Un²/Sk''</code> — the former slack bus becomes an ordinary bus whose voltage droops under load. <code>auto</code> prefers the Sk''/R-X values a CGMES delivery declares on the slack bus's <code>ExternalNetworkInjection</code> and falls back to the numbers above (MATPOWER/DTF cases carry no such data); <code>config</code> always uses the numbers above. Mutually exclusive with the distributed slack — both decide who covers the imbalance, and combined the source's import would be forced to zero.</p>
+<p class=\"field-help\">The reference voltage moves to a hidden internal bus behind the feeder impedance <code>z = Un²/Sk''</code>: the former slack bus becomes an ordinary bus whose voltage droops under load. <code>auto</code> prefers the Sk''/R-X values a CGMES delivery declares on the slack bus's <code>ExternalNetworkInjection</code> and falls back to the numbers above (MATPOWER/DTF cases carry no such data); <code>config</code> always uses the numbers above. Mutually exclusive with the distributed slack: both decide who covers the imbalance, and combined the source's import would be forced to zero.</p>
 </fieldset>
 $(isempty(profile_path) ? "" : "<fieldset class=\"saved-case-settings\">
 <legend>Saved settings for this case</legend>
@@ -1819,7 +2009,7 @@ $(isempty(profile_path) ? "" : "<fieldset class=\"saved-case-settings\">
 </fieldset>")
 <fieldset class=\"startup-options\">
 <legend>Startup</legend>
-<p class=\"field-help\">Hidden compile runs at startup so the first real run — and the first <strong>Short circuit</strong> click — do not pay the compilation. Costs a few seconds once. Saved in the configuration file; takes effect at the <em>next</em> Web UI start.</p>
+<p class=\"field-help\">Hidden compile runs at startup so the first real run (and the first <strong>Short circuit</strong> click) do not pay the compilation. Costs a few seconds once. Saved in the configuration file; takes effect at the <em>next</em> Web UI start.</p>
 </fieldset>
 <fieldset class=\"non-convergence-options\" data-nr-only-field>
 <legend>Non-convergence handling</legend>
@@ -1873,11 +2063,19 @@ document.addEventListener('DOMContentLoaded', function () {
   // Gray out (disable, but keep visible/in place) a field group that does not apply
   // to the currently selected solver, instead of hiding it: mutually exclusive
   // solver options stay where the user last saw them rather than jumping around.
+  // The solver radios are never disabled, whatever container they sit in: a
+  // disabled control is dropped from the POST, so a save made while DC was
+  // selected kept the previously saved solver (and a case saved on DC could
+  // not be switched back). The fieldset around them carried
+  // data-ac-only-field until 0.32.1 and grayed the choice itself.
   const setSolverGroupInactive = function (container, inactive) {
     if (container === null) return;
     container.classList.toggle('disabled', inactive);
     const controls = container.matches('input, select') ? [container] : container.querySelectorAll('input, select');
-    controls.forEach(function (control) { control.disabled = inactive; });
+    controls.forEach(function (control) {
+      if (control.hasAttribute('data-solver-radio')) return;
+      control.disabled = inactive;
+    });
   };
   const updateSolverOptions = function () {
     const dc = isDcMode();
@@ -1890,13 +2088,28 @@ document.addEventListener('DOMContentLoaded', function () {
   const dcSeedToggle = document.querySelector('input[data-dc-seed-toggle]');
   const flatstartToggle = document.querySelector('input[data-flatstart-toggle]');
   const isFlatstartOn = function () { return flatstartToggle !== null && flatstartToggle.checked; };
-  // The flat start greys the two start-mode controls in place (the run sets
-  // both to classic while the flat start is on, #463); their values stay as
-  // they are (a greyed control is not posted, so a save keeps the stored
-  // value). The start machines are not greyed: they follow their own keys
-  // and run from the flat profile. The ratio-profile candidate is the
-  // opposite case: it acts only on a flat start, so it is greyed while the
-  // flat start is off.
+  // The flat start greys the two start-mode controls and the DC start values
+  // in place (the run switches them off while the flat start is on, see
+  // _flatstart_profile_config); their values stay as they are (a greyed
+  // control is not posted, so a save keeps the stored value). The
+  // current-iteration and APSLF starts follow their own keys and are not
+  // greyed. The ratio-profile candidate is greyed wherever it cannot act: a
+  // flat-start run switches it off for the whole run, rescue and auto stages
+  // included (_flatstart_profile_config). Without the flat start only two
+  // paths run the projection from a flat profile: the rescue ladder's
+  // alternate start, where a DC start angle mode keeps precedence over the
+  // candidate, and the auto mode. Greyed, it is not posted and a save keeps
+  // the stored value.
+  const rescueToggle = document.querySelector('input[name="power_flow_rescue"][type="checkbox"]');
+  const autoModeToggle = document.querySelector('input[name="power_flow_mode"][type="checkbox"]');
+  const angleModeSelect = document.querySelector('select[name="power_flow_start_angle_mode"]');
+  const isRatioProfileInactive = function () {
+    if (isFlatstartOn()) return true;
+    const autoOn = autoModeToggle !== null && autoModeToggle.checked;
+    const rescueOn = rescueToggle !== null && rescueToggle.checked;
+    const dcAngles = angleModeSelect !== null && angleModeSelect.value === 'dc';
+    return !(autoOn || (rescueOn && !dcAngles));
+  };
   const updateApslfStartOrder = function () {
     if (apslfStartOrderInput !== null) apslfStartOrderInput.disabled = apslfStartToggle !== null && !apslfStartToggle.checked;
   };
@@ -1922,6 +2135,15 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   if (flatstartToggle !== null) {
     flatstartToggle.addEventListener('change', function () { updateStepControlOptions('flatstart'); });
+  }
+  if (rescueToggle !== null) {
+    rescueToggle.addEventListener('change', function () { updateStepControlOptions(); });
+  }
+  if (autoModeToggle !== null) {
+    autoModeToggle.addEventListener('change', function () { updateStepControlOptions(); });
+  }
+  if (angleModeSelect !== null) {
+    angleModeSelect.addEventListener('change', function () { updateStepControlOptions(); });
   }
   const autodampToggle = document.querySelector('input[data-autodamp-toggle]');
   const trustRegionToggle = document.querySelector('input[data-trust-region-toggle]');
@@ -1977,11 +2199,12 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     const dcSeedActive = dcSeedToggle !== null && dcSeedToggle.checked;
     const flatstartActive = isFlatstartOn();
+    const ratioProfileInactive = isRatioProfileInactive();
     nrOnlyFields.forEach(function (container) {
       const dcSeedMakesInactive = dcSeedActive && container.hasAttribute('data-dc-seed-inactive-field');
       const flatstartMakesInactive = flatstartActive && container.hasAttribute('data-flatstart-inactive-field');
-      const flatstartRequired = !flatstartActive && container.hasAttribute('data-flatstart-required-field');
-      setSolverGroupInactive(container, hideNrOnly || dcSeedMakesInactive || flatstartMakesInactive || flatstartRequired);
+      const ratioProfileOff = ratioProfileInactive && container.hasAttribute('data-ratio-profile-field');
+      setSolverGroupInactive(container, hideNrOnly || dcSeedMakesInactive || flatstartMakesInactive || ratioProfileOff);
     });
     updateExperimentalOptions();
     updateJacobianReuseOptions();
@@ -2165,7 +2388,7 @@ function render_settings_page(;
   # the file's old values right after "Saved settings for this case". A
   # save with target this case writes what the form shows.
   stored_profile_path = case_profile isa AbstractDict ? String(get(case_profile, "_profile_path", "")) : ""
-  ctx = _webui_case_context(; application_root, case_directory, selected_casefile, selected_config_file, case_profile, submitted_form, show_case_settings_notice, apply_case_levels = show_case_profile)
+  ctx = _webui_case_context(; application_root, case_directory, selected_casefile, selected_config_file, case_profile, submitted_form, show_case_settings_notice, apply_case_levels = show_case_profile, case_scope_from_defaults = show_case_profile)
   profile_values = ctx.profile_values
   profile_path = isempty(ctx.profile_path) ? stored_profile_path : ctx.profile_path
   error_html = _webui_error_alert_html(error_message)
@@ -2251,14 +2474,32 @@ function render_powerflow_form(;
   dat_case_assistance = ctx.dat_case_assistance
   sc_state = ctx.sc_state
   sc_disabled_attr = sc_state == "ready" ? "" : " disabled"
-  sc_title = sc_state == "ready" ? "Balanced short-circuit currents (IEC 60909-0): Ik'' max/min per bus from the delivery's harvested short-circuit data — no power-flow solve involved." :
+  sc_title = sc_state == "ready" ? "Balanced short-circuit currents (IEC 60909-0): Ik'' max/min per bus from the delivery's harvested short-circuit data, no power-flow solve involved." :
     sc_state == "missing-data" ? "This case carries no usable short-circuit source data (no machines, feeder short-circuit currents, or equivalent impedances; in a PowSyBl case no generator with the short-circuit extension or a rated power)." :
     "Short-circuit evaluation needs a CGMES delivery with harvested short-circuit data, a PowSyBl case, or a case file carrying sc_source entries."
   # the scenario
   # editor and the file_block source are SCF-only in this version; every
   # other format keeps the n1_* sources and gets the export hint instead
   scen_is_scf = ctx.scen_is_scf
-  scen_fileblock_option = scen_is_scf ? "<option value=\"file_block\">case file scenarios</option>" : ""
+  # the case file's scenarios block, read once for the Scenarios button and
+  # the editor tab below; the button runs the block alone (scenario source
+  # file_block), so the N-1 source list no longer offers it
+  scen_loaded = scen_is_scf ? _webui_load_case_scenarios(basename(String(effective_case_value)), effective_case_directory) : nothing
+  scen_button_html = _webui_scenarios_runnable(scen_loaded) ?
+    "<button class=\"powerflow-submit scenarios-submit\" type=\"submit\" name=\"scenario_run\" value=\"true\" data-scenarios-button title=\"Run the scenarios of the case file (its scenarios block) and nothing else.\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">Scenarios</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Running scenarios...</span></button>" : ""
+  # the QSTS button (26a): enabled for an SCF time series only. A disabled
+  # button is never the submitter, so its qsts_mode never reaches the
+  # server; the mode select next to it is read only when the button posts
+  qsts_ready = ctx.qsts_state == "series"
+  qsts_title = qsts_ready ? "QSTS: run the time series step by step (sequential: taps and banks carried from step to step; snapshots: every step on its own). The controllers come from <series>.control.yaml next to the series." :
+    "QSTS needs an SCF time series (a .qsts.zip with series.json, base.scf.json and delta.csv); the selected case is none."
+  # the mode select is format-bound (_WEBUI_FIELD_CASE_FORMATS): it renders
+  # for a series only; elsewhere the disabled button's title names the reason
+  qsts_mode_html = _webui_field_applies("qsts_mode_choice", ctx.option_format) ?
+    "<label class=\"qsts-mode\" title=\"QSTS mode for this run; the configuration keeps qsts.mode.\">QSTS mode <select name=\"qsts_mode_choice\" data-qsts-mode><option value=\"sequential\">sequential</option><option value=\"snapshots\">snapshots</option></select></label>" : ""
+  qsts_html = string(qsts_mode_html,
+    "<button class=\"powerflow-submit qsts-submit\" type=\"submit\" name=\"qsts_mode\" value=\"sequential\" data-qsts-button data-qsts-state=\"", ctx.qsts_state, "\"", qsts_ready ? "" : " disabled",
+    " title=\"", _webui_escape(qsts_title), "\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">QSTS</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Running QSTS...</span></button>")
   scen_editor_html = scen_is_scf ?
     "<a class=\"weights-link scenario-editor-link\" href=\"/powerflow/scenarios?case=$(_webui_urlencode(selected_casefile))\" title=\"Edit the case file's scenarios block (list plus form; saved into the SCF file)\">edit scenarios</a>" :
     "<span class=\"field-hint scenario-scf-hint\">Scenarios need an SCF case; export this case as SCF first (Case export above).</span>"
@@ -2270,6 +2511,22 @@ function render_powerflow_form(;
   for002_list_options = join(("<option value=\"$(_webui_escape(candidate))\">$(_webui_escape(candidate))</option>" for candidate in for002_candidates), "")
   for002_list_html = isempty(for002_candidates) ? "" : "<datalist id=\"for002-reference-candidates\">$(for002_list_options)</datalist>"
   for002_list_attr = isempty(for002_candidates) ? "" : " list=\"for002-reference-candidates\""
+  # the DTF outage run is read on the DTF branch of the run only: other case
+  # formats do not render it (_WEBUI_FIELD_CASE_FORMATS); the MATPOWER
+  # export artifact below it acts on every format
+  show_dtf_outage = all(f -> _webui_field_applies(f, ctx.option_format), _WEBUI_DTF_OUTAGE_FIELDS)
+  dtf_outage_note = show_dtf_outage ? "" : _webui_hidden_options_note(length(_WEBUI_DTF_OUTAGE_FIELDS))
+  dtf_outage_html = show_dtf_outage ? """
+<details$(dtf_details_attrs)>
+<summary>DTF outage run (internal diagnostics)</summary>
+<fieldset>
+<label>$(_webui_field_label("for002_reference_file", "Optional FOR002 reference file"))<input name="for002_reference_file" value=\"$(_webui_escape(for002_reference_value))\" placeholder="examples/FOR002.DAT"$for002_list_attr>$(for002_list_html)</label>
+<label><span class="field-label">DTF outage run mode</span><select name="dtf_outage_selection_mode"><option value="none">Run base case only</option><option value="all">Run all DTF outage records</option><option value="selected">Run selected DTF outage records</option></select></label>
+<label>$(_webui_field_label("dtf_outage_selection", "Selected DTF outage labels/indices"))<input name="dtf_outage_selection" placeholder="1 or L1 ALPHA S1 -> BETA1 S1"></label>
+<label class="check"><input name="write_outage_artifacts" type="hidden" value="false"><input name="write_outage_artifacts" type="checkbox" value="true" checked>Write DTF outage artifacts</label>
+<label class="check"><input name="write_outage_matpower_exports" type="hidden" value="false"><input name="write_outage_matpower_exports" type="checkbox" value="true">Write MATPOWER outage exports</label>
+</fieldset>
+</details>""" : ""
   config_default = isempty(selected_config_file) ? DEFAULT_SPARLECTRA_CONFIG_PATH : selected_config_file
   config_control = "<input type=\"hidden\" name=\"config_file\" value=\"$(_webui_escape(config_default))\">"
   info_menu = _webui_powerflow_info_menu(; output_root, config_file = config_default, case_directory = effective_case_directory, operation_log)
@@ -2281,19 +2538,11 @@ $(config_control)
 <label class="span-2">$(_webui_field_label("casefile", "Case file"))<input type="hidden" name="casefile" value="$(_webui_escape(effective_case_value))"><span class="selected-case-display"><code>$(isempty(strip(effective_case_value)) ? "no case selected" : _webui_escape(effective_case_value))</code> <a class="case-page-link" href="/powerflow/case$(isempty(strip(effective_case_value)) ? "" : "?casefile=" * _webui_urlencode(effective_case_value))">change on the Case page</a></span><small class="field-hint">Choosing, importing, exporting, and configuring cases moved to the Case page; this run uses the case named here with its saved case options.</small></label>
 <details class=\"span-2 expert-section runs-expert-section\"$(dat_case_assistance ? " open" : "")>
 <summary>Advanced run options</summary>
-<details$(dtf_details_attrs)>
-<summary>DTF outage run (internal diagnostics)</summary>
-<fieldset>
-<label>$(_webui_field_label("for002_reference_file", "Optional FOR002 reference file"))<input name="for002_reference_file" value=\"$(_webui_escape(for002_reference_value))\" placeholder="examples/FOR002.DAT"$for002_list_attr>$(for002_list_html)</label>
-<label><span class="field-label">DTF outage run mode</span><select name="dtf_outage_selection_mode"><option value="none">Run base case only</option><option value="all">Run all DTF outage records</option><option value="selected">Run selected DTF outage records</option></select></label>
-<label>$(_webui_field_label("dtf_outage_selection", "Selected DTF outage labels/indices"))<input name="dtf_outage_selection" placeholder="1 or L1 ALPHA S1 -> BETA1 S1"></label>
-<label class="check"><input name="write_outage_artifacts" type="hidden" value="false"><input name="write_outage_artifacts" type="checkbox" value="true" checked>Write DTF outage artifacts</label>
+$(dtf_outage_html)
 <label class="check"><input name="matpower_export_requested" type="hidden" value="false"><input name="matpower_export_requested" type="checkbox" value="true">Write MATPOWER export artifact</label>
-<label class="check"><input name="write_outage_matpower_exports" type="hidden" value="false"><input name="write_outage_matpower_exports" type="checkbox" value="true">Write MATPOWER outage exports</label>
-</fieldset>
+$(dtf_outage_note)
 </details>
-</details>
-<div class=\"span-2 actions\"><button class=\"powerflow-submit\" type=\"submit\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">Start PowerFlow run</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Running PowerFlow…</span></button><button class=\"powerflow-submit diagnose-submit\" type=\"submit\" name=\"diagnose_mode\" value=\"true\" title=\"Diagnostic mode: evaluate the mismatch at the case's own stored VM/VA without a corrective Newton step and write the report to diagnose.log.\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">Diagnose</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Running diagnosis…</span></button><button class=\"powerflow-submit short-circuit-submit\" type=\"submit\" name=\"short_circuit_mode\" value=\"true\" data-short-circuit-button data-sc-state=\"$(sc_state)\"$(sc_disabled_attr) title=\"$(_webui_escape(sc_title))\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">Short circuit</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Computing short circuit…</span></button><label class=\"contingency-kind\">N-1 kind <select name=\"contingency_kind\" data-contingency-kind><option value=\"branch\">branch</option><option value=\"gen\">generator</option></select></label><label class=\"scenario-source\" title=\"Where the outage or scenario list comes from: generated N-1 lists, or the SCF case file's own scenarios block.\">Scenarios <select name=\"scenario_source\" data-scenario-source><option value=\"\">generated (N-1 kind)</option><option value=\"n1_all\">N-1 all</option><option value=\"n1_branches\">N-1 branches</option><option value=\"n1_generators\">N-1 generators</option>$(scen_fileblock_option)</select></label><label class=\"screening-mode\" title=\"Contingency screening on the base factorization: off (default) runs every scenario fully, flag solves only flagged scenarios fully, only reports estimates.\">Screening <select name=\"screening_mode\" data-screening-mode><option value=\"\">configured</option><option value=\"off\">off</option><option value=\"flag\">flag</option><option value=\"only\">only</option></select></label><label class=\"screening-margin\" title=\"Margin in percent (empty means configured, default 10): flag when an estimated loading reaches 100 minus margin or a voltage comes within margin of a limit.\">Margin % <input name=\"screening_margin_pct\" type=\"number\" step=\"any\" min=\"0\" class=\"screening-margin-input\" placeholder=\"cfg\"></label>$(scen_editor_html)<a class=\"weights-link\" href=\"/powerflow/contingency-weights?case=$(_webui_urlencode(selected_casefile))\" title=\"Upload or edit the per-case N-1 weight list\">edit N-1 weights</a><button class=\"powerflow-submit contingency-submit\" type=\"submit\" name=\"contingency_mode\" value=\"true\" data-contingency-button title=\"N-1 analysis: take each in-service branch or generator out one at a time and report convergence, overloads, voltage violations, load shed and severity.\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">Contingency (N-1)</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Running N-1...</span></button></div></form>
+<div class=\"span-2 actions\"><button class=\"powerflow-submit\" type=\"submit\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">Start PowerFlow run</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Running PowerFlow…</span></button><button class=\"powerflow-submit diagnose-submit\" type=\"submit\" name=\"diagnose_mode\" value=\"true\" title=\"Diagnostic mode: evaluate the mismatch at the case's own stored VM/VA without a corrective Newton step and write the report to diagnose.log.\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">Diagnose</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Running diagnosis…</span></button><button class=\"powerflow-submit short-circuit-submit\" type=\"submit\" name=\"short_circuit_mode\" value=\"true\" data-short-circuit-button data-sc-state=\"$(sc_state)\"$(sc_disabled_attr) title=\"$(_webui_escape(sc_title))\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">Short circuit</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Computing short circuit…</span></button><label class=\"contingency-kind\">N-1 kind <select name=\"contingency_kind\" data-contingency-kind><option value=\"branch\">branch</option><option value=\"gen\">generator</option></select></label><label class=\"scenario-source\" title=\"Which outages the N-1 run takes: the N-1 kind, or all branches, branches or generators.\">N-1 list <select name=\"scenario_source\" data-scenario-source><option value=\"\">generated (N-1 kind)</option><option value=\"n1_all\">N-1 all</option><option value=\"n1_branches\">N-1 branches</option><option value=\"n1_generators\">N-1 generators</option></select></label><label class=\"screening-mode\" title=\"Contingency screening on the base factorization: off (default) runs every scenario fully, flag solves only flagged scenarios fully, only reports estimates.\">Screening <select name=\"screening_mode\" data-screening-mode><option value=\"\">configured</option><option value=\"off\">off</option><option value=\"flag\">flag</option><option value=\"only\">only</option></select></label><label class=\"screening-margin\" title=\"Margin in percent (empty means configured, default 10): flag when an estimated loading reaches 100 minus margin or a voltage comes within margin of a limit.\">Margin % <input name=\"screening_margin_pct\" type=\"number\" step=\"any\" min=\"0\" class=\"screening-margin-input\" placeholder=\"cfg\"></label>$(scen_editor_html)<a class=\"weights-link\" href=\"/powerflow/contingency-weights?case=$(_webui_urlencode(selected_casefile))\" title=\"Upload or edit the per-case N-1 weight list\">edit N-1 weights</a><button class=\"powerflow-submit contingency-submit\" type=\"submit\" name=\"contingency_mode\" value=\"true\" data-contingency-button title=\"N-1 analysis: take each in-service branch or generator out one at a time and report convergence, overloads, voltage violations, load shed and severity.\"><span class=\"submit-spinner\" aria-hidden=\"true\"></span><span class=\"submit-label\">Contingency (N-1)</span><span class=\"submit-progress-label\" role=\"status\" aria-live=\"polite\">Running N-1...</span></button>$(qsts_html)$(scen_button_html)</div></form>
 <script>
 document.addEventListener('DOMContentLoaded', function () {
   const powerflowForm = document.getElementById('powerflow-run-form');
@@ -2341,7 +2590,13 @@ window.addEventListener('pageshow', function () {
   if (form === null) return;
   form.classList.remove('is-submitting');
   form.removeAttribute('aria-busy');
-  form.querySelectorAll('button[type=submit]').forEach(function (b) { b.disabled = false; });
+  // re-enable after a back navigation, except a button the server rendered
+  // disabled for this case: pageshow also fires on the first load, and
+  // re-enabled every button there (Short circuit on a case without
+  // short-circuit data, QSTS on a case without a series)
+  form.querySelectorAll('button[type=submit]').forEach(function (b) {
+    b.disabled = (b.hasAttribute('data-sc-state') && b.getAttribute('data-sc-state') !== 'ready') || b.getAttribute('data-qsts-state') === 'no-series';
+  });
   const staleSubmitterValue = form.querySelector('input[type="hidden"][data-submitter-value]');
   if (staleSubmitterValue !== null) staleSubmitterValue.remove();
 });
@@ -2358,7 +2613,7 @@ $(_WEBUI_INFO_MENU_SCRIPT)"""
   runs_case = basename(String(effective_case_value))
   scen_tab = ""
   if scen_is_scf && !isempty(runs_case)
-    scen_fragment = _webui_scenarios_editor_tab(runs_case, effective_case_directory)
+    scen_fragment = _webui_scenarios_editor_tab(runs_case, effective_case_directory; loaded = scen_loaded)
     isempty(scen_fragment) || (scen_tab = "<details class=\"editor-tab scenario-editor-tab\" id=\"scenario-editor\"><summary>Edit scenarios (case file)</summary>$(scen_fragment)</details>")
   end
   weights_tab = isempty(runs_case) ? "" : string(
@@ -2408,7 +2663,9 @@ const _WEBUI_RESULT_FIELDS = String[
   "Classical Q-limit outer-loop passes",
   "Final Q-limit check",
   "Q-V characteristic",
+  "Q-limit stability",
   "Runtime casefile",
+  "System frequency",
   "config_file",
   "started_at",
   "elapsed_seconds",
@@ -2448,6 +2705,18 @@ function _webui_result_value(result::AbstractDict, field::AbstractString)
     # setpoint means the point is non-physical, however the modes switched
     metadata = get(result, "metadata", Dict{String,Any}())
     line = get(metadata, "qv_characteristic_line", nothing)
+    return line isa AbstractString && !isempty(line) ? line : "n/a"
+  elseif field == "Q-limit stability"
+    # the line of run.log and the result print: the stability conditions
+    # (6)/(7) of Zhao et al. at every voltage-regulated bus, with the failing
+    # buses when there are any
+    metadata = get(result, "metadata", Dict{String,Any}())
+    line = get(metadata, "qlimit_stability_line", nothing)
+    return line isa AbstractString && !isempty(line) ? line : "n/a"
+  elseif field == "System frequency"
+    # the run.log line: the frequency with its source, or "not used" when
+    # the network was given in pu
+    line = get(get(result, "metadata", Dict{String,Any}()), "frequency_line", nothing)
     return line isa AbstractString && !isempty(line) ? line : "n/a"
   elseif field == "Runtime casefile"
     return get(result, "runtime_casefile", get(get(result, "metadata", Dict{String,Any}()), "runtime_casefile", "n/a"))
@@ -2546,9 +2815,12 @@ function _webui_wrong_branch_badge(result::AbstractDict)::Union{Nothing,String}
   return "<span class=\"status-badge $(css_class)\">$(_webui_escape(label))</span>"
 end
 
-# Short-circuit runs: compact summary from the run metadata. A flagged
-# Ik''max is a lower bound (skipped/defaulted contributions), so flags render
-# as a warning badge rather than plain text. Returns nothing for other runs.
+# Short-circuit runs: compact summary from the run metadata. Flagged rows
+# (defaulted or substituted data) and rows whose Ik''max is a lower bound (a
+# skipped source, `sc_lower_bound_rows`) render as warning badges rather
+# than plain text. The card starts with the head line of the headline case
+# (`sc_status_line_<case>`, the line printShortCircuitResult prints first:
+# run status, flagged rows, lower-bound rows). Returns nothing for other runs.
 function _webui_short_circuit_summary(result::AbstractDict)::Union{Nothing,String}
   metadata = get(result, "metadata", Dict{String,Any}())
   metadata isa AbstractDict || return nothing
@@ -2559,15 +2831,32 @@ function _webui_short_circuit_summary(result::AbstractDict)::Union{Nothing,Strin
   flagged = get(metadata, "sc_flagged_rows", 0)
   rows = get(metadata, "sc_case_rows", 0)
   text = string("worst Ik''max ", fmt(ik), " kA @ ", worst_bus, " (", rows, " buses)")
-  badge = flagged isa Real && flagged > 0 ? " <span class=\"status-badge status-warning\">$(flagged) flagged — lower bound</span>" : ""
+  lower = get(metadata, "sc_lower_bound_rows", 0)
+  badge = flagged isa Real && flagged > 0 ? " <span class=\"status-badge status-warning\">$(flagged) flagged</span>" : ""
+  lower isa Real && lower > 0 && (badge *= " <span class=\"status-badge status-warning\">$(lower) lower bound</span>")
   # a table without any short-circuit data of the file says so first
   get(metadata, "sc_defaults_only", false) === true && (badge = " <span class=\"status-badge status-warning\">no short-circuit data in the case: default x''d on every source</span>" * badge)
-  return "<code>" * _webui_escape(text) * "</code>" * badge
+  # a run written before the head line existed has no such key
+  status_line = string(get(metadata, "sc_status_line_" * string(get(metadata, "sc_case_selected", "max")), ""))
+  head = isempty(status_line) ? "" : "<code class=\"sc-status-line\">" * _webui_escape(status_line) * "</code><br>"
+  return head * "<code>" * _webui_escape(text) * "</code>" * badge
 end
 
 # N-1 contingency runs: one summary row with the outcome counts and the worst
 # loading. Names the slack-unit outage (a generator N-1 that removes the only
 # reference) so it does not read as a tool failure. Returns nothing otherwise.
+# the detail row of a result: the outaged elements when they are more than
+# the case name says, the overloaded branches and the buses outside the band
+function _webui_contingency_detail_row(r, ncols::Int)::String
+  parts = String[]
+  elements = split(String(r.elements), '|'; keepempty = false)
+  (length(elements) > 1 || (length(elements) == 1 && elements[1] != r.name)) && push!(parts, "out: " * join(elements, ", "))
+  isempty(r.overloads) || push!(parts, "overloaded: " * replace(String(r.overloads), "," => ", "))
+  isempty(r.violations) || push!(parts, "voltage band: " * replace(String(r.violations), "," => ", "))
+  isempty(parts) && return ""
+  return "<tr class=\"n1-detail\"><td></td><td colspan=\"$(ncols - 1)\">$(_webui_escape(join(parts, "; ")))</td></tr>"
+end
+
 function _webui_contingency_summary(result::AbstractDict)::Union{Nothing,String}
   metadata = get(result, "metadata", Dict{String,Any}())
   metadata isa AbstractDict || return nothing
@@ -2591,8 +2880,13 @@ function _webui_contingency_summary(result::AbstractDict)::Union{Nothing,String}
   n_screened = get(metadata, "contingency_screened", 0)
   screen_note = n_screened isa Real && n_screened > 0 ? string(", ", n_screened, " screened (estimates)") : ""
   source = string(get(metadata, "contingency_cases_source", ""))
-  source_note = isempty(source) || source == "generated" ? "" : string(", source ", source)
-  text = string(kind, " N-1: ", conv, "/", n, " converged, ", isl, " islanded (", fmt(shed), " MW shed), worst loading ", fmt(worst), "%", weight_note, screen_note, source_note)
+  source_note = (isempty(source) || source == "generated" || source == "scenario_file_block") ? "" : string(", source ", source)
+  # correlated events and pairs (#355) are counted next to the single outages
+  by_kind = get(metadata, "contingency_cases_by_kind", Dict{String,Any}())
+  n_events = by_kind isa AbstractDict ? sum((v for (k, v) in by_kind if Symbol(k) in (CONTINGENCY_EVENT_KINDS..., :pair) && v isa Real); init = 0) : 0
+  event_note = n_events > 0 ? string(", ", n_events, " correlated event", n_events == 1 ? "" : "s") : ""
+  head = source == "scenario_file_block" ? "Scenarios" : string(kind, " N-1")
+  text = string(head, ": ", conv, "/", n, " converged, ", isl, " islanded (", fmt(shed), " MW shed), worst loading ", fmt(worst), "%", event_note, weight_note, screen_note, source_note)
   badge = ""
   if nonconv isa Real && nonconv > 0
     label = no_slack isa Real && no_slack > 0 ? "$(nonconv) non-converged incl. $(no_slack) that removed the only slack with no unit left to take over" : "$(nonconv) non-converged"
@@ -2779,7 +3073,7 @@ function _webui_import_analysis_summary(result::AbstractDict)::Union{Nothing,Str
   verdict = string(get(metadata, "import_analysis_verdict", ""))
   not_importable = string(get(result, "reason", "")) == "import_analysis_not_importable"
   badge = if not_importable
-    "<span class=\"status-badge status-error\">not importable — $(missing_deps) missing dependency(ies) · $(unresolved) unresolved reference(s)</span>"
+    "<span class=\"status-badge status-error\">not importable: $(missing_deps) missing dependency(ies) · $(unresolved) unresolved reference(s)</span>"
   elseif unresolved isa Real && unresolved > 0
     "<span class=\"status-badge status-warning\">importable · $(unresolved) non-fatal unresolved reference(s)</span>"
   else
@@ -2808,14 +3102,14 @@ function _webui_cgmes_export_summary(result::AbstractDict)::Union{Nothing,String
     badge = isempty(notices) ? "" : " <span class=\"status-badge status-warning\">$(_webui_escape(notices))</span>"
     return "<code>" * _webui_escape(text) * "</code>" * badge
   elseif status == "skipped"
-    return "<span class=\"status-badge status-warning\">skipped — $(_webui_escape(string(get(metadata, "cgmes_export_skip_reason", ""))))</span>"
+    return "<span class=\"status-badge status-warning\">skipped: $(_webui_escape(string(get(metadata, "cgmes_export_skip_reason", ""))))</span>"
   else
-    return "<span class=\"status-badge status-error\">failed — $(_webui_escape(string(get(metadata, "cgmes_export_error", ""))))</span>"
+    return "<span class=\"status-badge status-error\">failed: $(_webui_escape(string(get(metadata, "cgmes_export_error", ""))))</span>"
   end
 end
 
 # CGMES runs: compact SV-comparison summary from the run metadata (written by
-# the mandatory compareWithSV check). Returns nothing for non-CGMES runs —
+# the mandatory compareWithSV check). Returns nothing for non-CGMES runs,
 # the metadata keys only exist on the CGMES path.
 function _webui_sv_compare_summary(result::AbstractDict)::Union{Nothing,String}
   metadata = get(result, "metadata", Dict{String,Any}())
@@ -2849,8 +3143,12 @@ function _webui_result_page_title(result::AbstractDict)::String
   mode == "se" && return "State estimation result"
   mode == "powerflow_se_start" && return "PowerFlow result (started from a state estimate)"
   mode == "short_circuit" && return "Short-circuit result"
-  mode == "contingency" && return "N-1 contingency result"
+  # a run of the case file's scenarios block (the Scenarios button) is no N-1
+  if mode == "contingency"
+    return string(get(metadata, "contingency_cases_source", "")) == "scenario_file_block" ? "Scenarios result" : "N-1 contingency result"
+  end
   mode == "import_analysis" && return "Import analysis result"
+  mode == "qsts" && return "QSTS result"
   mode == "diagnose" && return "Diagnostic result"
   return "PowerFlow result"
 end
@@ -2883,9 +3181,9 @@ function _webui_batch_progress_card(result::AbstractDict)
   total = get(result, "progress_total", nothing)
   done = get(result, "progress_done", nothing)
   (total isa Integer && done isa Integer && total > 0) || return nothing
-  scenarios = get(result, "progress_unit", "outages") == "scenarios"
-  label = scenarios ? "Scenarios done" : "Outages done"
-  text = scenarios ? "Scenarios: $(done) / $(total) scenarios" : "N-1: $(done) / $(total) outages"
+  unit = get(result, "progress_unit", "outages")
+  label = unit == "steps" ? "Steps done" : unit == "scenarios" ? "Scenarios done" : "Outages done"
+  text = unit == "steps" ? "QSTS: $(done) / $(total) steps" : unit == "scenarios" ? "Scenarios: $(done) / $(total) scenarios" : "N-1: $(done) / $(total) outages"
   return (label, "<strong id=\"batch-progress\" data-progress-done=\"$(done)\" data-progress-total=\"$(total)\">$(_webui_escape(text))</strong>")
 end
 
@@ -2941,6 +3239,8 @@ function render_powerflow_result(result::AbstractDict)::String
     ia_summary === nothing || push!(base, ("Import analysis", ia_summary))
     contingency_summary = _webui_contingency_summary(result)
     contingency_summary === nothing || push!(base, ("Contingency (N-1)", contingency_summary))
+    qsts_summary = _webui_qsts_summary(result)
+    qsts_summary === nothing || push!(base, ("QSTS", qsts_summary))
     cgmes_export_summary = _webui_cgmes_export_summary(result)
     cgmes_export_summary === nothing || push!(base, ("CGMES export", cgmes_export_summary))
     auto_summary = _webui_auto_mode_summary(result)
@@ -2965,12 +3265,12 @@ function render_powerflow_result(result::AbstractDict)::String
     status in ("aborted_unknown", "interrupted_unknown") ?
     "<div class=\"alert warning\"><p>Run state was recovered after Web UI restart.</p><p>Last known phase: <code>$(_webui_escape(get(result, "last_phase", get(result, "current_phase", "unknown"))))</code>.</p><p>No live solver task is attached anymore. Partial artifacts may be available.</p></div>" :
     ""
-  # bad data must be findable in one click: a direct download when the run
-  # produced the se_bad_data.csv extract (suspicious/eliminated rows with
-  # their network locations)
+  # bad data must be findable in one click: a direct download of the
+  # verdict per measurement row of an SE run (residual, normalized
+  # residual, eliminated, reason)
   bad_data_link = begin
     od = String(get(result, "output_dir", ""))
-    !isempty(od) && isfile(joinpath(od, "se_bad_data.csv")) ? "<a class=\"button\" href=\"/powerflow/artifact/$(_webui_urlencode(run_id))/se_bad_data.csv\">Bad data (se_bad_data.csv)</a>" : ""
+    !isempty(od) && isfile(joinpath(od, "measurements_verdict.csv")) ? "<a class=\"button\" href=\"/powerflow/artifact/$(_webui_urlencode(run_id))/measurements_verdict.csv\">Verdict per measurement (measurements_verdict.csv)</a>" : ""
   end
   links =
     isempty(String(run_id)) ? "" :
@@ -2978,9 +3278,11 @@ function render_powerflow_result(result::AbstractDict)::String
   refresh_url = active && !isempty(String(run_id)) ? "/powerflow/result/$(_webui_urlencode(run_id))?autorefresh=1" : nothing
   save_section = active ? "" : _webui_case_settings_save_section(result)
   se_tap_section = active ? "" : _webui_se_tap_section(result)
+  se_sigma_section = active ? "" : _webui_se_sigma_level_section(result)
   se_topology_section = active ? "" : _webui_se_topology_section(result)
   se_chain_section = active ? "" : _webui_se_chain_section(result)
   n1_table_section = active ? "" : _webui_contingency_table_section(result)
+  qsts_section = active ? "" : _webui_qsts_section(result)
   metadata = get(result, "metadata", Dict{String,Any}())
   override_source = String(get(result, "config_override_source", get(metadata, "config_override_source", "")))
   runtime_notice = override_source == "user_yaml" ? "<div class=\"alert warning\"><strong>Web UI settings ignored.</strong> This run used YAML/default configuration values because the run was submitted with Web UI settings ignored.</div>" : ""
@@ -2988,7 +3290,7 @@ function render_powerflow_result(result::AbstractDict)::String
   # reads like a crashed power flow, and the residual it measured (which IS
   # the answer) looks like the symptom of one.
   diagnose_probe && (runtime_notice *= "<div class=\"alert info\"><strong>This is a diagnosis, not a solve.</strong> The self-check takes exactly one step from the case's own stored voltages (<code>max_iter = 1</code>, no rescue, Q-limit handling off), so a remaining residual is the RESULT and not a failure. The numbers below therefore show one iteration and a non-zero mismatch by design; <code>diagnose.log</code> names the worst bus and what to do about it.</div>")
-  return _webui_layout(_webui_result_page_title(result), "<section class=\"panel\">$(result_summary)$(runtime_notice)<table class=\"details\">$(rows)</table>$(active_hint)$(links)$(se_chain_section)</section>$(n1_table_section)$(se_tap_section)$(se_topology_section)$(save_section)"; show_back = true, refresh_url)
+  return _webui_layout(_webui_result_page_title(result), "<section class=\"panel\">$(result_summary)$(runtime_notice)<table class=\"details\">$(rows)</table>$(active_hint)$(links)$(se_chain_section)</section>$(n1_table_section)$(qsts_section)$(se_tap_section)$(se_sigma_section)$(se_topology_section)$(save_section)"; show_back = true, refresh_url)
 end
 
 # N-1 / scenario result table on the run result page: the browser must show WHICH case was
@@ -3023,7 +3325,9 @@ function _webui_contingency_table_section(result::AbstractDict)::String
   for row in table.rows
     sev = parsenum(get(row, "severity", ""))
     push!(rows, (
-      name = get(row, "name", ""), weight = get(row, "weight", ""), converged = get(row, "converged", "") == "true",
+      name = get(row, "name", ""), kind = get(row, "kind", ""), elements = get(row, "elements", ""),
+      overloads = get(row, "overloads", ""), violations = get(row, "voltage_violations", ""),
+      weight = get(row, "weight", ""), converged = get(row, "converged", "") == "true",
       iterations = get(row, "iterations", ""), start_used = get(row, "start_used", ""),
       min_vm = get(row, "min_vm_pu", ""), max_vm = get(row, "max_vm_pu", ""), max_loading = get(row, "max_branch_loading_pct", ""),
       severity = sev === nothing ? NaN : sev,
@@ -3040,7 +3344,7 @@ function _webui_contingency_table_section(result::AbstractDict)::String
     v = parsenum(s)
     v === nothing ? esc(s) : (isnan(v) ? "-" : string(round(v; digits = 4)))
   end
-  ncols = 11 + (has_screening ? 1 : 0)
+  ncols = 12 + (has_screening ? 1 : 0)
   body = join((begin
     detail = if !isempty(r.estimate)
       est = split(r.estimate, '|')
@@ -3052,12 +3356,13 @@ function _webui_contingency_table_section(result::AbstractDict)::String
     end
     string(
       "<tr class=\"", r.converged ? "n1-row" : "n1-row n1-failed", "\">",
-      "<td>$(esc(r.name))</td><td>$(fmtnum(r.weight))</td><td>$(r.converged ? "yes" : "NO")</td><td>$(esc(r.iterations))</td><td>$(esc(r.start_used))</td>",
+      "<td>$(esc(r.name))</td><td>$(esc(r.kind))</td><td>$(fmtnum(r.weight))</td><td>$(r.converged ? "yes" : "NO")</td><td>$(esc(r.iterations))</td><td>$(esc(r.start_used))</td>",
       "<td>$(fmtnum(r.min_vm))</td><td>$(fmtnum(r.max_vm))</td><td>$(fmtnum(r.max_loading))</td><td>$(fmtnum(string(r.severity)))</td>",
       "<td>$(esc(r.island_count))</td><td>$(fmtnum(r.shed))</td>",
       has_screening ? "<td class=\"n1-screened\">$(r.screened ? "yes" : "")</td>" : "",
       isempty(r.error) ? "" : "</tr><tr class=\"n1-detail n1-error\"><td></td><td colspan=\"$(ncols - 1)\">$(esc(r.error))</td>",
       "</tr>",
+      _webui_contingency_detail_row(r, ncols),
       detail,
     )
   end for r in shown), "")
@@ -3065,13 +3370,148 @@ function _webui_contingency_table_section(result::AbstractDict)::String
   csv_link = isempty(run_id) ? "contingency_n1.csv" : "<a href=\"/powerflow/artifact/$(_webui_urlencode(run_id))/contingency_n1.csv\">contingency_n1.csv</a>"
   cap_note = length(rows) > length(shown) ? " Showing the $(length(shown)) worst of $(length(rows)) rows;" : ""
   header_cells = string(
-    "<th>case</th><th>weight</th><th>converged</th><th>iter</th><th>start</th><th>Vmin [pu]</th><th>Vmax [pu]</th><th>loading [%]</th><th>severity</th><th>islands</th><th>shed [MW]</th>",
+    "<th>case</th><th>kind</th><th>weight</th><th>converged</th><th>iter</th><th>start</th><th>Vmin [pu]</th><th>Vmax [pu]</th><th>loading [%]</th><th>severity</th><th>islands</th><th>shed [MW]</th>",
     has_screening ? "<th>screened</th>" : "",
   )
   return string(
-    "<section class=\"panel n1-result-table\"><h2>N-1 / scenario results</h2>",
+    "<section class=\"panel n1-result-table\"><h2>", string(get(metadata, "contingency_cases_source", "")) == "scenario_file_block" ? "Scenario results" : "N-1 results", "</h2>",
     "<p>Rows ranked by severity, failures first.$(cap_note) the complete list in input order is the CSV artifact $(csv_link).</p>",
     "<div class=\"table-scroll\"><table><thead><tr>", header_cells, "</tr></thead><tbody>", body, "</tbody></table></div></section>",
+  )
+end
+
+# a count or an energy of the QSTS metadata as text
+_webui_qsts_num(x) = x isa Real ? (isinteger(x) ? string(Int(x)) : string(round(Float64(x); sigdigits = 4))) : "n/a"
+
+# The summary row of a QSTS run on the result page: mode, solved and failed
+# steps, switches and hunting (sequential only), steps with a violation and
+# the loss energy, from the metadata the service wrote.
+function _webui_qsts_summary(result::AbstractDict)::Union{Nothing,String}
+  metadata = get(result, "metadata", Dict{String,Any}())
+  metadata isa AbstractDict || return nothing
+  get(metadata, "run_mode", "") == "qsts" || return nothing
+  haskey(metadata, "qsts_steps") || return nothing
+  mode = string(get(metadata, "qsts_mode", ""))
+  parts = String[string(mode, ": ", _webui_qsts_num(get(metadata, "qsts_solved", nothing)), "/", _webui_qsts_num(get(metadata, "qsts_steps", nothing)), " steps solved, ",
+                        _webui_qsts_num(get(metadata, "qsts_failed", nothing)), " failed")]
+  if mode == "sequential"
+    push!(parts, string(_webui_qsts_num(get(metadata, "qsts_switch_total", nothing)), " switches"))
+    push!(parts, string(_webui_qsts_num(get(metadata, "qsts_hunting_total", nothing)), " hunting"))
+  end
+  push!(parts, string(_webui_qsts_num(get(metadata, "qsts_violation_steps", nothing)), " steps with violations"))
+  loss = get(metadata, "qsts_loss_energy_mwh", nothing)
+  push!(parts, loss isa Real ? string("loss energy ", _webui_qsts_num(loss), " MWh") : "loss energy n/a")
+  failed = get(metadata, "qsts_failed", 0)
+  badge = failed isa Real && failed > 0 ? " <span class=\"status-badge status-warning\">$(Int(failed)) failed step(s)</span>" : ""
+  return "<code>" * _webui_escape(join(parts, ", ")) * "</code>" * badge
+end
+
+# The QSTS section of the result page: switch counts and hunting per
+# controller, the notes, the time series chart with element and quantity
+# choice, and the result files. The chart data is the element view
+# qsts_view.json of the run (written by the service); the charts are drawn
+# by the renderer of qstsChart, inline so the point tooltips work.
+function _webui_qsts_section(result::AbstractDict)::String
+  metadata = get(result, "metadata", Dict{String,Any}())
+  metadata isa AbstractDict || return ""
+  get(metadata, "run_mode", "") == "qsts" || return ""
+  od = String(get(result, "output_dir", ""))
+  run_id = String(get(result, "run_id", ""))
+  view_path = isempty(od) ? "" : joinpath(od, _QSTS_VIEW_FILE)
+  isfile(view_path) || return ""
+  esc = _webui_escape
+  view = try
+    scf_json_parse(read(view_path, String))
+  catch err
+    # the reader names a broken file with an ArgumentError (byte position)
+    err isa ArgumentError || rethrow()
+    return "<section class=\"panel qsts-result\"><h2>QSTS</h2><p class=\"alert warning\">$(esc(_QSTS_VIEW_FILE)) could not be read: $(esc(sprint(showerror, err)))</p></section>"
+  end
+  # controllers in the order of the run: switch counts and hunting
+  switches = get(metadata, "qsts_switch_counts", Dict{String,Any}())
+  hunting = get(metadata, "qsts_hunting", Dict{String,Any}())
+  ctl_rows = join(("<tr><td>$(esc(string(el["name"])))</td><td><code>$(esc(string(el["id"])))</code></td><td>$(_webui_qsts_num(get(switches, string(el["id"]), nothing)))</td><td>$(_webui_qsts_num(get(hunting, string(el["id"]), nothing)))</td></tr>"
+                   for el in view["elements"] if el["kind"] == "controller"), "")
+  ctl_html = isempty(ctl_rows) ? "<p>No tap or bank controller in this run.</p>" :
+    "<table><thead><tr><th>controller</th><th>id</th><th>switches</th><th>hunting</th></tr></thead><tbody>$(ctl_rows)</tbody></table>"
+  string(get(metadata, "qsts_mode", "")) == "snapshots" && (ctl_html *= "<p>A snapshot run solves every step on its own; it counts no switching.</p>")
+  control_file = string(get(metadata, "qsts_control_file", ""))
+  # a run written before the key existed counts as one with controllers
+  controls_used = get(metadata, "qsts_controls_used", true) !== false
+  control_html = if !controls_used
+    what = isempty(control_file) ? "The controllers of the case file" : "The controllers of <code>$(esc(control_file))</code>"
+    "<p>$(what) are not used: a snapshot run without <code>qsts.snapshot_controls</code> runs without controllers.</p>"
+  elseif isempty(control_file)
+    "<p>No companion control file; the controllers of the case file only.</p>"
+  else
+    "<p>Controllers from <code>$(esc(control_file))</code>.</p>"
+  end
+  notes = get(metadata, "qsts_notes", Any[])
+  notes_html = notes isa AbstractVector && !isempty(notes) ? "<h3>Notes</h3><ul>" * join(("<li>$(esc(string(n)))</li>" for n in notes), "") * "</ul>" : ""
+  # the chart: element and quantity choice, the default charts inline
+  defaults = get(metadata, "qsts_default_charts", Any[])
+  first_chart = defaults isa AbstractVector && !isempty(defaults) ? defaults[1] : nothing
+  sel_element = first_chart === nothing ? "" : string(first_chart[1])
+  sel_quantity = first_chart === nothing ? "" : string(first_chart[2])
+  element_label(el) = begin
+    id = string(el["id"])
+    isempty(id) ? "run (step quantities)" : string(el["kind"], ": ", el["name"], el["name"] == id ? "" : string(" (", id, ")"))
+  end
+  options = join((begin
+    qs = String[string(q) for q in el["quantities"]]
+    "<option value=\"$(esc(string(el["id"])))\" data-quantities=\"$(esc(join(qs, ",")))\"$(string(el["id"]) == sel_element ? " selected" : "")>$(esc(element_label(el)))</option>"
+  end for el in view["elements"] if !isempty(el["quantities"])), "")
+  sel_idx = findfirst(el -> string(el["id"]) == sel_element, view["elements"])
+  sel_quantities = sel_idx === nothing ? String[] : String[string(q) for q in view["elements"][sel_idx]["quantities"]]
+  q_options = join(("<option value=\"$(esc(q))\"$(q == sel_quantity ? " selected" : "")>$(esc(q))</option>" for q in sel_quantities), "")
+  charts = String[]
+  for d in (defaults isa AbstractVector ? defaults : Any[])
+    svg = _qsts_view_chart_svg(view, string(d[1]), string(d[2]))
+    svg === nothing || push!(charts, svg)
+  end
+  chart_route = "/powerflow/result/$(_webui_urlencode(run_id))/qsts-chart"
+  form_html = "<form class=\"qsts-chart-form\" method=\"get\" action=\"$(esc(chart_route))\" data-qsts-chart-form><label>Element <select name=\"element\" data-qsts-element>$(options)</select></label> <label>Quantity <select name=\"quantity\" data-qsts-quantity>$(q_options)</select></label> <button type=\"submit\">Show</button></form>"
+  chart_html = "<div class=\"qsts-chart\" data-qsts-chart>$(join(charts, ""))</div>"
+  # the result files: the CSV files open in the CSV view
+  files = String["qsts_values.csv", "qsts_steps.csv", "qsts_elements.csv", "qsts_switching.csv", "qsts_metrics.csv", "qsts_manifest.json", _QSTS_OVERVIEW_FILE, _QSTS_VIEW_FILE]
+  file_links = join(("<li><a href=\"/powerflow/artifact/$(_webui_urlencode(run_id))/$(_webui_urlencode(f))\">$(esc(f))</a></li>" for f in files if isfile(joinpath(od, f))), "")
+  n_plots = get(metadata, "qsts_plots", 0)
+  plots_link = "<li><a href=\"/powerflow/artifacts/$(_webui_urlencode(run_id))\">$(_webui_qsts_num(n_plots)) charts in $(esc(_QSTS_PLOT_DIR))/</a> (one per element with its main quantity)</li>"
+  script = """
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  const form = document.querySelector('[data-qsts-chart-form]');
+  if (form === null) return;
+  const element = form.querySelector('[data-qsts-element]');
+  const quantity = form.querySelector('[data-qsts-quantity]');
+  const chart = document.querySelector('[data-qsts-chart]');
+  // the quantity list follows the element: each option names its quantities
+  element.addEventListener('change', function () {
+    const option = element.options[element.selectedIndex];
+    const names = (option.getAttribute('data-quantities') || '').split(',').filter(function (q) { return q !== ''; });
+    quantity.innerHTML = '';
+    names.forEach(function (q) {
+      const o = document.createElement('option');
+      o.value = q;
+      o.textContent = q;
+      quantity.appendChild(o);
+    });
+  });
+  // the chart arrives as SVG text from the chart route and replaces the
+  // shown charts; without script the form opens the SVG itself
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    const url = form.getAttribute('action') + '?element=' + encodeURIComponent(element.value) + '&quantity=' + encodeURIComponent(quantity.value);
+    fetch(url).then(function (response) { return response.text(); }).then(function (text) { chart.innerHTML = text; });
+  });
+});
+</script>"""
+  return string(
+    "<section class=\"panel qsts-result\"><h2>QSTS: ", esc(string(get(metadata, "qsts_series", ""))), "</h2>",
+    control_html, ctl_html, notes_html,
+    "<h3>Time series</h3>", form_html, chart_html,
+    "<h3>Files</h3><ul class=\"qsts-files\">", file_links, plots_link, "</ul>",
+    script, "</section>",
   )
 end
 
@@ -3084,6 +3524,8 @@ function render_powerflow_artifacts(run_id::AbstractString, artifacts)::String
       begin
         name = get(artifact, "name", "")
         href = "/powerflow/artifact/$(_webui_urlencode(run_id))/$(_webui_urlencode(name))"
+        # a chart opens inside a Web UI page (Back, Download), not as a bare SVG without navigation
+        get(artifact, "mime_type", "") == "image/svg+xml" && (href *= "?page=1")
         "<tr><td><a href=\"$(href)\">$(_webui_escape(name))</a></td><td>$(_webui_escape(get(artifact, "kind", "")))</td><td>$(_webui_escape(get(artifact, "mime_type", "")))</td><td>$(_webui_escape(get(artifact, "size_bytes", "")))</td><td>$(_webui_escape(get(artifact, "description", "")))</td></tr>"
       end for artifact in artifacts
     ),
@@ -3103,16 +3545,508 @@ const _WEBUI_ARTIFACT_TABLE_ROWS = 2000
 # Only used to right-align the column, so a false positive costs nothing.
 const _WEBUI_CSV_NUMBER_PATTERN = r"^[-+]?\d[\d.,]*([eE][-+]?\d+)?$"
 
+# The number display of the CSV table: significant digits for every
+# numeric column, and for power columns optionally a resolution in W, kW or
+# MW. Display only: the file, Download and Raw text stay as written.
+const _WEBUI_CSV_DEFAULT_DIGITS = 5
+const _WEBUI_CSV_MAX_DIGITS = 15
+# resolution => factor from the MW-based unit of the file
+const _WEBUI_CSV_POWER_FACTORS = Dict("W" => 1.0e6, "kW" => 1.0e3, "MW" => 1.0)
+# unit token of a power column => the unit names per resolution
+const _WEBUI_CSV_POWER_UNITS = Dict(
+  "mw" => Dict("W" => "W", "kW" => "kW", "MW" => "MW"),
+  "mvar" => Dict("W" => "var", "kW" => "kvar", "MW" => "Mvar"),
+  "mva" => Dict("W" => "VA", "kW" => "kVA", "MW" => "MVA"),
+)
+# A cell the display may rewrite: the number pattern of the file's own format
+# with thousands separators only in groups of three. `_parse_result_csv_number`
+# strips separators blindly ("1.5" in a semicolon file reads 15); a cell that
+# does not fit here stays verbatim instead of showing a wrong value.
+const _WEBUI_CSV_STRICT_NUMBER = Dict(
+  ';' => r"^[-+]?(\d{1,3}(\.\d{3})+|\d+)(,\d+)?([eE][-+]?\d+)?$",
+  ',' => r"^[-+]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?([eE][-+]?\d+)?$",
+)
+
+# The spreadsheet functions of the CSV table that need no server round trip:
+# column width (drag the right edge of a header cell, double click for the
+# natural width), hiding columns (button in the header or the Columns list),
+# hiding rows (row checkboxes, Hide selected rows) and the row filter (rows
+# that contain a text, ignoring case, in any cell). Sorting and the number
+# display stay on the server, so a reload has to keep the choice:
+#   - hidden columns travel as `hide=` in the query; the script writes it into
+#     the address, the sort links, the Raw text link and the Apply form;
+#   - hidden rows and the filter text are kept per page in sessionStorage
+#     (this tab only), keyed by the row number of the file;
+#   - column widths are kept in localStorage per artifact name and column
+#     count, so the same file of another run opens with the same widths.
+# Storage is a convenience: where the browser refuses it (storage disabled,
+# quota, a corrupt entry) the table opens in its default layout.
+const _WEBUI_CSV_GRID_SCRIPT = raw"""<script>
+(function () {
+  var table = document.querySelector('table.csv-grid');
+  if (table === null) return;
+  var styleEl = document.querySelector('style[data-csv-grid-style]');
+  var toolbar = document.querySelector('.csv-toolbar');
+  var heads = Array.prototype.slice.call(table.tHead.rows[0].cells);
+  var rows = Array.prototype.slice.call(table.tBodies[0].rows);
+  var ncols = heads.length - 1;
+  var MIN_WIDTH = 32;
+  // pixels the pointer moves on a grip before it counts as a drag
+  var DRAG_PX = 4;
+  var widthKey = 'sparlectra-csv-widths:' + (table.getAttribute('data-csv-name') || '') + ':' + ncols;
+  var rowKey = 'sparlectra-csv-rows:' + location.pathname;
+  var hidden = {};
+  var widths = {};
+  var hiddenRows = {};
+  (new URLSearchParams(location.search).get('hide') || '').split(',').forEach(function (s) {
+    var j = parseInt(s, 10);
+    if (j >= 1 && j <= ncols) hidden[j] = true;
+  });
+  // the storage object and getItem throw where storage is disabled,
+  // JSON.parse on a corrupt entry
+  var load = function (store, key) {
+    try { return JSON.parse(window[store].getItem(key) || 'null'); } catch (e) { return null; }
+  };
+  // setItem throws where storage is disabled or full
+  var save = function (store, key, value) {
+    try { window[store].setItem(key, JSON.stringify(value)); } catch (e) { }
+  };
+  widths = load('localStorage', widthKey) || {};
+  var hideList = function () {
+    return Object.keys(hidden).map(Number).sort(function (a, b) { return a - b; }).join(',');
+  };
+  // the same rule the server writes for the hidden columns of the query
+  var hiddenCss = function () {
+    return Object.keys(hidden).map(function (j) {
+      var n = Number(j) + 1;
+      return '.csv-grid th:nth-child(' + n + '),.csv-grid td:nth-child(' + n + '){display:none}';
+    }).join('');
+  };
+  // Column widths: without a set width the table keeps its automatic layout.
+  // With one, every shown column gets a fixed width (the set one, else its
+  // natural width measured in the automatic layout), so a column can also
+  // get narrower than its content.
+  // offsetWidth rounds down; a column that just fits its widest cell then
+  // cuts that cell by a fraction of a pixel, so the exact width rounded up
+  var naturalWidth = function (th) {
+    return Math.ceil(th.getBoundingClientRect().width);
+  };
+  var layout = function () {
+    styleEl.textContent = hiddenCss();
+    heads.forEach(function (th) { th.style.width = ''; });
+    table.classList.remove('csv-fixed');
+    table.style.width = '';
+    if (Object.keys(widths).length === 0) return;
+    var natural = {};
+    heads.forEach(function (th, j) {
+      if (!(j in widths) && !hidden[j]) natural[j] = naturalWidth(th);
+    });
+    var total = 0;
+    heads.forEach(function (th, j) {
+      if (hidden[j]) return;
+      var w = (j in widths) ? widths[j] : natural[j];
+      th.style.width = w + 'px';
+      total += w;
+    });
+    table.style.width = total + 'px';
+    table.classList.add('csv-fixed');
+  };
+  var setParam = function (url, list) {
+    if (list) url.searchParams.set('hide', list); else url.searchParams.delete('hide');
+    return url;
+  };
+  var syncColumns = function () {
+    var list = hideList();
+    toolbar.querySelectorAll('input[data-csv-col]').forEach(function (box) {
+      box.checked = !hidden[box.getAttribute('data-csv-col')];
+    });
+    var n = Object.keys(hidden).length;
+    toolbar.querySelector('[data-csv-hidden-count]').textContent = n ? ' (' + n + ' hidden)' : '';
+    document.querySelectorAll('a[data-csv-keep]').forEach(function (a) {
+      a.href = setParam(new URL(a.href), list).href;
+    });
+    var input = document.querySelector('input[data-csv-hide-input]');
+    if (input !== null) {
+      input.value = list;
+      input.disabled = !list;
+    }
+    // replaceState throws on a page opened from a file (opaque origin);
+    // the links above still carry the choice
+    try { history.replaceState(null, '', setParam(new URL(location.href), list).href); } catch (e) { }
+    layout();
+  };
+  heads.forEach(function (th, j) {
+    if (j === 0) {
+      var all = document.createElement('input');
+      all.type = 'checkbox';
+      all.title = 'Select all shown rows';
+      all.setAttribute('data-csv-select-all', '');
+      all.addEventListener('change', function () {
+        rows.forEach(function (tr) {
+          if (!tr.classList.contains('csv-row-hidden')) tr.cells[0].firstChild.checked = all.checked;
+        });
+      });
+      th.appendChild(all);
+    } else {
+      var hide = document.createElement('button');
+      hide.type = 'button';
+      hide.className = 'csv-hide-col';
+      hide.title = 'Hide column';
+      hide.textContent = '×';
+      hide.addEventListener('click', function () {
+        hidden[j] = true;
+        syncColumns();
+      });
+      th.appendChild(hide);
+    }
+    var grip = document.createElement('span');
+    grip.className = 'csv-resize';
+    grip.title = 'Drag to resize; double click for the natural width';
+    grip.addEventListener('pointerdown', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var startX = event.clientX;
+      var startWidth = 0;
+      var startTotal = 0;
+      // A click without a move changes nothing and stores nothing: the fixed
+      // layout and the stored width start with the first move of DRAG_PX.
+      // A plain click used to fix the layout and store the width, and later
+      // views of the same file cut numbers.
+      var dragging = false;
+      // the move and the release are followed on the whole document, so the
+      // drag goes on when the pointer leaves the narrow handle; no text
+      // selection while dragging
+      document.body.style.userSelect = 'none';
+      var move = function (e) {
+        if (!dragging) {
+          if (Math.abs(e.clientX - startX) < DRAG_PX) return;
+          dragging = true;
+          if (!table.classList.contains('csv-fixed')) {
+            widths[j] = naturalWidth(th);
+            layout();
+          }
+          startWidth = parseFloat(th.style.width);
+          startTotal = parseFloat(table.style.width);
+        }
+        var w = Math.max(MIN_WIDTH, Math.round(startWidth + e.clientX - startX));
+        widths[j] = w;
+        th.style.width = w + 'px';
+        table.style.width = (startTotal - startWidth + w) + 'px';
+      };
+      var up = function () {
+        document.body.style.userSelect = '';
+        document.removeEventListener('pointermove', move);
+        document.removeEventListener('pointerup', up);
+        document.removeEventListener('pointercancel', up);
+        if (dragging) save('localStorage', widthKey, widths);
+      };
+      document.addEventListener('pointermove', move);
+      document.addEventListener('pointerup', up);
+      document.addEventListener('pointercancel', up);
+    });
+    grip.addEventListener('dblclick', function (event) {
+      event.preventDefault();
+      delete widths[j];
+      save('localStorage', widthKey, widths);
+      layout();
+    });
+    th.appendChild(grip);
+  });
+  // rows: a checkbox in front of the row number, the filter over all cells
+  var rowNumbers = rows.map(function (tr) {
+    var cell = tr.cells[0];
+    var no = cell.textContent.trim();
+    var box = document.createElement('input');
+    box.type = 'checkbox';
+    box.title = 'Select row';
+    // the number in its own box, so the numbers line up behind the checkboxes
+    var number = document.createElement('span');
+    number.className = 'csv-rn-no';
+    number.textContent = no;
+    cell.textContent = '';
+    cell.appendChild(box);
+    cell.appendChild(number);
+    return no;
+  });
+  var rowTexts = [];
+  var rowText = function (i) {
+    if (rowTexts[i] === undefined) {
+      var cells = rows[i].cells;
+      var parts = [];
+      for (var k = 1; k < cells.length; k++) parts.push(cells[k].textContent.toLowerCase());
+      rowTexts[i] = parts.join('\u0001');
+    }
+    return rowTexts[i];
+  };
+  var filterInput = toolbar.querySelector('[data-csv-filter]');
+  var countEl = toolbar.querySelector('[data-csv-count]');
+  var syncRows = function () {
+    var q = filterInput.value.trim().toLowerCase();
+    var shown = 0;
+    rows.forEach(function (tr, i) {
+      var off = hiddenRows[rowNumbers[i]] === true || (q !== '' && rowText(i).indexOf(q) < 0);
+      tr.classList.toggle('csv-row-hidden', off);
+      if (off) {
+        tr.cells[0].firstChild.checked = false;
+      } else {
+        shown++;
+      }
+    });
+    countEl.textContent = shown + ' of ' + rows.length + ' rows shown' + (shown < rows.length ? ', ' + (rows.length - shown) + ' hidden' : '');
+    save('sessionStorage', rowKey, { rows: Object.keys(hiddenRows), filter: filterInput.value });
+  };
+  var stored = load('sessionStorage', rowKey);
+  if (stored !== null) {
+    (stored.rows || []).forEach(function (no) { hiddenRows[no] = true; });
+    filterInput.value = stored.filter || '';
+  }
+  filterInput.addEventListener('input', syncRows);
+  toolbar.addEventListener('change', function (event) {
+    var col = event.target.getAttribute('data-csv-col');
+    if (col === null) return;
+    if (event.target.checked) delete hidden[col]; else hidden[col] = true;
+    syncColumns();
+  });
+  toolbar.addEventListener('click', function (event) {
+    var action = event.target.getAttribute('data-csv-action');
+    if (action === 'show-columns') {
+      hidden = {};
+      syncColumns();
+    } else if (action === 'reset-widths') {
+      widths = {};
+      save('localStorage', widthKey, widths);
+      layout();
+    } else if (action === 'hide-rows') {
+      rows.forEach(function (tr, i) {
+        if (tr.cells[0].firstChild.checked) hiddenRows[rowNumbers[i]] = true;
+      });
+      syncRows();
+    } else if (action === 'show-rows') {
+      hiddenRows = {};
+      filterInput.value = '';
+      syncRows();
+    }
+  });
+  syncColumns();
+  syncRows();
+})();
+</script>"""
+
 """
-    _webui_artifact_csv_html(text; truncated = false) -> String
+    _WebUICsvDisplay(digits, power, sort = "", order = "desc", hide = "")
+
+The display choice of the CSV artifact table: `digits` significant digits
+(1 to 15), `power` the resolution of power columns (`""` for none, `"W"`,
+`"kW"`, `"MW"`), `sort` the header name of the column the rows are sorted
+by (`""` for the file order) with `order` `"desc"` (largest first, Z to A)
+or `"asc"`, and `hide` the hidden columns as sorted, comma-separated column
+numbers (1 is the first column of the file, `""` for none). Built from the
+query by `_webui_csv_display`.
+"""
+struct _WebUICsvDisplay
+  digits::Int
+  power::String
+  sort::String
+  order::String
+  hide::String
+end
+
+_WebUICsvDisplay(digits::Int, power::AbstractString, sort::AbstractString, order::AbstractString) = _WebUICsvDisplay(digits, String(power), String(sort), String(order), "")
+_WebUICsvDisplay(digits::Int, power::AbstractString) = _WebUICsvDisplay(digits, String(power), "", "desc")
+_WebUICsvDisplay() = _WebUICsvDisplay(_WEBUI_CSV_DEFAULT_DIGITS, "")
+
+"""
+    _webui_csv_display(query) -> _WebUICsvDisplay
+
+The display choice from the query of the artifact view: `digits` (an
+integer from 1 to 15), `power` (`W`, `kW` or `MW`), `sort` (a column name),
+`order` (`asc`, else largest first) and `hide` (column numbers separated by
+commas). A missing or bad value falls back to the default silently (5
+digits, no resolution, file order, no hidden column), as the other Web UI
+form parsing does; a bad entry of `hide` is dropped, a `sort` name that is no
+column of the file and a `hide` number beyond the last column are ignored
+when the table is built.
+"""
+function _webui_csv_display(query::AbstractDict)::_WebUICsvDisplay
+  digits = tryparse(Int, strip(String(get(query, "digits", ""))))
+  (digits === nothing || !(1 <= digits <= _WEBUI_CSV_MAX_DIGITS)) && (digits = _WEBUI_CSV_DEFAULT_DIGITS)
+  power = strip(String(get(query, "power", "")))
+  haskey(_WEBUI_CSV_POWER_FACTORS, power) || (power = "")
+  sort_column = strip(String(get(query, "sort", "")))
+  order = strip(String(get(query, "order", ""))) == "asc" ? "asc" : "desc"
+  hidden = Int[]
+  for entry in split(String(get(query, "hide", "")), ',')
+    number = tryparse(Int, strip(entry))
+    number !== nothing && number >= 1 && push!(hidden, number)
+  end
+  return _WebUICsvDisplay(digits, String(power), String(sort_column), order, join(sort!(unique!(hidden)), ","))
+end
+
+# The hidden column numbers of a display choice.
+_webui_csv_hidden_columns(csv_display::_WebUICsvDisplay)::Vector{Int} =
+  isempty(csv_display.hide) ? Int[] : parse.(Int, split(csv_display.hide, ','))
+
+# the query string of a display choice, empty for the default, so the links
+# of an unchanged view stay plain; `same_file = false` leaves out what only
+# fits the columns of this file, the sort column and the hidden columns (the
+# links to the other CSV files of a run, which have other columns)
+function _webui_csv_display_query(csv_display::_WebUICsvDisplay; same_file::Bool = true)::String
+  parts = String[]
+  csv_display.digits == _WEBUI_CSV_DEFAULT_DIGITS || push!(parts, "digits=$(csv_display.digits)")
+  isempty(csv_display.power) || push!(parts, "power=$(csv_display.power)")
+  if same_file
+    if !isempty(csv_display.sort)
+      push!(parts, "sort=$(_webui_urlencode(csv_display.sort))")
+      csv_display.order == "asc" && push!(parts, "order=asc")
+    end
+    isempty(csv_display.hide) || push!(parts, "hide=$(_webui_urlencode(csv_display.hide))")
+  end
+  return join(parts, "&")
+end
+
+# The number of a CSV cell in the file's own format, or `nothing` for an
+# empty or text cell. Same rule as the display: the strict pattern of the
+# delimiter, then the result-CSV reader.
+function _webui_csv_cell_value(cell::AbstractString, delimiter::Char)
+  text = strip(cell)
+  occursin(_WEBUI_CSV_STRICT_NUMBER[delimiter], text) || return nothing
+  return Sparlectra._parse_result_csv_number(text, delimiter)
+end
+
+# The data rows in display order, as indices into `rows`, and the sorted
+# column index (0 for the file order). Sorted by the column
+# `csv_display.sort` when it is a header name. A column with at least one
+# number sorts numerically: numbers by value (largest first for "desc"),
+# cells without a number after them in file order. A column without any
+# number sorts as text, ignoring case ("asc" A to Z), empty cells after
+# them. Equal values keep the file order (stable merge sort). Every row of
+# the preview is sorted before the table is cut to its row limit, so the
+# largest value of the file is on top.
+function _webui_csv_sorted_rows(rows::Vector{String}, header::AbstractVector{<:AbstractString}, delimiter::Char, csv_display::_WebUICsvDisplay)
+  file_order = collect(eachindex(rows))
+  isempty(csv_display.sort) && return file_order, 0
+  j = findfirst(==(csv_display.sort), header)
+  j === nothing && return file_order, 0
+  cells = map(rows) do row
+    split_row = _webui_compare_split_csv(row, delimiter)
+    j <= length(split_row) ? strip(split_row[j]) : ""
+  end
+  values = [_webui_csv_cell_value(cell, delimiter) for cell in cells]
+  descending = csv_display.order != "asc"
+  if any(!isnothing, values)
+    keyed = [i for i in file_order if values[i] !== nothing]
+    ordered = sort(keyed; by = i -> values[i], rev = descending, alg = MergeSort)
+  else
+    keyed = [i for i in file_order if !isempty(cells[i])]
+    isempty(keyed) && return file_order, 0
+    ordered = sort(keyed; by = i -> lowercase(cells[i]), rev = descending, alg = MergeSort)
+  end
+  keyed_set = Set(keyed)
+  rest = [i for i in file_order if !(i in keyed_set)]
+  return vcat(ordered, rest), j
+end
+
+# The unit token of a power column, or `nothing`. Rule: the header name is
+# split at every character that is not a letter or digit (`_`, space,
+# brackets, slash), and a token equal to mw, mvar or mva, ignoring case,
+# makes it a power column (`p_mw`, `q_mvar`, `s_mva`, `P [MW]`, `Q MVAr`).
+# The first such token decides. `mwh` (energy) or `kw` are no power tokens.
+function _webui_csv_power_token(name::AbstractString)
+  for token in split(lowercase(name), r"[^a-z0-9]+"; keepempty = false)
+    haskey(_WEBUI_CSV_POWER_UNITS, token) && return String(token)
+  end
+  return nothing
+end
+
+# a plain decimal string ("123.5", "1.98e-16") in the file's format: decimal
+# comma and thousands dots in a semicolon file, decimal point otherwise
+function _webui_csv_localize(text::AbstractString, delimiter::Char)::String
+  sign = startswith(text, "-") ? "-" : ""
+  body = isempty(sign) ? String(text) : text[2:end]
+  marker = findfirst(c -> c in ('e', 'E'), body)
+  mantissa = marker === nothing ? body : body[begin:prevind(body, marker)]
+  exponent = marker === nothing ? "" : body[marker:end]
+  dot = findfirst(==('.'), mantissa)
+  integer_part = dot === nothing ? mantissa : mantissa[begin:prevind(mantissa, dot)]
+  fraction = dot === nothing ? "" : mantissa[nextind(mantissa, dot):end]
+  # the same grouping the writer uses: '.' in excel_de (the semicolon
+  # format), none in technical; excel_us cannot be told from technical by
+  # the delimiter, so a comma file shows no grouping
+  grouped = Sparlectra._group_csv_integer(integer_part, delimiter == ';' ? "." : "")
+  decimal = delimiter == ';' ? ',' : '.'
+  return sign * grouped * (isempty(fraction) ? "" : string(decimal, fraction)) * exponent
+end
+
+# Fixed-point text of `x` with `decimals` places. %.*f does not exist in
+# Julia's Printf, so the format is built per call.
+_webui_csv_fixed(x::Float64, decimals::Int)::String = Printf.format(Printf.Format("%.$(decimals)f"), x)
+
+# `x` with `digits` significant digits. The integer part of a value of 1 and
+# more is never rounded (1234.5 with 3 digits shows 1235, not 1230); values
+# below 1e-4 or from 1e15 on show with an exponent, so 1.98e-16 does not
+# become a row of zeros.
+function _webui_csv_significant(x::Float64, digits::Int)::String
+  isfinite(x) || return string(x)
+  x == 0 && return "0"
+  if abs(x) < 1
+    r = round(x; sigdigits = digits)
+    if abs(r) < 1
+      abs(r) < 1.0e-4 && return Printf.format(Printf.Format("%.$(digits - 1)e"), r)
+      return _webui_csv_fixed(r, digits - 1 - floor(Int, log10(abs(r))))
+    end
+    x = r
+  end
+  abs(x) >= 1.0e15 && return Printf.format(Printf.Format("%.$(digits - 1)e"), x)
+  integer_digits = floor(Int, log10(abs(x))) + 1
+  return _webui_csv_fixed(x, max(0, digits - integer_digits))
+end
+
+# The shown text of one cell. A cell that is not a number of the file's own
+# format, an integer cell outside a power column with a resolution, and
+# every text cell stay verbatim.
+function _webui_csv_display_cell(cell::AbstractString, delimiter::Char, csv_display::_WebUICsvDisplay, power_column::Bool)::String
+  text = strip(cell)
+  occursin(_WEBUI_CSV_STRICT_NUMBER[delimiter], text) || return String(cell)
+  value = Sparlectra._parse_result_csv_number(text, delimiter)
+  value === nothing && return String(cell)
+  if power_column && !isempty(csv_display.power)
+    # whole units of the chosen resolution: 1.98e-16 MW is 0 at any of them
+    scaled = round(value * _WEBUI_CSV_POWER_FACTORS[csv_display.power])
+    shown = _webui_csv_fixed(scaled, 0)
+    return _webui_csv_localize(shown == "-0" ? "0" : shown, delimiter)
+  end
+  # an integer cell (bus number, count, index) is no measured value
+  decimal = delimiter == ';' ? ',' : '.'
+  (occursin(decimal, text) || occursin(r"[eE]", text)) || return String(cell)
+  return _webui_csv_localize(_webui_csv_significant(value, csv_display.digits), delimiter)
+end
+
+"""
+    _webui_artifact_csv_html(text; truncated = false, csv_display = _WebUICsvDisplay(), artifact_name = "") -> String
 
 A CSV artifact as an HTML table. The delimiter comes from the header line the
 same way the compare pages sniff it (`_webui_compare_csv_table`), quoted fields
 are honored, and comment lines (`#`, the measurement CSV v1 header) go above
 the table instead of into it. A truncated preview drops its last line, which
 is cut mid-row. Rows beyond `_WEBUI_ARTIFACT_TABLE_ROWS` are counted, not shown.
+
+`csv_display` (a `_WebUICsvDisplay`) sets how numbers show: decimal cells with
+`csv_display.digits` significant digits, and in power columns (see
+`_webui_csv_power_token`) with a resolution `csv_display.power` the value in
+whole W, kW or MW, the unit then named in the header. The decimal separator
+follows the file (comma in a semicolon file). The text is never changed.
+A number cell is right-aligned, and so is the header of a column whose
+non-empty cells are mostly numbers, so the name sits over its numbers.
+
+Every column with a value gets a header link that sorts the rows by it
+(`csv_display.sort`, `_webui_csv_sorted_rows`): a column with numbers
+largest first, a text column A to Z; a second click turns the order.
+The columns in `csv_display.hide` are hidden by a style rule and stay in
+the page, so the script below the table (`_WEBUI_CSV_GRID_SCRIPT`, column
+width, hiding columns and rows, row filter) can show them again;
+`artifact_name` keys the column widths the browser keeps.
 """
-function _webui_artifact_csv_html(text::AbstractString; truncated::Bool = false)::String
+function _webui_artifact_csv_html(text::AbstractString; truncated::Bool = false, csv_display::_WebUICsvDisplay = _WebUICsvDisplay(), artifact_name::AbstractString = "")::String
   comments = String[]
   data = String[]
   for line in split(text, '\n')
@@ -3125,14 +4059,44 @@ function _webui_artifact_csv_html(text::AbstractString; truncated::Bool = false)
   header_line = data[1]
   delimiter = count(==(';'), header_line) > count(==(','), header_line) ? ';' : ','
   header = _webui_compare_split_csv(header_line, delimiter)
-  shown = min(length(data) - 1, _WEBUI_ARTIFACT_TABLE_ROWS)
+  power_tokens = [_webui_csv_power_token(name) for name in header]
+  rows = data[2:end]
+  order, sorted_column = _webui_csv_sorted_rows(rows, header, delimiter, csv_display)
+  # per column: cells the table right-aligns (the td.num rule below), other
+  # non-empty cells, and whether a cell holds a number of the file's format
+  # (then the column sorts numerically, largest first)
+  number_cells = zeros(Int, length(header))
+  text_cells = zeros(Int, length(header))
+  has_value = falses(length(header))
+  for row in rows
+    cells = _webui_compare_split_csv(row, delimiter)
+    for j in eachindex(header)
+      j <= length(cells) || break
+      cell = cells[j]
+      if occursin(_WEBUI_CSV_NUMBER_PATTERN, cell)
+        number_cells[j] += 1
+      elseif !isempty(strip(cell))
+        text_cells[j] += 1
+      end
+      has_value[j] || (has_value[j] = _webui_csv_cell_value(cell, delimiter) !== nothing)
+    end
+  end
+  numeric_header = number_cells .> text_cells
+  sortable = (number_cells .+ text_cells) .> 0
+  hidden = [j for j in _webui_csv_hidden_columns(csv_display) if j <= length(header)]
+  shown = min(length(rows), _WEBUI_ARTIFACT_TABLE_ROWS)
   body = IOBuffer()
-  for k in 2:(shown + 1)
-    cells = _webui_compare_split_csv(data[k], delimiter)
-    print(body, "<tr>")
-    for cell in cells
+  for k in 1:shown
+    cells = _webui_compare_split_csv(rows[order[k]], delimiter)
+    # the first cell is the row number of the file (1 is the first data
+    # row): it stays with its row through every sort, and the script keys
+    # the hidden rows by it
+    print(body, "<tr><td class=\"csv-rn\">", order[k], "</td>")
+    for (j, cell) in enumerate(cells)
       numeric = occursin(_WEBUI_CSV_NUMBER_PATTERN, cell)
-      print(body, numeric ? "<td class=\"num\">" : "<td>", _webui_escape(cell), "</td>")
+      power_column = j <= length(power_tokens) && power_tokens[j] !== nothing
+      shown_cell = numeric ? _webui_csv_display_cell(cell, delimiter, csv_display, power_column) : cell
+      print(body, numeric ? "<td class=\"num\">" : "<td>", _webui_escape(shown_cell), "</td>")
     end
     # a short row still fills the grid, so the columns never shift
     for _ in (length(cells) + 1):length(header)
@@ -3140,28 +4104,81 @@ function _webui_artifact_csv_html(text::AbstractString; truncated::Bool = false)
     end
     print(body, "</tr>")
   end
-  head = join(("<th>$(_webui_escape(name))</th>" for name in header), "")
+  # a sortable header is a link back onto this view: the first click sorts
+  # numbers largest first and text A to Z, a click on the sorted column turns
+  # the order; digits, resolution and hidden columns stay in the query
+  head = join((begin
+    token = power_tokens[j]
+    unit = (token === nothing || isempty(csv_display.power)) ? "" : " [$(_WEBUI_CSV_POWER_UNITS[token][csv_display.power])]"
+    label = _webui_escape(name * unit)
+    class = numeric_header[j] ? " class=\"num\"" : ""
+    if sortable[j]
+      first_order = has_value[j] ? "desc" : "asc"
+      next_order = j == sorted_column ? (csv_display.order == "desc" ? "asc" : "desc") : first_order
+      target = _WebUICsvDisplay(csv_display.digits, csv_display.power, name, next_order, csv_display.hide)
+      # the arrow in its own element: the stylesheet places it in room every
+      # sortable header keeps free, so a sort does not change the width
+      marker = j == sorted_column ? (csv_display.order == "desc" ? "<span class=\"csv-sort-mark\">&#9660;</span>" : "<span class=\"csv-sort-mark\">&#9650;</span>") : ""
+      title = has_value[j] ? (next_order == "desc" ? "Sort largest first" : "Sort smallest first") : (next_order == "asc" ? "Sort A to Z" : "Sort Z to A")
+      "<th$(class) data-col=\"$(j)\"><a href=\"?$(_webui_escape(_webui_csv_display_query(target)))\" title=\"$(title)\" data-csv-keep>$(label)$(marker)</a></th>"
+    else
+      "<th$(class) data-col=\"$(j)\">$(label)</th>"
+    end
+  end for (j, name) in enumerate(header)), "")
   parts = String[]
   isempty(comments) || push!(parts, "<pre class=\"artifact-csv-comments\">$(_webui_escape(join(comments, '\n')))</pre>")
-  hidden = length(data) - 1 - shown
-  hidden > 0 && push!(parts, "<p class=\"field-help\">Table shows the first $(shown) of $(length(data) - 1) rows. Use Download or Raw text for the complete file.</p>")
-  push!(parts, "<div class=\"artifact-csv\"><table><thead><tr>$(head)</tr></thead><tbody>$(String(take!(body)))</tbody></table></div>")
+  if sorted_column > 0
+    direction = has_value[sorted_column] ? (csv_display.order == "desc" ? "largest first; cells without a number at the end" : "smallest first; cells without a number at the end") :
+      (csv_display.order == "desc" ? "Z to A; empty cells at the end" : "A to Z; empty cells at the end")
+    push!(parts, "<p class=\"field-help artifact-csv-sorted\">Sorted by $(_webui_escape(header[sorted_column])), $(direction).</p>")
+  end
+  cut = length(rows) - shown
+  cut > 0 && push!(parts, "<p class=\"field-help\">Table shows the first $(shown) of $(length(rows)) rows. Use Download or Raw text for the complete file.</p>")
+  push!(parts, _webui_csv_toolbar_html(header, hidden, shown))
+  # the hidden columns as a style rule (column j is cell j + 1 after the row
+  # number); the script rewrites this element, so it also holds the widths
+  push!(parts, "<style data-csv-grid-style>$(_webui_csv_hidden_style(hidden))</style>")
+  push!(parts, "<div class=\"artifact-csv\"><table class=\"csv-grid\" data-csv-name=\"$(_webui_escape(artifact_name))\"><thead><tr><th class=\"csv-rn\" data-col=\"0\"></th>$(head)</tr></thead><tbody>$(String(take!(body)))</tbody></table></div>")
+  push!(parts, _WEBUI_CSV_GRID_SCRIPT)
   return join(parts, "")
+end
+
+# the style rule that hides the given CSV columns; the script writes the
+# same rule (keep both in step)
+function _webui_csv_hidden_style(hidden::Vector{Int})::String
+  isempty(hidden) && return ""
+  return join((".csv-grid th:nth-child($(j + 1)),.csv-grid td:nth-child($(j + 1)){display:none}" for j in hidden), "")
+end
+
+# The controls of the table above it: the column list with a checkbox per
+# column (checked = shown), and the row controls. The buttons work through
+# `_WEBUI_CSV_GRID_SCRIPT`; the column choice reaches the server only as the
+# `hide` query the script writes into the address and the links.
+function _webui_csv_toolbar_html(header::AbstractVector{<:AbstractString}, hidden::Vector{Int}, shown_rows::Int)::String
+  columns = join(("<label><input type=\"checkbox\" data-csv-col=\"$(j)\"$(j in hidden ? "" : " checked")> $(_webui_escape(name))</label>" for (j, name) in enumerate(header)), "")
+  hidden_note = isempty(hidden) ? "" : " ($(length(hidden)) hidden)"
+  return "<div class=\"csv-toolbar\">" *
+    "<details class=\"csv-columns\"><summary>Columns<span data-csv-hidden-count>$(hidden_note)</span></summary>" *
+    "<div class=\"csv-columns-list\">$(columns)</div>" *
+    "<p><button type=\"button\" data-csv-action=\"show-columns\">Show all columns</button> <button type=\"button\" data-csv-action=\"reset-widths\">Reset widths</button></p></details>" *
+    "<button type=\"button\" data-csv-action=\"hide-rows\">Hide selected rows</button>" *
+    "<button type=\"button\" data-csv-action=\"show-rows\">Show all rows</button>" *
+    "<label>Filter rows <input type=\"search\" data-csv-filter placeholder=\"contains\"></label>" *
+    "<span class=\"csv-row-count\" data-csv-count>$(shown_rows) rows</span></div>"
 end
 
 """
     _webui_render_markdown(text) -> String
 
 Markdown rendered with the Markdown standard library, which escapes any HTML
-in the text. Formulas stay as their `\$...\$` source: the reports the service
-writes carry none, and the documentation viewer that bundled a formula
-renderer is gone (0.18.0). The `SPARLECTRADOCS/` placeholder of the generated help
-excerpts becomes the configured documentation base URL, and every absolute
-link opens in a new tab.
+in the text. Formulas (`\$...\$`, ```` ```math ````) become HTML text through
+`_webui_tex_html`, since the Web UI has no math renderer. The
+`SPARLECTRADOCS/` placeholder of the generated help excerpts becomes the
+configured documentation base URL, and every absolute link opens in a new tab.
 """
 function _webui_render_markdown(text::AbstractString)::String
   io = IOBuffer()
-  show(io, MIME"text/html"(), Markdown.parse(String(text)))
+  show(io, MIME"text/html"(), _webui_math_nodes!(Markdown.parse(String(text)), false))
   html = replace(String(take!(io)), "SPARLECTRADOCS/" => _webui_escape(_webui_docs_base_url()))
   return replace(html, "<a href=\"http" => "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"http")
 end
@@ -3171,8 +4188,40 @@ function _webui_artifact_markdown_html(text::AbstractString)::String
   return "<article class=\"rendered-markdown\">$(_webui_render_markdown(text))</article>"
 end
 
+# whether the header line of a CSV text names a power column
+function _webui_csv_has_power_column(text::AbstractString)::Bool
+  for line in split(text, '\n')
+    stripped = strip(rstrip(line, '\r'))
+    (isempty(stripped) || startswith(stripped, '#')) && continue
+    delimiter = count(==(';'), stripped) > count(==(','), stripped) ? ';' : ','
+    return any(name -> _webui_csv_power_token(name) !== nothing, _webui_compare_split_csv(stripped, delimiter))
+  end
+  return false
+end
+
+# The display controls above a CSV table: a GET form back onto the same
+# artifact, so the choice lives in the query and needs no script. Without a
+# power column the resolution travels as a hidden field, so it is still set
+# on the next file of the run.
+function _webui_csv_display_form(name_href::AbstractString, csv_display::_WebUICsvDisplay, has_power::Bool)::String
+  digits_input = "<label>Significant digits <input type=\"number\" name=\"digits\" min=\"1\" max=\"$(_WEBUI_CSV_MAX_DIGITS)\" value=\"$(csv_display.digits)\"></label>"
+  power_input = if has_power
+    options = join(("<option value=\"$(value)\"$(value == csv_display.power ? " selected" : "")>$(label)</option>" for (value, label) in (("", "off (significant digits)"), ("W", "W"), ("kW", "kW"), ("MW", "MW"))), "")
+    " <label>Power columns <select name=\"power\">$(options)</select></label>"
+  else
+    isempty(csv_display.power) ? "" : "<input type=\"hidden\" name=\"power\" value=\"$(csv_display.power)\">"
+  end
+  # the sort column travels along, so Apply keeps the order of the rows
+  sort_input = isempty(csv_display.sort) ? "" :
+    "<input type=\"hidden\" name=\"sort\" value=\"$(_webui_escape(csv_display.sort))\">" * (csv_display.order == "asc" ? "<input type=\"hidden\" name=\"order\" value=\"asc\">" : "")
+  # the hidden columns as well; the script keeps this field current and
+  # disables it while no column is hidden, so the address stays plain
+  hide_input = "<input type=\"hidden\" name=\"hide\" value=\"$(_webui_escape(csv_display.hide))\" data-csv-hide-input$(isempty(csv_display.hide) ? " disabled" : "")>"
+  return "<form method=\"get\" action=\"$(name_href)\" class=\"artifact-csv-display\">$(digits_input)$(power_input)$(sort_input)$(hide_input) <button type=\"submit\">Apply</button><span class=\"field-help\">Display only; Download and Raw text keep the file as written.</span></form>"
+end
+
 """
-    render_powerflow_artifact_page(artifact, preview; raw = false) -> String
+    render_powerflow_artifact_page(artifact, preview; raw = false, csv_display = _WebUICsvDisplay(), csv_siblings = String[], head_line = "") -> String
 
 The artifact viewer page. The artifact's MIME type decides the view: a CSV
 opens as a table, a Markdown report as rendered HTML, everything else as
@@ -3180,21 +4229,57 @@ escaped text in the wide monospace panel. `raw = true` forces the text panel
 for the two rendered kinds, and the page always carries the link to the
 other view, so a table never hides what the file really says. `preview` is
 the `(content, truncated)` tuple of `_read_webui_artifact_preview`.
+
+A CSV table shows the number display controls (`csv_display`, see
+`_webui_artifact_csv_html`) and links to the other CSV artifacts of the run
+(`csv_siblings`, names); those links and the Raw text toggle carry the
+display choice in their query, so it stays while moving between the files.
+A non-empty `head_line` is shown above the table (the run status line of a
+short-circuit table, see `handle_powerflow_artifact`).
 """
-function render_powerflow_artifact_page(artifact, preview; raw::Bool = false)::String
+function render_powerflow_artifact_page(artifact, preview; raw::Bool = false, csv_display::_WebUICsvDisplay = _WebUICsvDisplay(), csv_siblings::Vector{String} = String[], head_line::AbstractString = "")::String
   renderable = artifact.mime_type in ("text/csv", "text/markdown")
+  is_csv = artifact.mime_type == "text/csv"
   notice = preview.truncated ? "<p class=\"alert warning\">Preview truncated to $(_WEBUI_ARTIFACT_PREVIEW_BYTES) bytes. Use Download for the complete artifact.</p>" : ""
   # the same name relative to /powerflow/artifact/<run>/ is this page without a query
   name_href = _webui_urlencode(artifact.name)
+  display_query = is_csv ? _webui_csv_display_query(csv_display) : ""
+  with_query(href) = isempty(display_query) ? href : "$(href)?$(display_query)"
+  controls = ""
   if renderable && !raw
-    body = artifact.mime_type == "text/csv" ? _webui_artifact_csv_html(preview.content; truncated = preview.truncated) : _webui_artifact_markdown_html(preview.content)
-    toggle = "<a class=\"button secondary\" href=\"$(name_href)?raw=1\">Raw text</a>"
+    body = is_csv ? _webui_artifact_csv_html(preview.content; truncated = preview.truncated, csv_display, artifact_name = artifact.name) : _webui_artifact_markdown_html(preview.content)
+    toggle = "<a class=\"button secondary\" href=\"$(_webui_escape(name_href * "?raw=1" * (isempty(display_query) ? "" : "&" * display_query)))\"$(is_csv ? " data-csv-keep" : "")>Raw text</a>"
+    if is_csv
+      controls = _webui_csv_display_form(name_href, csv_display, _webui_csv_has_power_column(preview.content))
+      others = [n for n in csv_siblings if n != artifact.name]
+      # the other files have other columns: their links keep digits and
+      # resolution, not the sort column and the hidden columns
+      sibling_query = _webui_csv_display_query(csv_display; same_file = false)
+      sibling_href = n -> isempty(sibling_query) ? _webui_urlencode(n) : "$(_webui_urlencode(n))?$(sibling_query)"
+      isempty(others) || (controls *= "<p class=\"artifact-csv-siblings\">Other CSV files of this run: " *
+        join(("<a href=\"$(_webui_escape(sibling_href(n)))\">$(_webui_escape(n))</a>" for n in others), " · ") * "</p>")
+    end
   else
     body = "<pre class=\"artifact-text\">$(_webui_escape(preview.content))</pre>"
-    toggle = renderable ? "<a class=\"button secondary\" href=\"$(name_href)\">$(artifact.mime_type == "text/csv" ? "Table" : "Rendered")</a>" : ""
+    toggle = renderable ? "<a class=\"button secondary\" href=\"$(_webui_escape(with_query(name_href)))\">$(is_csv ? "Table" : "Rendered")</a>" : ""
   end
-  page = "<section class=\"artifact-text-page\"><p>$(toggle)<a class=\"button\" href=\"?download=1\">Download</a></p>$(notice)$(body)</section>"
+  head = isempty(head_line) ? "" : "<p class=\"sc-status-line\"><code>$(_webui_escape(head_line))</code></p>"
+  page = "<section class=\"artifact-text-page\"><p>$(toggle)<a class=\"button\" href=\"?download=1\">Download</a></p>$(notice)$(head)$(controls)$(body)</section>"
   return _webui_layout("Artifact: $(artifact.name)", page; show_back = true, main_class = "page artifact-page")
+end
+
+"""
+    render_powerflow_chart_page(run_id, artifact) -> String
+
+Web UI page of an SVG chart artifact: Back, links to the artifact list and
+the run, Download, and the chart embedded as `<object>` from the bare
+artifact route, so its point tooltips keep working. Reached with `?page=1`.
+"""
+function render_powerflow_chart_page(run_id::AbstractString, artifact)::String
+  id = _webui_urlencode(run_id)
+  bare = "/powerflow/artifact/$(id)/$(_webui_urlencode(artifact.name))"
+  page = "<section class=\"artifact-text-page\"><p><a class=\"button secondary\" href=\"/powerflow/artifacts/$(id)\">Artifacts</a> <a class=\"button secondary\" href=\"/powerflow/result/$(id)\">Run</a> <a class=\"button\" href=\"$(bare)?download=1\">Download</a></p><object type=\"image/svg+xml\" data=\"$(bare)\" style=\"max-width:100%\"></object></section>"
+  return _webui_layout("Chart: $(artifact.name)", page; show_back = true, main_class = "page artifact-page")
 end
 
 """
@@ -3760,19 +4845,22 @@ function _webui_se_summary(result::AbstractDict)::Union{Nothing,String}
   se_rm == "replacement" && push!(parts, "bad-data suppression on (replacement, k_suppress=$(get(metadata, "se_k_suppress", 6.0)), sigma=$(get(metadata, "se_suppression_sigma", 2000.0)))")
   # released taps: J of the continuous estimate versus J after the
   # mandatory fixation to the mechanical step (the tap left the state there)
-  # The tap fallback must be impossible to miss: a run whose tap positions
-  # are MODEL values looks exactly like a successful tap estimation
-  # otherwise, and its J measures the model positions. Marked line, not a
-  # footnote.
-  if get(metadata, "se_tap_estimation_fallback", false) == true
+  # The tap fallback must be impossible to miss: its J measures the
+  # transferred steps, not estimates. Marked line, not a footnote.
+  if get(metadata, "se_tap_fallback_used", false) == true
     push!(parts, string("WARNING: ", _se_tap_fallback_note(metadata)))
   end
   tapc = Int(get(metadata, "se_tap_count", 0))
-  if tapc > 0
+  if tapc > 0 && get(metadata, "se_tap_fallback_used", false) != true
     jb = get(metadata, "se_tap_j_before", nothing)
     ja = get(metadata, "se_tap_j_after", nothing)
     fixedtxt = get(metadata, "se_tap_fixed", false) == true ? "" : " (NOT fixed)"
-    push!(parts, "tap estimation: $(tapc) transformer(s), J $(jb === nothing ? "?" : round(Float64(jb); sigdigits = 3)) before fixation -> $(ja === nothing ? "?" : round(Float64(ja); sigdigits = 3)) after$(fixedtxt)")
+    # the regulator count only where it says more than the transformer
+    # count (a transformer with a ratio and a phase changer); runs before
+    # 0.60.0 have no regulator count
+    regc = get(metadata, "se_tap_regulators", nothing)
+    regtxt = (regc isa Integer && regc != tapc) ? ", $(regc) regulator(s)" : ""
+    push!(parts, "tap estimation: $(tapc) transformer(s)$(regtxt), J $(jb === nothing ? "?" : round(Float64(jb); sigdigits = 3)) before fixation -> $(ja === nothing ? "?" : round(Float64(ja); sigdigits = 3)) after$(fixedtxt)")
     # off-grid interpretation: a band failure that only
     # appears through the fixation must not be read as bad data
     if get(metadata, "se_tap_offgrid_residual", false) == true
@@ -3836,22 +4924,104 @@ function _webui_se_topology_section(result::AbstractDict)::String
   return join(parts, "")
 end
 
-## released-tap estimate table on the SE result page: steps on the
-## mechanical grid (never raw r values), the fixation J drop, mRIDs for
-## CGMES cases (MATPOWER/DTF rows are addressed by branch and name)
+## released-tap estimate table on the SE result page: one row per tap
+## regulator (0.60.0) with the estimate, the transferred and estimated steps on the
+## changer's own steps (never raw ratios as positions), the J change of the fixation,
+## mRIDs for CGMES cases (MATPOWER/DTF rows are addressed by branch and
+## name). Runs in the history from before 0.60.0 carry the old row keys
+## (model_step, electrical_step, fixed_step, change) and keep the old
+## column set (_webui_se_tap_rows_pre060).
 function _webui_se_tap_section(result::AbstractDict)::String
   metadata = get(result, "metadata", Dict{String,Any}())
   metadata isa AbstractDict || return ""
   get(metadata, "run_mode", "") == "se" || return ""
   rows = get(metadata, "se_tap_estimates", nothing)
   esc = _webui_escape
-  # the fallback replaces the table: showing estimated-looking positions
-  # that are model values is worse than showing none
-  if get(metadata, "se_tap_estimation_fallback", false) == true
-    return string("<section class=\"result-block\"><h3>Transformer tap estimation</h3>",
-      "<p class=\"warning\">", esc(_se_tap_fallback_note(metadata)), "</p></section>")
+  # the fallback line stands above the table, whose rows then say
+  # "not estimated (fallback not converged)" or "(fallback worse fit)"
+  fallback_line = get(metadata, "se_tap_fallback_used", false) == true ? string("<p class=\"warning\">", esc(_se_tap_fallback_note(metadata)), "</p>") : ""
+  (rows isa AbstractVector && !isempty(rows)) || return isempty(fallback_line) ? "" : string("<section class=\"panel\"><h2>Transformer tap estimates</h2>", fallback_line, "</section>")
+  head, body = any(t -> haskey(t, "step_estimated"), rows) ? _webui_se_tap_rows(rows) : _webui_se_tap_rows_pre060(rows)
+  jb = get(metadata, "se_tap_j_before", nothing)
+  ja = get(metadata, "se_tap_j_after", nothing)
+  db = get(metadata, "se_tap_dof_before", "?")
+  da = get(metadata, "se_tap_dof_after", "?")
+  jline = (jb === nothing || ja === nothing || !isempty(fallback_line)) ? fallback_line : "<p>J before fixation: <strong>$(round(Float64(jb); sigdigits = 4))</strong> (dof $(db)) &rarr; J after fixation: <strong>$(round(Float64(ja); sigdigits = 4))</strong> (dof $(da)). After the fixation the tap is no state variable any more; a large J after with a small J before means the estimated position sits between mechanical steps.</p>"
+  return string(
+    "<section class=\"panel\"><h2>Transformer tap estimates</h2>", jline,
+    "<div style=\"overflow-x:auto\"><table class=\"details\"><thead>", head, "</thead><tbody>", join(body, ""), "</tbody></table></div>",
+    "<p class=\"field-help\">Full table: se_tap_estimates.csv in the run artifacts.</p></section>",
+  )
+end
+
+# the note of a regulator row as a status suffix
+const _WEBUI_TAP_NOTE_SUFFIX = Dict{String,String}(
+  "relative_only" => "relative only",
+  "conditional" => "conditional on the frozen shift",
+  "sign_from_start" => "sign from the start",
+  "p_from_schedule" => "P from the schedule",
+)
+
+## header and body rows of the tap table for regulator rows (0.60.0
+## metadata keys, the columns of se_tap_estimates.csv): which changer, the
+## transferred step, the estimated step and the raw estimate before
+## rounding, Delta U, ratio and angle at the estimate, the deviation and
+## the status with the notice as tooltip
+function _webui_se_tap_rows(rows::AbstractVector)
+  esc = _webui_escape
+  anymrid = any(!isempty(String(something(get(t, "mrid", ""), ""))) for t in rows)
+  num(v, f) = v isa Real ? string(f(Float64(v))) : "-"
+  step(v) = v isa Integer ? string(v) : num(v, x -> round(x; digits = 2))
+  head = string("<tr><th>Branch</th><th>Transformer</th>", anymrid ? "<th>mRID</th>" : "", "<th>Regulator</th><th>Transferred step</th><th>Estimated step</th><th>Estimated step (raw)</th><th>Delta U</th><th>Ratio</th><th>Angle (deg)</th><th>Deviation</th><th>Status</th></tr>")
+  body = String[]
+  for t in rows
+    st = String(something(get(t, "status", "estimated"), "estimated"))
+    calculated = st == "calculated"
+    reason = String(something(get(t, "reason", "none"), "none"))
+    dev = get(t, "deviation_steps", nothing)
+    # machine transformers are never estimated: their tap is no state
+    # variable, the position is back-calculated after the run and marked so
+    status = if calculated
+      "calculated (machine transformer, not estimated)"
+    elseif reason == "no_changer"
+      "not released (no tap changer of the released kind)"
+    elseif st == "not_estimated"
+      "not estimated ($(replace(reason, "_" => " ")))"
+    elseif st == "out_of_range"
+      # estimated too far outside the band: not taken over
+      "out of range (transferred step kept)"
+    elseif get(t, "out_of_range", false) == true && get(t, "fixed", false) == true
+      # estimated outside the band within 2 sigma_s of its end
+      "fixed to the band end step"
+    elseif get(t, "fixed", false) == true
+      # a nonzero deviation means the model carried a wrong step and the
+      # run corrected it; "confirmed" says the transferred step was right
+      (dev isa Real && abs(dev) >= 0.01) ? "fixed (corrected)" : "fixed (transferred step confirmed)"
+    else
+      "not fixed"
+    end
+    suffix = get(_WEBUI_TAP_NOTE_SUFFIX, String(something(get(t, "note", "none"), "none")), "")
+    isempty(suffix) || (status = string(status, ", ", suffix))
+    notice = String(something(get(t, "notice", ""), ""))
+    kind = String(something(get(t, "kind", ""), ""))
+    alpha = get(t, "alpha_deg", nothing)
+    changer = String(something(get(t, "changer", ""), ""))
+    reg = calculated ? "ratio" : string(isempty(changer) ? "-" : changer, isempty(kind) || kind == "none" ? "" : " ($(kind)$(alpha isa Real ? ", alpha $(round(Float64(alpha); digits = 2)) deg" : ""))")
+    devtxt = dev isa Real ? (dev > 0 ? string("+", step(dev)) : step(dev)) : "-"
+    push!(body, string(
+      "<tr><td>", get(t, "branch", "?"), "</td><td>", esc(String(something(get(t, "name", ""), ""))), "</td>",
+      anymrid ? string("<td>", esc(String(something(get(t, "mrid", ""), ""))), "</td>") : "",
+      "<td>", esc(reg), "</td><td>", step(get(t, "step_transferred", nothing)), "</td><td>", step(get(t, "step_estimated", nothing)), "</td><td>", num(get(t, "step_estimated_raw", nothing), x -> round(x; digits = 3)), "</td><td>", num(get(t, "du_est", nothing), x -> round(x; sigdigits = 4)), "</td><td>", num(get(t, "ratio_est", nothing), x -> round(x; digits = 5)), "</td><td>", num(get(t, "angle_est_deg", nothing), x -> round(x; digits = 3)), "</td><td>", devtxt, "</td>",
+      "<td", isempty(notice) ? "" : string(" title=\"", esc(notice), "\""), ">", esc(status), "</td></tr>",
+    ))
   end
-  (rows isa AbstractVector && !isempty(rows)) || return ""
+  return head, body
+end
+
+## header and body rows of the tap table for a run from before 0.60.0 (one
+## row per transformer, old metadata keys), as that release rendered them
+function _webui_se_tap_rows_pre060(rows::AbstractVector)
+  esc = _webui_escape
   anymrid = any(!isempty(String(get(t, "mrid", ""))) for t in rows)
   anypst = any(String(get(t, "mode", "ratio")) != "ratio" for t in rows)
   # model step and change next to the estimate: whether a tap was wrong and
@@ -3861,8 +5031,6 @@ function _webui_se_tap_section(result::AbstractDict)::String
   for t in rows
     mode = String(get(t, "mode", "ratio"))
     fr = String(get(t, "frozen_reason", "none"))
-    # machine transformers are never estimated: their tap is no state
-    # variable, the position is back-calculated after the run and marked so
     status = if String(get(t, "source", "estimated")) == "calculated"
       "calculated (machine transformer, not estimated)"
     elseif !(fr in ("none", ""))
@@ -3870,8 +5038,6 @@ function _webui_se_tap_section(result::AbstractDict)::String
     elseif get(t, "out_of_range", false) == true
       "out of range (clamped)"
     elseif get(t, "fixed", false) == true
-      # a nonzero change means the model carried a wrong position and the
-      # run corrected it; "confirmed" says the model step was right
       ch = String(string(get(t, "change", "")))
       (ch == "" || all(c -> c in ('0', ' ', '/'), ch)) ? "fixed (model step confirmed)" : "fixed (corrected)"
     else
@@ -3885,16 +5051,7 @@ function _webui_se_tap_section(result::AbstractDict)::String
       "<td>", esc(status), "</td></tr>",
     ))
   end
-  jb = get(metadata, "se_tap_j_before", nothing)
-  ja = get(metadata, "se_tap_j_after", nothing)
-  db = get(metadata, "se_tap_dof_before", "?")
-  da = get(metadata, "se_tap_dof_after", "?")
-  jline = jb === nothing || ja === nothing ? "" : "<p>J before fixation: <strong>$(round(Float64(jb); sigdigits = 4))</strong> (dof $(db)) &rarr; J after fixation: <strong>$(round(Float64(ja); sigdigits = 4))</strong> (dof $(da)). After the fixation the tap is no state variable any more; a large J after with a small J before means the estimated position sits between mechanical steps.</p>"
-  return string(
-    "<section class=\"panel\"><h2>Transformer tap estimates</h2>", jline,
-    "<div style=\"overflow-x:auto\"><table class=\"details\"><thead>", head, "</thead><tbody>", join(body, ""), "</tbody></table></div>",
-    "<p class=\"field-help\">Full table: se_tap_estimates.csv in the run artifacts.</p></section>",
-  )
+  return head, body
 end
 
 ## result-summary card for an SE-started power flow (run_mode == "powerflow_se_start")
@@ -3959,13 +5116,14 @@ end
     render_se_form(; cases, measurements, selected_case, selected_measurement, config_file, message, active_run) -> String
 
 State-estimation page (SE phase 5): case selector (same case sources as the
-PowerFlow page), measurement-set selector (content-sniffed CSV v1 files),
+PowerFlow page), measurement-set selector (content-sniffed CSV v1 files and
+measurement tables; only the sets of the selected case, each labeled with its case),
 the estimator option subset, a demo action generating synthetic measurements
 from a solved PF, and the run action posting to `/powerflow/run` with
 `se_mode`. Composed from small string pieces like the contingency-weights
 editor; no onsubmit button-disabling.
 """
-function render_se_form(; cases::Vector{String} = String[], measurements::Vector{String} = String[], case_measurement_rows::Integer = 0, case_measurement_noise::Union{Nothing,Bool} = nothing, selected_case::AbstractString = "", selected_measurement::AbstractString = "", config_file::AbstractString = "", message::AbstractString = "", set_info::Vector{String} = String[], set_provenance::Vector{String} = String[], set_counts::Vector{Tuple{String,Int}} = Tuple{String,Int}[], meas_case::AbstractDict = Dict{String,String}(), starred::AbstractSet = Set{String}(), set_case::AbstractString = "", set_text::AbstractString = "", set_rows::Vector{NamedTuple} = NamedTuple[], gen_values::AbstractDict = Dict{String,String}(), truth_runs::Vector{NamedTuple} = NamedTuple[], active_run = nothing)
+function render_se_form(; cases::Vector{String} = String[], measurements::Vector{String} = String[], case_measurement_rows::Integer = 0, case_measurement_noise::Union{Nothing,Bool} = nothing, selected_case::AbstractString = "", selected_measurement::AbstractString = "", config_file::AbstractString = "", message::AbstractString = "", set_info::Vector{String} = String[], set_provenance::Vector{String} = String[], set_counts::Vector{Tuple{String,Int}} = Tuple{String,Int}[], set_v1::Bool = false, meas_case::AbstractDict = Dict{String,String}(), meas_name_matched::AbstractSet = Set{String}(), meas_model_matched::AbstractDict = Dict{String,String}(), starred::AbstractSet = Set{String}(), set_case::AbstractString = "", set_model::AbstractString = "", set_text::AbstractString = "", set_rows::Vector{NamedTuple} = NamedTuple[], gen_values::AbstractDict = Dict{String,String}(), truth_runs::Vector{NamedTuple} = NamedTuple[], active_run = nothing, sigma_levels = (rows = NamedTuple[], error = "", editable = true, stored = false))
   esc = _webui_escape
   # sticky generator inputs: after a generate the redirect carries the
   # submitted values back; the form re-renders with them, not the defaults
@@ -3973,14 +5131,15 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
   gchk(key) = get(gen_values, key, "") == "true" ? " checked" : ""
   # default-aware variant for fields whose DEFAULT is checked
   gchk2(key, default) = _webui_parse_bool(get(gen_values, key, default)) ? " checked" : ""
-  # label sets by their in-file case binding; a set bound to a DIFFERENT
-  # case fails the SE run with per-row resolution errors (and the service
-  # refuses it up front), so the mismatch must be visible here already
+  # `measurements` holds only the sets of the selected case; every entry
+  # names its case so the binding is visible: the case from the `# case:`
+  # line, or a note for a set without one that matched by its file name
   meas_label = function (name)
+    name in meas_name_matched && return string(name, " (no case line, name matches ", selected_case, ")")
+    haskey(meas_model_matched, name) && return string(name, " (CGMES model matches)")
     bound = String(get(meas_case, name, ""))
-    isempty(bound) && return string(name, " (no case binding)")
-    bound == selected_case && return name
-    return string(name, " (for ", bound, ")")
+    isempty(bound) && return name
+    return string(name, " (case ", bound, ")")
   end
   meas_options = join(("<option value=\"$(esc(name))\"$(name == selected_measurement ? " selected" : "")>$(esc(meas_label(name)))</option>" for name in measurements), "")
   # The case file's own set is the FIRST choice when it has one; an empty
@@ -4000,9 +5159,13 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
   # table (sparlectra-taps v1) renders as a real table, anything else as a
   # plain list; the per-type row counts say WHAT the set contains
   counts_html = isempty(set_counts) ? "" : string("<p><strong>Measured values in this set:</strong> ", join(("$(esc(replace(t, "Meas" => ""))) × $(n)" for (t, n) in set_counts), ", "), " ($(sum(last.(set_counts))) rows; the tap table below is metadata, the measurement rows follow it in the file)</p>")
+  # the removal notice at a measurement CSV v1 (a run on it is refused with
+  # the same text)
+  v1_html = set_v1 ? "<p class=\"alert warning measurement-v1-notice\">$(esc(MEASUREMENT_CSV_V1_REMOVED))</p>" : ""
+  counts_html = v1_html * counts_html
   info_html = ""
   # binding line + inline editor shared by both info-panel variants
-  bind_html = isempty(selected_measurement) ? "" : isempty(set_case) ? "<p><strong>Case binding:</strong> none (older set; the file carries no <code># case:</code> comment). Regenerate or add the line in the editor below.</p>" : "<p><strong>Case binding:</strong> this set belongs to <code>$(esc(set_case))</code> (recorded in the file).</p>"
+  bind_html = isempty(selected_measurement) ? "" : !isempty(set_model) ? "<p><strong>Case binding:</strong> by the CGMES model <code>$(esc(set_model))</code>, which is the EQ model of this case (recorded in the file).</p>" : isempty(set_case) ? "<p><strong>Case binding:</strong> none (older set; the file carries no <code># case:</code> comment). Regenerate or add the line in the editor below.</p>" : "<p><strong>Case binding:</strong> this set belongs to <code>$(esc(set_case))</code> (recorded in the file).</p>"
   # structured value editor: every measurement kind (voltages, flows,
   # balances, currents) editable in place; value/sigma/active only, the
   # identity columns stay read-only. Large sets fall back to text/download.
@@ -4010,7 +5173,7 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
   if !isempty(set_rows)
     trs = String[]
     for r in set_rows
-      loc = isempty(r.bus) ? string(r.from_bus, "-", r.to_bus, " #", r.branch_nr, " ", r.direction) : string("bus ", r.bus)
+      loc = r.location
       push!(trs, string(
         "<tr><td><code>", esc(r.id), "</code></td><td>", esc(replace(r.typ, "Meas" => "")), "</td><td>", esc(loc), "</td>",
         "<td><input name=\"v_", r.line, "\" value=\"", esc(r.value), "\" size=\"14\"></td>",
@@ -4038,7 +5201,7 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
       "<input type=\"hidden\" name=\"file\" value=\"$(esc(selected_measurement))\">",
       "<input type=\"hidden\" name=\"case\" value=\"$(esc(selected_case))\">",
       "<textarea name=\"content\" rows=\"18\" spellcheck=\"false\" style=\"width:100%;font-family:monospace;white-space:pre\">$(esc(set_text))</textarea>",
-      "<p><button type=\"submit\">Save measurement file</button> <span class=\"field-help\">Saved atomically; the first line must stay <code># sparlectra-measurements v1</code>. For larger files use download and re-upload.</span></p>",
+      "<p><button type=\"submit\">Save measurement file</button> <span class=\"field-help\">Saved atomically; the file keeps its format (a measurement table must keep its version line and header, a CSV v1 its first line <code># sparlectra-measurements v1</code>). For larger files use download and re-upload.</span></p>",
       "</form></details>",
     )
   end
@@ -4071,7 +5234,8 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
     "<form method=\"post\" action=\"/powerflow/import-cases\" enctype=\"multipart/form-data\">",
     "<input type=\"hidden\" name=\"return_to\" value=\"stateestimation\">",
     "<input type=\"hidden\" name=\"return_case\" value=\"$(esc(selected_case))\">",
-    "<label title=\"Upload a measurement CSV v1 (content-sniffed; lands in the case cache and appears in the set selector)\">Upload measurement file $(_webui_file_input("casefiles"; accept = ".csv", id = "measurements"))</label> ",
+    "<label title=\"Measurement table or CSV v1. Offered for a case when its # case: line names it, when its # cgmes_model: line names the EQ model of a CGMES case, or when its file name starts with the case name and a dot; otherwise for no case.\">Upload measurement file $(_webui_file_input("casefiles"; accept = ".csv", id = "measurements"))</label> ",
+    isempty(selected_case) ? "" : "<label class=\"check\" title=\"Binds the uploaded file to the selected case: its # case: line is set to this case, whatever the file says. A measurement file of the same name is replaced. Rows the case cannot resolve are counted in the import report of the run.\"><input type=\"checkbox\" name=\"assign_to_case\" value=\"true\">assign to $(esc(selected_case))</label> ",
     "<button type=\"submit\">Upload</button>",
     "</form>",
   )
@@ -4086,8 +5250,8 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
     "<label title=\"Where the truth state comes from: fresh solve solves the case now; from run adopts the solved voltages of a successful run of this case, nothing is re-solved.\">$(_webui_field_label("se_generator_truth", "truth state"))<select name=\"gen_truth_source\" id=\"gen-truth-source\"><option value=\"fresh_solve\"$(gv("gen_truth_source", "fresh_solve") == "from_run" ? "" : " selected")>fresh solve</option><option value=\"from_run\"$(gv("gen_truth_source", "fresh_solve") == "from_run" ? " selected" : "")>from run</option></select></label> ",
     "<label title=\"Source run for truth state 'from run': successful power-flow and state-estimation runs of the selected case, newest first\">$(_webui_field_label("se_generator_truth_run", "run"))<select name=\"gen_truth_run_id\" id=\"gen-truth-run\">$(isempty(truth_runs) ? "<option value=\"\">(no successful run of this case)</option>" : join(["<option value=\"$(esc(r.run_id))\"$(r.run_id == String(get(gen_values, "gen_truth_run_id", "")) ? " selected" : "")>$(esc(string(first(r.run_id, 8), "… (", r.kind, ", ", r.timestamp, ")")))</option>" for r in truth_runs], ""))</select></label> ",
     "<label title=\"Flows per branch. both ends: P/Q (and I) at from and to. one end: one flow group per branch, preferring the end at a bus with injection telemetry.\">$(_webui_field_label("se_generator_flow_ends", "flows per branch"))<select name=\"gen_flow_ends\"><option value=\"both\"$(gv("gen_flow_ends", "both") == "one_balance_aware" ? "" : " selected")>both ends</option><option value=\"one_balance_aware\"$(gv("gen_flow_ends", "both") == "one_balance_aware" ? " selected" : "")>one end (balance-aware)</option></select></label> ",
-    "<label title=\"Sigma (MW/MVar) of passive nodes: their Pinj/Qinj rows become zero balances at this sigma. It also binds the zero-injection constraints, floored at 1 kW.\">$(_webui_field_label("se_generator_passive_sigma", "passive σ (MW/MVar)"))<input type=\"number\" name=\"gen_passive_sigma\" value=\"$(gv("gen_passive_sigma", "0.05"))\" min=\"0.000001\" step=\"any\"></label> ",
-    "<label class=\"check\" title=\"How a passive node enters the set. Off: an ordinary balance row Pinj = Qinj = 0 at the sigma. On: a protected zero-injection constraint, floored at 1 kW.\"><input type=\"hidden\" name=\"gen_passive_as_zi\" value=\"false\"><input type=\"checkbox\" name=\"gen_passive_as_zi\" value=\"true\"$(gchk2("gen_passive_as_zi", "true"))>$(_webui_field_label("se_generator_passive_zi", "passive as zero-injection constraint"))</label> ",
+    "<label title=\"Sigma (MW/MVar) of passive nodes in the generated set: balance rows Pinj = Qinj = 0 at this sigma, or zero-injection rows at this sigma, at least zero_injection_sigma_mva.\">$(_webui_field_label("se_generator_passive_sigma", "passive σ (MW/MVar)"))<input type=\"number\" name=\"gen_passive_sigma\" value=\"$(gv("gen_passive_sigma", "0.05"))\" min=\"0.000001\" step=\"any\"></label> ",
+    "<label class=\"check\" title=\"How a passive node enters the generated set. Off: an ordinary balance row Pinj = Qinj = 0 at the sigma. On: a protected zero-injection row. Also sets state_estimation.zero_injection of the case.\"><input type=\"hidden\" name=\"gen_passive_as_zi\" value=\"false\"><input type=\"checkbox\" name=\"gen_passive_as_zi\" value=\"true\"$(gchk2("gen_passive_as_zi", "true"))>$(_webui_field_label("se_generator_passive_zi", "passive as zero-injection constraint"))</label> ",
     "<label title=\"Noise seed: the same seed regenerates the identical set (documented in the set comments), a different seed draws a fresh noise realization\">seed <input type=\"number\" name=\"gen_seed\" value=\"$(gv("gen_seed", "42"))\" min=\"0\" step=\"1\"></label> ",
     "<label title=\"Critical measurements (0 is off): the generator removes redundant rows until this many are critical, never past observability; named in the set comments.\">critical measurements <input type=\"number\" name=\"gen_critical_count\" value=\"$(gv("gen_critical_count", "0"))\" min=\"0\" step=\"1\"></label> ",
     "<fieldset class=\"se-options\"><legend>Measurement sigmas $(_webui_help_link("webui.se_generator_sigmas", "Measurement sigmas"))</legend>",
@@ -4097,9 +5261,21 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
     "<label title=\"Current-phasor angle accuracy in degrees; 0 writes no current-angle rows. They share the PMU reference offset with voltage angles, gated near zero current.\">&sigma; Ia (°) <input type=\"text\" name=\"sigma_ia_deg\" value=\"$(gv("sigma_ia_deg", "0"))\" size=\"6\"></label> ",
     "<label title=\"Active-power accuracy in percent of the measured value (injections and branch flows). Percent of reading stays meaningful across voltage levels.\">&sigma; P (%) <input type=\"text\" name=\"sigma_p_pct\" value=\"$(gv("sigma_p_pct", "1.0"))\" size=\"6\"></label> ",
     "<label title=\"Reactive-power accuracy in percent of the measured value (injections and branch flows)\">&sigma; Q (%) <input type=\"text\" name=\"sigma_q_pct\" value=\"$(gv("sigma_q_pct", "1.0"))\" size=\"6\"></label>",
+    # which sigma a generated row gets: the percent fields, unless the
+    # sigma table has a row for the level of the measuring bus and the type
+    "<p class=\"field-help\">These percent sigmas apply to every generated row, except where the measurement sigma by voltage level table has a value for the voltage level of the measuring bus and the quantity: there the table sigma is written and the noise is drawn with it.</p>",
+    "</fieldset>",
+    # display resolution of an online system; 0 keeps the generated value
+    "<fieldset class=\"se-options\"><legend>Measurement resolution $(_webui_help_link("webui.se_generator_resolution", "Measurement resolution"))</legend>",
+    "<label title=\"Round every voltage-magnitude value to this step in kV after noise, as an online system delivers it (for example 0.1). 0 is no rounding.\">U (kV) <input type=\"text\" name=\"gen_resolution_u_kv\" value=\"$(gv("gen_resolution_u_kv", "0"))\" size=\"6\"></label> ",
+    "<label title=\"Round every active-power value (injections and flows) to this step in MW. 0 is no rounding.\">P (MW) <input type=\"text\" name=\"gen_resolution_p_mw\" value=\"$(gv("gen_resolution_p_mw", "0"))\" size=\"6\"></label> ",
+    "<label title=\"Round every reactive-power value (injections and flows) to this step in Mvar. 0 is no rounding.\">Q (Mvar) <input type=\"text\" name=\"gen_resolution_q_mvar\" value=\"$(gv("gen_resolution_q_mvar", "0"))\" size=\"6\"></label> ",
+    "<label title=\"Round every current-magnitude value to this step in A. 0 is no rounding.\">I (A) <input type=\"text\" name=\"gen_resolution_i_a\" value=\"$(gv("gen_resolution_i_a", "0"))\" size=\"6\"></label> ",
+    "<label title=\"Round every voltage and current angle to this step in degrees. 0 is no rounding.\">angle (°) <input type=\"text\" name=\"gen_resolution_angle_deg\" value=\"$(gv("gen_resolution_angle_deg", "0"))\" size=\"6\"></label>",
+    "<p class=\"field-help\">The written sigma stays the configured one; the rounding is part of the measurement error. A step coarser than about sigma &times; &radic;12 adds visible error.</p>",
     "</fieldset>",
     "<button type=\"submit\">Generate synthetic measurements from a solved PF</button>",
-    "<p class=\"field-help\">Truth state 'fresh solve' solves the case once (MATPOWER or CGMES); 'from run' adopts a run state unchanged. The CSV v1 lands next to the case and documents truth source, flow-end choices and passive handling in its comments.</p><p class=\"se-recommend\">Recommended: noise on, sigma U 0.5%, P/Q 1%, currents on with sigma I 1%; bad data 10 to exercise the elimination; tap deviation 1 to 2 steps to create a model discrepancy.</p>",
+    "<p class=\"field-help\">Truth state 'fresh solve' solves the case once (MATPOWER or CGMES); 'from run' adopts a run state unchanged. The measurement table lands next to the case and documents truth source, flow-end choices and passive handling in its comments.</p><p class=\"se-recommend\">Recommended: noise on, sigma U 0.5%, P/Q 1%, currents on with sigma I 1%; bad data 10 to exercise the elimination; tap deviation 1 to 2 steps to create a model discrepancy.</p>",
     "<script>(function(){var ts=document.getElementById('gen-truth-source'),tap=document.getElementById('gen-tap-steps'),tapc=document.getElementById('gen-tap-count'),run=document.getElementById('gen-truth-run');function upd(){var fr=ts&&ts.value==='from_run';if(tap){tap.disabled=fr;if(fr){tap.value='0';}}if(tapc){tapc.disabled=fr;}if(run){run.disabled=!fr;}}ts&&ts.addEventListener('change',upd);upd();})();</script>",
     "</form>",
     # per-case settings reset: deletes the saved sidecar profile so both
@@ -4130,16 +5306,32 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
     "</form>",
     "<p class=\"field-help\">Turns an ideal set into a realistic one without recomputing anything: the values are perturbed, the sigmas stay. The result lands next to the case as <code>&lt;case&gt;.noisy.measurements.csv</code> and is preselected afterwards.</p>",
   ) : ""
-  run_form = isempty(selected_case) ? "<p>Select a case to run a state estimation.</p>" : (isempty(measurements) && case_measurement_rows == 0) ? "<p>No measurement set found for this case cache. Upload a measurement CSV v1 (Import on the PowerFlow page) or use the demo generator above.</p>" : string(
+  run_form = isempty(selected_case) ? "<p>Select a case to run a state estimation.</p>" : (isempty(measurements) && case_measurement_rows == 0) ? string(
+    "<p>No measurement set in the case directory belongs to $(esc(selected_case)). Generate one with the measurement generator above, or upload a set whose <code># case:</code> line names this case (Import on the PowerFlow page).</p>",
+    # the sigma table already matters before the first set: the generator
+    # writes its sigmas, so it can be set and saved here on its own; the
+    # save posts only the table (and the case), no estimator option
+    "<form method=\"post\" action=\"/powerflow/settings/save\">",
+    "<input type=\"hidden\" name=\"casefile\" value=\"$(esc(selected_case))\">",
+    "<input type=\"hidden\" name=\"config_file\" value=\"$(esc(config_file))\">",
+    "<input type=\"hidden\" name=\"settings_target\" value=\"this_case\">",
+    "<input type=\"hidden\" name=\"return_to\" value=\"runs\">",
+    _webui_sigma_level_fieldset(sigma_levels),
+    "<button type=\"submit\" class=\"secondary-button\" title=\"Save the sigma table into this case's configuration file; the generator and the next run use it.\">Save settings for this case</button>",
+    "</form>",
+  ) : string(
     carries_note,
     noise_form,
     "<form method=\"post\" action=\"/powerflow/run\" data-busy=\"Starting the state estimation…\">",
     "<input type=\"hidden\" name=\"se_mode\" value=\"true\">",
     "<input type=\"hidden\" name=\"casefile\" value=\"$(esc(selected_case))\">",
     "<input type=\"hidden\" name=\"config_file\" value=\"$(esc(config_file))\">",
-    "<p class=\"se-recommend\">Pick the measurement set that belongs to the selected case; the matching set (<case>.measurements.csv) is preselected, sets from other cases are labeled. No set yet? Generate one below.</p><label title=\"Measurement CSV v1 file (content-sniffed)\">$(_webui_field_label("measurement_file", "Measurement set"))<select name=\"measurement_file\">$(meas_options)</select></label>",
+    "<p class=\"se-recommend\">The list shows only the measurement sets of the selected case (their <code># case:</code> line names it, or their <code># cgmes_model:</code> line the EQ model of a CGMES case); the matching set (&lt;case&gt;.measurements.csv) is preselected.$(isempty(measurements) ? " No set in the case directory belongs to this case; generate one with the measurement generator above." : "")</p><label title=\"Measurement CSV v1 or measurement table (content-sniffed)\">$(_webui_field_label("measurement_file", "Measurement set"))<select name=\"measurement_file\">$(meas_options)</select></label>",
     "<fieldset class=\"se-options\"><legend>Estimator options</legend>",
     "<label title=\"Start from a flat voltage profile\">$(_webui_field_label("se_flatstart", "flatstart"))<input type=\"checkbox\" name=\"se_flatstart\" value=\"true\"$(gchk2("se_flatstart", true))></label> ",
+    # a config key (state_estimation.start_mode.rotate_behind_pst): the hidden
+    # false makes an unchecked box post false over a configured true
+    "<label title=\"Flat start only: a bus the slack reaches only across phase-shifting transformers starts at their shift sum, as in the power flow flat start; a bus a path without shifter reaches keeps 0. Off (default): every angle starts at 0.\">$(_webui_field_label("se_rotate_behind_pst", "flat start behind phase shifters"))<input type=\"hidden\" name=\"se_rotate_behind_pst\" value=\"false\"><input type=\"checkbox\" name=\"se_rotate_behind_pst\" value=\"true\"$(gchk2("se_rotate_behind_pst", "false"))></label> ",
     "<label title=\"WLS convergence tolerance on the state step. The default 1e-6 is the noise floor of the finite-difference Jacobian; a tighter value is raised with a log line.\">$(_webui_field_label("se_tol", "tol"))<input type=\"text\" name=\"se_tol\" value=\"$(gv("se_tol", "1e-6"))\" size=\"8\"></label> ",
     "<label title=\"Iteration cap, the same limit the service and the configuration use. A solve with released transformer taps can need close to 40 iterations before it settles.\">$(_webui_field_label("se_max_iter", "max_iter"))<input type=\"number\" name=\"se_max_iter\" value=\"$(gv("se_max_iter", "50"))\" min=\"1\" max=\"200\"></label> ",
     "<label title=\"Treatment of a large residual. off: plain WLS. staged: down-weighted between the knees k1 and k2. replacement: rows past the limit get a fixed large sigma.\">$(_webui_field_label("se_robust_mode", "down-weighting"))<select name=\"se_robust_mode\" id=\"se-robust-mode\"><option value=\"off\"$(gv("se_robust_mode", "off") == "off" ? " selected" : "")>off</option><option value=\"staged\"$(gv("se_robust_mode", "off") == "staged" ? " selected" : "")>staged</option><option value=\"replacement\"$(gv("se_robust_mode", "off") == "replacement" ? " selected" : "")>replacement</option></select></label> ",
@@ -4152,7 +5344,7 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
     "<label title=\"Replacement mode: from this normalized residual a measurement gets the replacement sigma and loses its influence; removal is the elimination limit's job.\">$(_webui_field_label("se_k_suppress", "down-weight from rn"))<input type=\"number\" name=\"se_k_suppress\" id=\"se-k-suppress\" value=\"$(gv("se_k_suppress", "4.0"))\" min=\"0.000001\" step=\"any\"></label> ",
     "<label title=\"Not a limit: the replacement sigma, in the measurement's unit. A down-weighted row is solved with this sigma instead of its own; statistics keep the original.\">$(_webui_field_label("se_suppression_sigma", "replacement sigma (MW/Mvar)"))<input type=\"number\" name=\"se_suppression_sigma\" value=\"$(gv("se_suppression_sigma", "2000"))\" min=\"0.000001\" step=\"any\"></label> ",
     "</span>",
-    "<label title=\"Sequential bad-data elimination budget\">$(_webui_field_label("se_max_eliminations", "max_eliminations"))<input type=\"number\" name=\"se_max_eliminations\" value=\"$(gv("se_max_eliminations", "3"))\" min=\"0\" max=\"20\"></label> ",
+    "<label title=\"Sequential bad-data elimination budget\">$(_webui_field_label("se_max_eliminations", "max_eliminations"))<input type=\"number\" name=\"se_max_eliminations\" value=\"$(gv("se_max_eliminations", "5"))\" min=\"0\" max=\"20\"></label> ",
     "<span id=\"se-threshold-warning\" class=\"field-help\" style=\"display:none\">Warning: k_suppress is below k_eliminate, so suppressed rows rarely reach the elimination. The run is allowed, but this is usually unintended.</span>",
     # Which limit the selected mode actually uses. Grayed out and disabled,
     # never hidden: hiding makes the form jump and conceals that the setting
@@ -4169,9 +5361,16 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
     "var f=mode&&mode.closest('form');f&&f.addEventListener('submit',function(){groups.forEach(function(g){g.querySelectorAll('input, select').forEach(function(c){c.disabled=false;});});});" *
     "})();</script>",
     "<label title=\"Write estimated shunt susceptances back into the model\">$(_webui_field_label("se_update_shunts", "update_shunts"))<input type=\"checkbox\" name=\"se_update_shunts\" value=\"true\"$(gchk("se_update_shunts"))></label> ",
-    "<label title=\"Release every in-service ratio tap changer as an extra state, fix it to the nearest mechanical step and rerun. Machine and unobservable taps are skipped.\">$(_webui_field_label("se_tap_estimation", "estimate taps"))<input type=\"checkbox\" name=\"se_tap_estimation\" value=\"true\"$(gchk("se_tap_estimation"))></label> ",
-    "<label title=\"Residual-correlation (K matrix) report columns\">$(_webui_field_label("se_report_correlation", "report_correlation"))<input type=\"checkbox\" name=\"se_report_correlation\" value=\"true\"$(gchk("se_report_correlation"))></label>",
+    # both tap switches are config keys (state_estimation.tap_estimation):
+    # the hidden false makes an unchecked box post false, so it overrides
+    # the configured true instead of being left out of the form
+    "<label title=\"Release every in-service tap changer (ratio and phase) as an extra state, fix it to the nearest mechanical step and rerun. Off: every changer keeps its transferred step. Machine and unobservable taps are skipped.\">$(_webui_field_label("se_tap_estimation", "estimate taps"))<input type=\"hidden\" name=\"se_tap_estimation\" value=\"false\"><input type=\"checkbox\" name=\"se_tap_estimation\" value=\"true\"$(gchk2("se_tap_estimation", "true"))></label> ",
+    "<label title=\"When the run with tap estimation does not converge, or its fixed steps fit worse than the transferred steps (worse_fit), run once more without it on the same measurements; that run is the result. Off: the first run is shown as it is.\">$(_webui_field_label("se_tap_fallback", "tap fallback"))<input type=\"hidden\" name=\"se_tap_fallback\" value=\"false\"><input type=\"checkbox\" name=\"se_tap_fallback\" value=\"true\"$(gchk2("se_tap_fallback", "true"))></label> ",
+    "<label title=\"Impedance of a released regulator. Per-step data always follow the step. auto adds the analytic correction of typed models, off does not; an imported table takes the impedance alone.\">$(_webui_field_label("se_tap_impedance_correction", "tap impedance per step"))<select name=\"se_tap_impedance_correction\">$(join(("<option value=\"$(v)\"$(gv("se_tap_impedance_correction", "auto") == v ? " selected" : "")>$(v)</option>" for v in ("auto", "off")), ""))</select></label> ",
+    "<label title=\"Residual-correlation (K matrix) report columns\">$(_webui_field_label("se_report_correlation", "report_correlation"))<input type=\"checkbox\" name=\"se_report_correlation\" value=\"true\"$(gchk("se_report_correlation"))></label> ",
+    "<label title=\"Sigma of one zero-injection row in MVA (MW for P, Mvar for Q) while the rows are weighted (zero_injection on); 0.001 MVA is 1 kW. Smaller binds harder and worsens the conditioning.\">$(_webui_field_label("se_zero_injection_sigma_mva", "zero-injection sigma (MVA)"))<input type=\"number\" name=\"se_zero_injection_sigma_mva\" value=\"$(gv("se_zero_injection_sigma_mva", string(ZERO_INJECTION_SIGMA)))\" min=\"0.000000000001\" step=\"any\"></label>",
     "</fieldset>",
+    _webui_sigma_level_fieldset(sigma_levels),
     "<button type=\"submit\">Run state estimation</button> ",
     # issue #377: flatstart/robust_mode/k_eliminate/k_suppress/max_eliminations/
     # report_correlation carry a real config_key (options.jl), so submitting
@@ -4195,6 +5394,107 @@ function render_se_form(; cases::Vector{String} = String[], measurements::Vector
   # form here would fork two copies of the same logic. This page links to
   # it instead, preselecting the case this SE section is already showing.
   return "<section class=\"panel se-section\" id=\"state-estimation\"><h2>State estimation</h2>$(banner)$(msg_html)$(run_form)$(generator_tab)$(info_tab)$(upload_tab)</section>"
+end
+
+# The sigma table of the SE run form (state_estimation.sigma_by_voltage_level):
+# one row per nominal voltage of the case, plus configured levels the case
+# does not have (kept, so a save does not drop them). Inside the run form,
+# so a run and "Save settings for this case" post it alike; an empty cell
+# means the default.
+function _webui_sigma_level_fieldset(sigma_levels)::String
+  esc = _webui_escape
+  rows = sigma_levels.rows
+  err = String(sigma_levels.error)
+  # an unreadable configured table: the cells are shown disabled and the
+  # form posts no table (no se_sigma_lvl_n), so a run stops with the named
+  # error and a save keeps the stored value
+  editable = sigma_levels.editable
+  dis = editable ? "" : " disabled"
+  cols = [("p_mw", "σ P (MW)"), ("q_mvar", "σ Q (MVAr)"), ("i_a", "σ I (A)"), ("u_kv", "σ U (kV)"), ("rel_pct", "rel. (%)")]
+  trs = String[]
+  for (i, r) in enumerate(rows)
+    cells = join((string("<td><input type=\"text\" name=\"se_sigma_lvl_", i, "_", c, "\" value=\"", esc(get(r.values, c, "")), "\" size=\"7\" placeholder=\"default\"", dis, "></td>") for (c, _) in cols), "")
+    # the level as the row key of the table ("380", "10.5"), the form
+    # that _webui_sigma_levels_from_form reads back to the same kV
+    key = _sigma_level_key(r.vn_kv)
+    push!(trs, string("<tr><td>", esc(key), "<input type=\"hidden\" name=\"se_sigma_lvl_", i, "_vn_kv\" value=\"", esc(key), "\"></td>", cells, "<td>", r.in_case ? "" : "not in this case", "</td></tr>"))
+  end
+  head = string("<tr><th>Vn (kV)</th>", join(("<th>$(esc(l))</th>" for (_, l) in cols), ""), "<th></th></tr>")
+  table = isempty(rows) ? "<p class=\"field-help\">No voltage levels: the case could not be read.</p>" : string("<div style=\"overflow-x:auto\"><table class=\"details\"><thead>", head, "</thead><tbody>", join(trs, ""), "</tbody></table></div>")
+  return string(
+    "<fieldset class=\"se-options se-sigma-levels\"><legend>Measurement sigma by voltage level $(_webui_help_link("state_estimation.sigma_by_voltage_level", "Measurement sigma by voltage level"))</legend>",
+    editable ? string("<input type=\"hidden\" name=\"se_sigma_lvl_n\" value=\"", length(rows), "\">") : "",
+    # the page showed stored rows: clearing every cell then clears them
+    (editable && sigma_levels.stored) ? "<input type=\"hidden\" name=\"se_sigma_lvl_stored\" value=\"1\">" : "",
+    # pre-line keeps the line breaks of the block-form example in the error
+    isempty(err) ? "" : string("<p class=\"alert warning\" style=\"white-space:pre-line\">", esc(err), "</p>"),
+    table,
+    "<p class=\"field-help\">For measurements without their own sigma (an empty sigma cell of a measurement table), for the table generators and for the measurement generator of this section. An empty cell keeps the default; the cells show the case configuration only. The sigma is max(absolute, rel. % of the value). <em>Save settings for this case</em> writes the table into the case configuration.</p>",
+    "</fieldset>",
+  )
+end
+
+# The tap estimation table of the Case page (state_estimation.tap_estimation
+# exclude and include_machine_transformers): one row per transformer the SE
+# service releases, an "estimate" checkbox each, machine transformers
+# unchecked by default. Inside the case options form, so "Save case
+# options" writes it into the case configuration
+# (_webui_tap_exclusions_from_form) and every SE run of the case reads it.
+function _webui_tap_exclusion_fieldset(table)::String
+  esc = _webui_escape
+  rows = table.rows
+  editable = table.editable
+  dis = editable ? "" : " disabled"
+  anymrid = any(r -> !isempty(r.mrid), rows)
+  trs = String[]
+  for (i, r) in enumerate(rows)
+    # the hidden false before the checkbox: an unchecked box posts nothing,
+    # the last value of a name wins
+    box = string("<input type=\"hidden\" name=\"se_tap_trafo_", i, "_estimate\" value=\"false\"", dis, "><input type=\"checkbox\" name=\"se_tap_trafo_", i, "_estimate\" value=\"true\"", r.estimate ? " checked" : "", dis, ">")
+    hidden = string("<input type=\"hidden\" name=\"se_tap_trafo_", i, "_key\" value=\"", esc(r.key), "\"", dis, "><input type=\"hidden\" name=\"se_tap_trafo_", i, "_machine\" value=\"", r.machine ? "true" : "false", "\"", dis, "><input type=\"hidden\" name=\"se_tap_trafo_", i, "_excluded\" value=\"", r.excluded ? "true" : "false", "\"", dis, ">")
+    push!(trs, string("<tr><td>", box, hidden, "</td><td>", esc(r.name), "</td>", anymrid ? string("<td>", esc(r.mrid), "</td>") : "", "<td>", esc(r.kinds), "</td><td>", r.machine ? (r.excluded ? "machine transformer, excluded (not calculated)" : "machine transformer") : "", "</td></tr>"))
+  end
+  head = string("<tr><th>estimate</th><th>Transformer</th>", anymrid ? "<th>mRID</th>" : "", "<th>Tap changers</th><th></th></tr>")
+  body = isempty(rows) ? "<p class=\"field-help\">No transformer with a tap changer in this case.</p>" : string("<div style=\"overflow-x:auto\"><table class=\"details se-tap-exclusions\"><thead>", head, "</thead><tbody>", join(trs, ""), "</tbody></table></div>")
+  keep = join((string("<input type=\"hidden\" name=\"se_tap_keep_", j, "\" value=\"", esc(e), "\">") for (j, e) in enumerate(table.keep)), "")
+  keep_note = isempty(table.keep) ? "" : string("<p class=\"field-help\">Kept in the exclude list without a transformer in this case: ", esc(join(table.keep, ", ")), ".</p>")
+  return string(
+    "<fieldset class=\"span-2 se-tap-exclusion-options\"><legend>State estimation: tap estimation per transformer $(_webui_help_link("state_estimation.tap_estimation.exclude", "Tap estimation per transformer"))</legend>",
+    editable ? string("<input type=\"hidden\" name=\"se_tap_trafo_n\" value=\"", length(rows), "\"><input type=\"hidden\" name=\"se_tap_machine_configured\" value=\"", table.include_machine ? "true" : "false", "\">", keep) : "",
+    isempty(table.error) ? "" : string("<p class=\"alert warning\">", esc(table.error), "</p>"),
+    body,
+    keep_note,
+    "<p class=\"field-help\">Unchecked transformers keep their transferred step (reason excluded). Machine transformers are unchecked by default: their step is calculated after the estimation when Q is measured on every bus of the machine node, otherwise they keep their step. <em>Save case options</em> writes the choice into the case configuration (<code>state_estimation.tap_estimation.exclude</code>, <code>include_machine_transformers</code>).</p>",
+    "</fieldset>",
+  )
+end
+
+# The per-level sigma table of an SE run (metadata se_sigma_by_voltage_level):
+# the number of measurements per nominal voltage and where their sigma came
+# from, with the configured sigmas in pu.
+function _webui_se_sigma_level_section(result::AbstractDict)::String
+  metadata = get(result, "metadata", Dict{String,Any}())
+  metadata isa AbstractDict || return ""
+  get(metadata, "run_mode", "") == "se" || return ""
+  rows = get(metadata, "se_sigma_by_voltage_level", nothing)
+  (rows isa AbstractVector && !isempty(rows)) || return ""
+  esc = _webui_escape
+  pu(x) = x === nothing ? "default" : string(round(Float64(x); sigdigits = 4))
+  body = String[]
+  for r in rows
+    configured = get(r, "configured", false) == true
+    push!(body, string("<tr><td>", esc(string(get(r, "vn_kv", "?"))), "</td><td>", get(r, "measurements", 0), "</td><td>", get(r, "sigma_row", 0), "</td><td>", get(r, "sigma_level", 0), "</td><td>", get(r, "sigma_default", 0), "</td>",
+      configured ? string("<td>", pu(get(r, "p_pu", nothing)), "</td><td>", pu(get(r, "q_pu", nothing)), "</td><td>", pu(get(r, "i_pu", nothing)), "</td><td>", pu(get(r, "u_pu", nothing)), "</td>") : "<td colspan=\"4\">no row configured</td>",
+      "</tr>"))
+  end
+  unused = get(metadata, "se_sigma_levels_not_in_case", Any[])
+  note = (unused isa AbstractVector && !isempty(unused)) ? string("<p class=\"field-help\">Configured but not in this case: ", esc(join(string.(unused), ", ")), " kV.</p>") : ""
+  return string(
+    "<section class=\"panel\"><h2>Measurement sigma by voltage level</h2>",
+    "<div style=\"overflow-x:auto\"><table class=\"details\"><thead><tr><th>Vn (kV)</th><th>Measurements</th><th>Own sigma</th><th>Level sigma</th><th>Default</th><th>σ P (pu)</th><th>σ Q (pu)</th><th>σ I (pu)</th><th>σ U (pu)</th></tr></thead><tbody>",
+    join(body, ""), "</tbody></table></div>", note,
+    "<p class=\"field-help\">The same table is in run.log and se_diagnostics.md. Zero-injection rows are constraints and not counted.</p></section>",
+  )
 end
 
 # --- sysimage page -----------------------------------------------------------

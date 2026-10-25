@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ const GUI_EDITABLE_CONFIG_KEYS = Set([
   "power_flow.qlimits.final_q_accept_pu",
   "power_flow.qlimits.classic_max_passes",
   # the rest of the Q-limit block, for PV/PQ switching studies in the Web UI
-  # (task 0.20.2): the start rule, hysteresis and cooldown, the bus lists
+  # (0.20.2): the start rule, hysteresis and cooldown, the bus lists
   # and the whole guard
   "power_flow.qlimits.start_iter",
   "power_flow.qlimits.start_mode",
@@ -66,6 +66,29 @@ const GUI_EDITABLE_CONFIG_KEYS = Set([
   "contingency.warm_active_set",
   "contingency.warm_cold_check",
   "contingency.warm_cold_check_margin_pu",
+  "contingency.events.enabled",
+  "contingency.events.double_circuits",
+  "contingency.events.busbars",
+  "contingency.events.substations",
+  "contingency.events.links",
+  "contingency.events.name_groups",
+  "contingency.events.max_members",
+  "contingency.pairs.enabled",
+  "contingency.pairs.rule",
+  "contingency.pairs.max_pairs",
+  "qsts.mode",
+  "qsts.base_step",
+  "qsts.snapshot_controls",
+  "qsts.sequential_start",
+  "qsts.resync_every",
+  "qsts.dead_time_steps",
+  "qsts.hunting_window",
+  "qsts.vm_min_pu",
+  "qsts.vm_max_pu",
+  "qsts.loading_max_pct",
+  "qsts.series.min_structural_overlap",
+  "qsts.series.max_injection_churn",
+  "qsts.series.max_gap",
   "power_flow.apslf.order",
   "power_flow.apslf.nr_polish",
   "power_flow.apslf.convergence_radius",
@@ -76,6 +99,7 @@ const GUI_EDITABLE_CONFIG_KEYS = Set([
   "power_flow.start_mode.voltage_mode",
   "power_flow.start_mode.dc_seed_unconditional",
   "power_flow.start_mode.ratio_profile",
+  "power_flow.start_mode.rotate_behind_pst",
   "power_flow.start_current_iteration.enabled",
   "power_flow.start_current_iteration.max_iter",
   "power_flow.start_current_iteration.tol",
@@ -92,6 +116,7 @@ const GUI_EDITABLE_CONFIG_KEYS = Set([
   "power_flow.external_grid.source",
   "power_flow.external_grid.sk_MVA",
   "power_flow.external_grid.rx",
+  "power_flow.plausibility.vmin_warn",
   "power_flow.rescue",
   "power_flow.dc.fallback",
   "power_flow.auto_slack",
@@ -108,6 +133,11 @@ const GUI_EDITABLE_CONFIG_KEYS = Set([
   "cgmes_import.start_values",
   "cgmes_import.require_boundary",
   "cgmes_import.infer_base_voltages",
+  "cgmes_import.map_energy_source",
+  "cgmes_import.map_power_electronics",
+  "cgmes_import.shunt_control",
+  "cgmes_import.read_dynamics",
+  "cgmes_import.equivalent_injection_as_source",
   "model.auto_profile",
   "matpower_import.ratio",
   "matpower_import.shift_sign",
@@ -120,7 +150,6 @@ const GUI_EDITABLE_CONFIG_KEYS = Set([
   "matpower_import.apply_branch_kind",
   "matpower_import.import_for001_contingencies",
   "matpower_import.matpower_dcline_mode",
-  "model.net_cache_enabled",
   "cgmes_import.hvdc_mode",
   "powsybl_import.base_mva",
   "powsybl_import.hvdc_mode",
@@ -129,7 +158,13 @@ const GUI_EDITABLE_CONFIG_KEYS = Set([
   "powsybl_import.remote_regulation",
   "matpower_export.write_solution",
   "model.tap_changer_model",
+  # a property of the case (50 Hz Europe, 60 Hz North America), so a case
+  # sidecar or an API override can carry it
+  "model.nominal_frequency_hz",
   "short_circuit.sweep_method",
+  # a modelling choice per case like cgmes_import.map_power_electronics,
+  # so a case sidecar or a SCF case file can carry it
+  "short_circuit.converter_current_factor",
   "output.logfile_results",
   "output.console_summary",
   "output.console_auto_profile",
@@ -161,6 +196,8 @@ const GUI_EDITABLE_CONFIG_KEYS = Set([
   # Installation-wide SE knobs (takahashi_min_states, rank_tol_factor, the
   # topology-precheck thresholds) stay out on purpose.
   "state_estimation.flatstart",
+  # the SE flat start turned behind phase shifters, next to flatstart
+  "state_estimation.start_mode.rotate_behind_pst",
   "state_estimation.robust_mode",
   "state_estimation.robust",
   "state_estimation.k_eliminate",
@@ -168,10 +205,29 @@ const GUI_EDITABLE_CONFIG_KEYS = Set([
   "state_estimation.max_eliminations",
   "state_estimation.topology_precheck",
   "state_estimation.report_residual_correlation",
+  # the zero-injection switch, driven by the generator's passive-node
+  # checkbox and read by every SE path of the case
+  "state_estimation.zero_injection",
+  # the sigma of a zero-injection row under zero_injection = on, case scope
+  # like the switch
+  "state_estimation.zero_injection_sigma_mva",
+  # measurement sigmas per voltage level, a table edited on the State
+  # Estimation section and saved into the case configuration
+  "state_estimation.sigma_by_voltage_level",
   # the estimator's linear-algebra switches (sparse LU, symmetric gain
   # matrix), performance choices; editable so a case sidecar can pin them
   "state_estimation.linear_solver",
   "state_estimation.symmetric_gain",
+  # the impedance rule of the tap estimation, a modelling choice per case
+  "state_estimation.tap_estimation.impedance_correction",
+  # the tap estimation switch (the Web UI "estimate taps" checkbox) and its
+  # fallback to the run without tap estimation, case scope like the rule
+  "state_estimation.tap_estimation.enabled",
+  "state_estimation.tap_estimation.fallback",
+  # which transformers stay out of the tap estimation: the table of the
+  # Case page writes both into the case configuration
+  "state_estimation.tap_estimation.exclude",
+  "state_estimation.tap_estimation.include_machine_transformers",
 ])
 
 function _flatten_config_keys!(keys_out::Set{String}, raw::AbstractDict, prefix::String = "")
@@ -189,7 +245,7 @@ function _validate_override_type(key::String, value, expected::Type)
 end
 
 function _validate_gui_override_value(key::String, value)
-  if key in ("power_flow.autodamp", "power_flow.flatstart", "power_flow.start_mode.ratio_profile", "power_flow.qlimits.enabled", "power_flow.start_current_iteration.enabled", "power_flow.start_current_iteration.accept_only_if_improved", "power_flow.start_current_iteration.only_for_large_cases", "power_flow.merit.enabled", "power_flow.merit.fallback_max_mismatch", "power_flow.trust_region.enabled", "power_flow.apslf.nr_polish", "power_flow.apslf.convergence_radius", "power_flow.apslf_start.enabled", "power_flow.islands.enabled", "power_flow.islands.diagnostic_continue_after_failure", "power_flow.rescue", "power_flow.dc.fallback", "power_flow.auto_slack", "cgmes_import.require_boundary", "cgmes_import.infer_base_voltages", "powsybl_import.multi_slack", "benchmark.enabled", "matpower_import.apply_bus_names", "matpower_import.apply_branch_names", "matpower_import.apply_branch_kind", "matpower_import.import_for001_contingencies", "model.net_cache_enabled", "matpower_export.write_solution", "output.console_live", "output.console_summary", "output.startup_latency_hint", "state_estimation.flatstart", "state_estimation.robust", "state_estimation.topology_precheck", "state_estimation.report_residual_correlation", "state_estimation.symmetric_gain", "power_flow.qlimits.guard.enabled", "power_flow.qlimits.guard.accept_bounded_violations", "power_flow.qlimits.guard.freeze_after_repeated_switching", "power_flow.qlimits.guard.log")
+  if key in ("power_flow.autodamp", "power_flow.flatstart", "power_flow.start_mode.ratio_profile", "power_flow.start_mode.rotate_behind_pst", "power_flow.qlimits.enabled", "power_flow.start_current_iteration.enabled", "power_flow.start_current_iteration.accept_only_if_improved", "power_flow.start_current_iteration.only_for_large_cases", "power_flow.merit.enabled", "power_flow.merit.fallback_max_mismatch", "power_flow.trust_region.enabled", "power_flow.apslf.nr_polish", "power_flow.apslf.convergence_radius", "power_flow.apslf_start.enabled", "power_flow.islands.enabled", "power_flow.islands.diagnostic_continue_after_failure", "power_flow.rescue", "power_flow.dc.fallback", "power_flow.auto_slack", "cgmes_import.require_boundary", "cgmes_import.infer_base_voltages", "cgmes_import.map_energy_source", "cgmes_import.map_power_electronics", "cgmes_import.shunt_control", "cgmes_import.read_dynamics", "cgmes_import.equivalent_injection_as_source", "powsybl_import.multi_slack", "benchmark.enabled", "matpower_import.apply_bus_names", "matpower_import.apply_branch_names", "matpower_import.apply_branch_kind", "matpower_import.import_for001_contingencies", "matpower_export.write_solution", "output.console_live", "output.console_summary", "output.startup_latency_hint", "state_estimation.flatstart", "state_estimation.start_mode.rotate_behind_pst", "state_estimation.robust", "state_estimation.topology_precheck", "state_estimation.report_residual_correlation", "state_estimation.symmetric_gain", "state_estimation.tap_estimation.enabled", "state_estimation.tap_estimation.fallback", "state_estimation.tap_estimation.include_machine_transformers", "power_flow.qlimits.guard.enabled", "power_flow.qlimits.guard.accept_bounded_violations", "power_flow.qlimits.guard.freeze_after_repeated_switching", "power_flow.qlimits.guard.log")
     _validate_override_type(key, value, Bool)
   elseif key in ("power_flow.max_iter", "contingency.max_iter", "power_flow.start_current_iteration.max_iter", "power_flow.apslf.order", "power_flow.apslf_start.order", "benchmark.samples", "output.detailed_result_csv_direct_threshold_buses", "output.detailed_result_csv_buffer_initial_bytes", "output.detailed_result_csv_buffer_max_bytes", "output.detailed_result_csv_streaming_threshold_rows", "output.console_max_rows", "output.result_table_max_rows", "output.result_table_large_case_threshold_buses")
     _validate_override_type(key, value, Int)
@@ -215,6 +271,60 @@ function _validate_gui_override_value(key::String, value)
   elseif key in ("power_flow.qlimits.auto_q_delta_pu", "power_flow.qlimits.hysteresis_pu", "power_flow.qlimits.reenable_v_hyst_pu", "power_flow.qlimits.guard.min_q_range_pu", "power_flow.qlimits.guard.violation_threshold_pu")
     _validate_override_type(key, value, Float64)
     isfinite(value) && value >= 0 || throw(ArgumentError("Override $(key) must be finite and non-negative; got $(value)."))
+  elseif key in ("contingency.events.enabled", "contingency.events.double_circuits", "contingency.events.busbars", "contingency.events.substations", "contingency.events.links", "contingency.events.name_groups", "contingency.pairs.enabled")
+    _validate_override_type(key, value, Bool)
+  elseif key in ("contingency.events.max_members", "contingency.pairs.max_pairs")
+    _validate_override_type(key, value, Int)
+    value >= 1 || throw(ArgumentError("Override $(key) must be at least 1; got $(value)."))
+  elseif key == "qsts.mode"
+    _validate_allowed_symbol(key, _as_symbol_cfg(value), QSTS_MODE_VALUES)
+  elseif key == "qsts.base_step"
+    # a step number; whether the series has that many steps is checked
+    # where the series is built
+    _validate_override_type(key, value, Int)
+    value >= 1 || throw(ArgumentError("Override $(key) must be at least 1; got $(value)."))
+  elseif key == "qsts.snapshot_controls"
+    _validate_override_type(key, value, Bool)
+  elseif key == "qsts.sequential_start"
+    _validate_allowed_symbol(key, _as_symbol_cfg(value), QSTS_SEQUENTIAL_START_VALUES)
+  elseif key in ("qsts.resync_every", "qsts.dead_time_steps")
+    # step counts; 0 is off
+    _validate_override_type(key, value, Int)
+    value >= 0 || throw(ArgumentError("Override $(key) must be 0 (off) or a positive number of steps; got $(value)."))
+  elseif key == "qsts.hunting_window"
+    # a hunting pattern is three moves, so a shorter window finds none
+    _validate_override_type(key, value, Int)
+    value >= 3 || throw(ArgumentError("Override $(key) must be at least 3 (a hunting pattern is three moves); got $(value)."))
+  elseif key in ("qsts.vm_min_pu", "qsts.vm_max_pu", "qsts.loading_max_pct")
+    # the order vm_min < vm_max needs both values and is checked by the
+    # typed parser on the merged configuration
+    _validate_override_type(key, value, Float64)
+    (isfinite(value) && value > 0.0) || throw(ArgumentError("Override $(key) must be a finite positive number; got $(value)."))
+  elseif key in ("qsts.series.min_structural_overlap", "qsts.series.max_injection_churn")
+    # shares; null keeps "no limit" for the churn flag
+    (key == "qsts.series.max_injection_churn" && value === nothing) || begin
+      _validate_override_type(key, value, Float64)
+      0.0 <= value <= 1.0 || throw(ArgumentError("Override $(key) must be in [0, 1]; got $(value)."))
+    end
+  elseif key == "qsts.series.max_gap"
+    # minutes between snapshots; null keeps "no limit"
+    value === nothing || begin
+      _validate_override_type(key, value, Float64)
+      isfinite(value) && value > 0.0 || throw(ArgumentError("Override $(key) must be a positive number of minutes; got $(value)."))
+    end
+  elseif key == "short_circuit.converter_current_factor"
+    # 0.0 is off, as in `ShortCircuitConfig`
+    _validate_override_type(key, value, Float64)
+    isfinite(value) && value >= 0 || throw(ArgumentError("Override $(key) must be 0 (off) or a finite positive number; got $(value)."))
+  elseif key == "model.nominal_frequency_hz"
+    _validate_override_type(key, value, Float64)
+    isfinite(value) && value > 0 || throw(ArgumentError("Override $(key) must be finite and positive; got $(value)."))
+  elseif key == "power_flow.plausibility.vmin_warn"
+    # 0 switches the check off, so zero is valid here
+    _validate_override_type(key, value, Float64)
+    isfinite(value) && value >= 0 || throw(ArgumentError("Override $(key) must be finite and non-negative; got $(value)."))
+  elseif key == "contingency.pairs.rule"
+    Symbol(String(value)) in CONTINGENCY_PAIR_RULE_VALUES || throw(ArgumentError("Override $(key) must be one of $(join(CONTINGENCY_PAIR_RULE_VALUES, ", ")); got $(repr(value))."))
   elseif key in ("power_flow.qlimits.trace_buses", "power_flow.qlimits.lock_pv_to_pq_buses")
     value isa AbstractVector && all(b -> b isa Integer && !(b isa Bool) && b >= 1, value) || throw(ArgumentError("Override $(key) must be a list of bus numbers (integers >= 1); got $(repr(value))."))
   elseif key == "power_flow.qlimits.final_q_accept_pu"
@@ -233,7 +343,7 @@ function _validate_gui_override_value(key::String, value)
   elseif key == "state_estimation.max_eliminations"
     _validate_override_type(key, value, Int)
     value >= 0 || throw(ArgumentError("Override $(key) must be non-negative; got $(value)."))
-  elseif key in ("state_estimation.k_eliminate", "state_estimation.k_suppress")
+  elseif key in ("state_estimation.k_eliminate", "state_estimation.k_suppress", "state_estimation.zero_injection_sigma_mva")
     _validate_override_type(key, value, Float64)
     isfinite(value) && value > 0 || throw(ArgumentError("Override $(key) must be finite and positive; got $(value)."))
   elseif key in ("power_flow.tol", "power_flow.tol_MW", "power_flow.autodamp_min", "power_flow.start_current_iteration.tol", "power_flow.start_current_iteration.damping", "power_flow.start_current_iteration.min_improvement_factor", "power_flow.start_current_iteration.vm_min_pu", "power_flow.start_current_iteration.vm_max_pu", "power_flow.start_current_iteration.max_angle_step_deg", "power_flow.merit.armijo_c1", "power_flow.trust_region.initial_radius", "power_flow.trust_region.eta_accept", "benchmark.seconds", "matpower_import.shift_sign")
@@ -289,8 +399,20 @@ function _validate_gui_override_value(key::String, value)
     _validate_allowed_symbol(key, _as_symbol_cfg(value), MATPOWER_COMPARE_VOLTAGE_REFERENCE_VALUES)
   elseif key == "state_estimation.robust_mode"
     _validate_allowed_symbol(key, _as_symbol_cfg(value), STATE_ESTIMATION_ROBUST_MODE_VALUES)
+  elseif key == "state_estimation.zero_injection"
+    _validate_allowed_symbol(key, _as_symbol_cfg(value), STATE_ESTIMATION_ZERO_INJECTION_VALUES)
+  elseif key == "state_estimation.sigma_by_voltage_level"
+    # the same parser the configuration uses: a bad row fails here, with its
+    # name and reason, before the run starts
+    _parse_sigma_by_voltage_level(value)
   elseif key == "state_estimation.linear_solver"
     _validate_allowed_symbol(key, _as_symbol_cfg(value), STATE_ESTIMATION_LINEAR_SOLVER_VALUES)
+  elseif key == "state_estimation.tap_estimation.exclude"
+    # transformer names or mRIDs: a list of strings, or one string with ";"
+    # between them; whether they exist is checked against the net of the run
+    (value isa AbstractString || (value isa AbstractVector && all(v -> v isa AbstractString, value))) || throw(ArgumentError("Override $(key) must be a list of transformer names or mRIDs; got $(repr(value))."))
+  elseif key == "state_estimation.tap_estimation.impedance_correction"
+    _validate_allowed_symbol(key, _as_symbol_cfg(value), STATE_ESTIMATION_TAP_IMPEDANCE_CORRECTION_VALUES)
   elseif key == "matpower_import.matpower_dcline_mode"
     _validate_allowed_symbol(key, _as_symbol_cfg(value), MATPOWER_DCLINE_MODE_VALUES)
   elseif key == "cgmes_import.hvdc_mode"
@@ -417,6 +539,38 @@ function _case_config_shared_stem(a::AbstractString, b::AbstractString)::Bool
   return stem(a) == stem(b)
 end
 
+# a dotted key that names a value of the packaged template, or sits below one
+# of its free-form mappings (distributed slack weights, controllers)
+function _config_key_in_defaults(defaults::AbstractDict, key::AbstractString)::Bool
+  any(p -> key == p || startswith(key, p * "."), _FREEFORM_MAPPING_CONFIG_KEYS) && return true
+  current = defaults
+  for part in _dotted_path_parts(key)
+    (current isa AbstractDict && haskey(current, part)) || return false
+    current = current[part]
+  end
+  return true
+end
+
+# Of the keys a case configuration or an SCF `sparlectra.config` carries
+# outside the case scope, a key this Sparlectra version does not know at all
+# (removed or misspelled) is dropped with a warning, like in the configuration
+# file: a stored file keeps loading. Returns the
+# known keys outside the case scope, which the caller refuses.
+function _drop_unknown_case_config_keys!(out::Dict{String,Any}, bad::Vector{String}, where::AbstractString)::Vector{String}
+  isempty(bad) && return bad
+  defaults = load_yaml_dict(DEFAULT_SPARLECTRA_CONFIG_PATH)
+  known = String[]
+  for key in bad
+    if _config_key_in_defaults(defaults, key)
+      push!(known, key)
+    else
+      @warn "Unknown Sparlectra configuration key $(key) in $(where) is ignored (not a key of this Sparlectra version; remove it from the file)." maxlog = 1 _id = Symbol("unknown_case_config_key_", key, "_", where)
+      delete!(out, key)
+    end
+  end
+  return known
+end
+
 """
     load_case_config(case_path) -> Dict{String,Any}
 
@@ -426,12 +580,15 @@ must open with the header keys `config_version`, `scope: case`, and
 `case: <case file basename>`; a `case` value naming a different file is the
 hard error `case_config_mismatch`, so a copied config cannot silently steer
 the wrong case. Keys outside the case scope are refused with the same
-wording as the in-file `sparlectra.config` check.
+wording as the in-file `sparlectra.config` check; a key this Sparlectra
+version does not know is dropped with a warning.
 """
 function load_case_config(case_path::AbstractString)::Dict{String,Any}
   path = case_config_path(case_path)
   isfile(path) || return Dict{String,Any}()
   raw = load_yaml_dict(path)
+  # the sigma table names its file and line on an error
+  _check_sigma_levels_in_file(raw, path)
   version = _config_file_version(raw, path)
   version < CONFIG_VERSION_CURRENT && _apply_config_aliases!(raw, version, path)
   scope = lowercase(strip(string(get(raw, "scope", ""))))
@@ -455,39 +612,10 @@ function load_case_config(case_path::AbstractString)::Dict{String,Any}
   # output.csv_format now and the form block entry is ignored)
   delete!(raw, "form")
   out = _flatten_config_values!(Dict{String,Any}(), raw)
-  # a key removed from the configuration (0.30.2: power_flow.islands.mode,
-  # which the Settings page wrote into case files before) is dropped with
-  # the warning the configuration file gets, never refused: an old case
-  # file must keep loading
-  for key in sort!(String[k for k in keys(out) if haskey(_REMOVED_NOTED_CONFIG_KEYS, k)])
-    @warn "Configuration key $(key) in $(basename(path)) is ignored: $(_REMOVED_NOTED_CONFIG_KEYS[key])" maxlog = 1 _id = Symbol("removed_case_key_", key, "_", path)
-    delete!(out, key)
-  end
   bad = sort!(String[k for k in keys(out) if !scf_is_case_config_key(k)])
+  bad = _drop_unknown_case_config_keys!(out, bad, basename(path))
   isempty(bad) || throw(ArgumentError("Case configuration $(path): config key(s) $(join(bad, ", ")) are not case scope (logging, benchmarking, parallelism, Web UI and export settings belong in the configuration file). Remove them from the case configuration."))
   return out
-end
-
-"""
-    ignored_removed_config_keys(config_file, case_path) -> Vector{String}
-
-One line per configuration key that is no longer read (`_REMOVED_NOTED_CONFIG_KEYS`,
-0.30.2: `power_flow.islands.mode`) and still sits in the configuration file
-`config_file` or in the case configuration of `case_path`, naming the file
-and what replaced the key. The loaders drop such a key with a warning that
-is printed before a service run starts; the service writes these lines into
-its run.log so the archived run says it too. Empty when nothing is found.
-"""
-function ignored_removed_config_keys(config_file::AbstractString, case_path::AbstractString)::Vector{String}
-  lines = String[]
-  for path in (String(config_file), case_config_path(case_path))
-    isfile(path) || continue
-    flat = _flatten_config_values!(Dict{String,Any}(), load_yaml_dict(path))
-    for key in sort!(String[k for k in keys(flat) if haskey(_REMOVED_NOTED_CONFIG_KEYS, k)])
-      push!(lines, "Configuration key $(key) in $(basename(path)) is ignored: $(_REMOVED_NOTED_CONFIG_KEYS[key])")
-    end
-  end
-  return lines
 end
 
 """
@@ -576,6 +704,12 @@ webui, matpower_export) still come from the general file. A case
 without a config file, including a bare `.scf.json`, keeps the full
 chain, and so does the deprecated in-file block alone (legacy level,
 legacy semantics).
+
+A Web UI write that creates a case configuration file (a settings save,
+the measurement generator, the conversion of a legacy settings sidecar)
+writes, besides its own values, every case-scope key in which the general
+file differs from the packaged defaults, so the case computes as before. From then on
+the case no longer follows the general file for case-scope keys.
 
 Returns the effective typed `config`, the `effective_raw` dictionary for
 the effective-config artifact, the merged flat and nested override chains,
@@ -719,9 +853,33 @@ const CONFIG_OVERRIDE_REPORT_KEYS = String[
   "contingency.warm_active_set",
   "contingency.warm_cold_check",
   "contingency.warm_cold_check_margin_pu",
+  "contingency.events.enabled",
+  "contingency.events.double_circuits",
+  "contingency.events.busbars",
+  "contingency.events.substations",
+  "contingency.events.links",
+  "contingency.events.name_groups",
+  "contingency.events.max_members",
+  "contingency.pairs.enabled",
+  "contingency.pairs.rule",
+  "contingency.pairs.max_pairs",
+  "qsts.mode",
+  "qsts.base_step",
+  "qsts.snapshot_controls",
+  "qsts.sequential_start",
+  "qsts.resync_every",
+  "qsts.dead_time_steps",
+  "qsts.hunting_window",
+  "qsts.vm_min_pu",
+  "qsts.vm_max_pu",
+  "qsts.loading_max_pct",
+  "qsts.series.min_structural_overlap",
+  "qsts.series.max_injection_churn",
+  "qsts.series.max_gap",
   "power_flow.start_mode.angle_mode",
   "power_flow.start_mode.voltage_mode",
   "power_flow.start_mode.ratio_profile",
+  "power_flow.start_mode.rotate_behind_pst",
   "power_flow.qlimits.enabled",
   "power_flow.qlimits.enforcement_mode",
   "power_flow.qlimits.start_iter",
@@ -739,6 +897,11 @@ const CONFIG_OVERRIDE_REPORT_KEYS = String[
   "power_flow.auto_slack",
   "cgmes_import.require_boundary",
   "cgmes_import.infer_base_voltages",
+  "cgmes_import.map_energy_source",
+  "cgmes_import.map_power_electronics",
+  "cgmes_import.shunt_control",
+  "cgmes_import.read_dynamics",
+  "cgmes_import.equivalent_injection_as_source",
   "powsybl_import.hvdc_mode",
   "powsybl_import.multi_slack",
   "powsybl_import.remote_regulation",

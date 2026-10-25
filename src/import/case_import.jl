@@ -33,8 +33,9 @@ What one case import hands to a service run:
 - `provenance`: source path, per-format import records (the CGMES import
   result with its short-circuit data and SV bookkeeping, the parsed DTF
   case, the auto-profile decision), for the artifacts a service writes.
-- `studies`: the study definitions a case file carries (`contingencies`,
-  `short_circuit`); empty for every foreign format.
+- `studies`: the study definitions a case file carries (`short_circuit`);
+  empty for every foreign format. Scenarios and contingency studies are read
+  from the typed case (`scf_case_scenarios`), not from here.
 - `overrides`: reserved for auto-profile recommendations as override level;
   empty while the MATPOWER context still rewrites the run configuration itself.
 """
@@ -56,7 +57,7 @@ struct ImportedCase
   end
 end
 
-const _EMPTY_CASE_STUDIES = (contingencies = Dict{String,Any}(), short_circuit = Dict{String,Any}())
+const _EMPTY_CASE_STUDIES = (short_circuit = Dict{String,Any}(),)
 
 function _looks_like_cgmes(case_path::AbstractString)::Bool
   isdir(case_path) && return true
@@ -137,6 +138,9 @@ function _detect_case_format(case_path::AbstractString; requested::Symbol = :aut
   # a PowSyBl bundle directory or IIDM file comes first: the CGMES probe
   # claims every directory and every .xml
   detect(PowsyblAdapter, case_path) && return :powsybl
+  # an SCF time series is a zip as well; its manifest decides, before the
+  # CGMES probe claims every .zip
+  is_scf_series(case_path) && return :scf_series
   _looks_like_cgmes(case_path) && return :cgmes
   ext = lowercase(splitext(case_path)[2])
   # Sparlectra Case Format (#342): self-describing JSON, recognized by its
@@ -157,18 +161,24 @@ function _detect_case_format(case_path::AbstractString; requested::Symbol = :aut
 end
 
 """
-    importCGMES(config; path, name) -> CGMESImportResult
+    importCGMES(config; path, name, hvdc_mode, ignore_connected) -> CGMESImportResult
 
 Import a CGMES delivery with everything the configuration says about it, in
-one place: the thirteen `cgmes_import` values and the bus shunt model (the
+one place: the seventeen `cgmes_import` values and the bus shunt model (the
 net-parameter stamping lives with the import dispatch:
 once per importer). The four service call sites used
 to unpack the same values by hand, and a new option had to be added in four
 places or it silently kept its default at three of them (the accompanying
 stamp was found in the wrong function once already).
 The keyword form of `importCGMES` stays for programmatic use.
+
+`path` takes everything the keyword form takes, including a `CGMESStore`
+from `loadCGMES`, which is not modified. `hvdc_mode` and `ignore_connected`
+default to `cgmes_import.hvdc_mode` and `cgmes_import.ignore_connected`; a
+caller that needs every element built whatever its SSH state passes
+`ignore_connected = true`.
 """
-function CGMESImporter.importCGMES(config::SparlectraConfig; path, name::AbstractString, hvdc_mode::Symbol = config.cgmes.hvdc_mode)
+function CGMESImporter.importCGMES(config::SparlectraConfig; path, name::AbstractString, hvdc_mode::Symbol = config.cgmes.hvdc_mode, ignore_connected::Bool = config.cgmes.ignore_connected)
   cgmes_cfg = config.cgmes
   result = importCGMES(
     path = path,
@@ -177,13 +187,19 @@ function CGMESImporter.importCGMES(config::SparlectraConfig; path, name::Abstrac
     require_boundary = cgmes_cfg.require_boundary,
     tap_control = cgmes_cfg.tap_control,
     machine_control = cgmes_cfg.machine_control,
-    ignore_connected = cgmes_cfg.ignore_connected,
+    ignore_connected = ignore_connected,
     vset_min_pu = cgmes_cfg.vset_min_pu,
     vset_max_pu = cgmes_cfg.vset_max_pu,
     multi_slack = cgmes_cfg.multi_slack,
+    equivalent_branch_min_z_pu = cgmes_cfg.equivalent_branch_min_z_pu,
     strict_placeholder_guards = cgmes_cfg.placeholder_guards === :strict,
     infer_base_voltages = cgmes_cfg.infer_base_voltages,
     hvdc_mode = hvdc_mode,
+    map_energy_source = cgmes_cfg.map_energy_source,
+    map_power_electronics = cgmes_cfg.map_power_electronics,
+    shunt_control = cgmes_cfg.shunt_control,
+    read_dynamics = cgmes_cfg.read_dynamics,
+    equivalent_injection_as_source = cgmes_cfg.equivalent_injection_as_source,
     name = String(name),
   )
   return result
@@ -199,7 +215,7 @@ that was actually read (does it carry a usable SvVoltage state or not).
 Returns the import result, the run configuration with the start decision
 applied, and the records the service artifacts need. Import errors
 propagate; the caller owns the failure reporting (the power-flow service
-writes a diagnostic cgmes.log from what can still be read).
+writes a diagnostic cgmes_import_report.md from what can still be read).
 """
 function _import_cgmes(path::AbstractString, cfg::SparlectraConfig; name::AbstractString, run_kind::Symbol = :powerflow, phase_callback = phase -> nothing)
   cgmes_cfg = cfg.cgmes
@@ -246,9 +262,13 @@ Import a case of any format for a service run. Detection follows
 explicitly. Construction goes through the same per-format paths the
 power-flow service used, so every service gets the identical network for
 the identical file: the shared context for MATPOWER and the case format
-(auto profile, net cache, projected start, configuration stamping), the
+(auto profile, projected start, configuration stamping), the
 configured CGMES import with the start-values decision, and the DTF build
 with its DC-line rejection.
+
+An SCF time series (`:scf_series`) imports as its base case, with the
+units the base case parks parked (`build_net(series)`); the steps are not
+applied.
 
 Format policy stays with the caller: a service that does not accept a
 format checks `ImportedCase.format` and words its own refusal, because the
@@ -257,13 +277,15 @@ wording of those refusals is part of each service's contract.
 function import_case(path::AbstractString, general_config::SparlectraConfig; requested_format::Symbol = :auto, run_kind::Symbol = :powerflow, name::AbstractString = basename(path), performance_profile = nothing, phase_callback = phase -> nothing)
   fmt = _detect_case_format(String(path); requested = requested_format)
   provenance = Dict{String,Any}("source_path" => String(path))
-  # the flat start sets the voltage profile for this run, for every format:
-  # the two start modes go classic (they would choose another profile), the
-  # start machines follow their own keys (#463); the caller reports the
-  # overridden keys in its run log
+  # a flat start is a flat start for every format: the projection, the DC
+  # seed and the two start modes are off for this run
+  # (_flatstart_profile_config); the caller reports the overridden keys in
+  # its run log. CGMES decides the start only after the import
+  # (cgmes_import.start_values), so its list is computed there.
+  input_config = general_config
   general_config, flatstart_overrides = _flatstart_profile_config(general_config)
   provenance["flatstart_overrides"] = flatstart_overrides
-  if fmt === :matpower || fmt === :scf
+  if fmt === :matpower || fmt === :scf || fmt === :scf_series
     ctx = _import_sparlectra_context(String(path), nothing, general_config; performance_profile = performance_profile)
     provenance["auto_profile_result"] = ctx.auto_profile_result
     provenance["projected_start_applied"] = ctx.projected_start_applied
@@ -273,7 +295,11 @@ function import_case(path::AbstractString, general_config::SparlectraConfig; req
     return ImportedCase(ctx.net, ctx.config, fmt, provenance, studies, ctx.auto_profile_overrides)
   elseif fmt === :cgmes
     phase_callback("reading_cgmes_delivery")
-    cg = _import_cgmes(String(path), general_config; name = name, run_kind = run_kind, phase_callback = phase_callback)
+    cg = _import_cgmes(String(path), input_config; name = name, run_kind = run_kind, phase_callback = phase_callback)
+    # the flat start as start_values decided it: :sv clears it (empty list),
+    # :flat sets it, so the list names what the run really switches off
+    cg_run_config, cg_flatstart_overrides = _flatstart_profile_config(cg.run_config)
+    provenance["flatstart_overrides"] = cg_flatstart_overrides
     provenance["cgmes_result"] = cg.result
     provenance["cgmes_paths"] = cg.paths
     provenance["cgmes_boundary_autodetected"] = cg.boundary_autodetected
@@ -289,8 +315,8 @@ function import_case(path::AbstractString, general_config::SparlectraConfig; req
     # stamped exactly once PER IMPORTER, and this is the CGMES
     # importer's once (with the run
     # config, exactly what the discarded second build used to apply).
-    _apply_config_net_parameters!(cg.result.net, cg.run_config)
-    return ImportedCase(cg.result.net, cg.run_config, fmt, provenance, _EMPTY_CASE_STUDIES, Dict{String,Any}())
+    _apply_config_net_parameters!(cg.result.net, cg_run_config)
+    return ImportedCase(cg.result.net, cg_run_config, fmt, provenance, _EMPTY_CASE_STUDIES, Dict{String,Any}())
   elseif fmt === :powsybl
     phase_callback("reading_powsybl_bundle")
     net, report, tables = _import_powsybl(String(path), powsybl_adapter_options(general_config); name = name)
@@ -318,8 +344,8 @@ end
 const DTF_FOR001_UNSUPPORTED_DCLINE_MESSAGE = "DC lines are currently not supported by the native DTF/MATPOWER power-flow path."
 
 # Resolve the delivery parts of one CGMES run: the case itself, any extra
-# parts from cgmes_import.path (typically the boundary set), and — for a bare
-# base case — a boundary delivery sitting next to it in the same directory
+# parts from cgmes_import.path (typically the boundary set), and, for a bare
+# base case, a boundary delivery sitting next to it in the same directory
 # (ENTSO-E names them "...Boundary..." or "..._BD_..."). Returns the path list
 # plus whether the boundary was autodetected. Shared by the power-flow CGMES
 # branch and the short-circuit service run.
@@ -335,15 +361,29 @@ function _cgmes_delivery_paths(case_path::AbstractString, cgmes_cfg)::Tuple{Vect
   catch
     String[]
   end
+  candidates = String[]
   for n in neighbours
     occursin(r"(?i)boundary|_bd_|_bd\.", n) || continue
     cand = joinpath(dirname(abspath(case_path)), n)
     cand == abspath(case_path) && continue
     (isdir(cand) || endswith(lowercase(n), ".zip")) || continue
-    push!(paths, cand)
-    return paths, true
+    push!(candidates, cand)
   end
-  return paths, false
+  isempty(candidates) && return paths, false
+  # Several boundary sets in one directory (the MicroGrid and the MiniGrid
+  # test configurations side by side): take the first one that resolves the
+  # topology references of this case. The first by name alone paired MiniGrid
+  # with the MicroGrid boundary and the import failed. None resolves: keep the
+  # first, the import then reports what is missing.
+  if length(candidates) > 1
+    for cand in candidates
+      CGMESImporter.summarizeCGMES(path = [String(case_path), cand]).boundary_missing_hint && continue
+      push!(paths, cand)
+      return paths, true
+    end
+  end
+  push!(paths, first(candidates))
+  return paths, true
 end
 
 function _reject_dtf_dcline_like_content!(case_path::AbstractString)

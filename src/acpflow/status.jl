@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -178,15 +178,26 @@ end
 
 _is_accepted_control_status(status::Symbol)::Bool = status in (:none, :converged, :disabled, :no_active_controllers, :no_controllers)
 
+# A solve of a controlled run that did not converge: the outcome is
+# :pf_failed, the reason stays the solver's own (a run at max_iter carries
+# :iteration_limit, :type_identification_divergence or
+# :numerical_divergence). Up to 0.50 the reason was replaced by :pf_failed
+# as well, and a controlled run could not tell why its solve failed. A
+# status without a solver reason gets :pf_failed.
+function _pf_failed_framework_status(base_status)
+  base_status.reason in (:none, :solver_error) && return merge(base_status, (outcome = :pf_failed, final_converged = false, reason = :pf_failed, reason_text = "power flow failed during controlled framework run"))
+  return merge(base_status, (outcome = :pf_failed, final_converged = false, reason_text = string(base_status.reason_text, " (controlled framework run)")))
+end
+
 function _compose_framework_status(base_status, control_status::Symbol)
   _is_accepted_control_status(control_status) && return base_status
   if control_status === :pf_failed
     meaningful_rejection = base_status.outcome !== :converged || base_status.reason !== :none || !base_status.final_converged
     meaningful_rejection && base_status.numerical_converged && return merge(base_status, (final_converged = false,))
-    return merge(base_status, (outcome = :pf_failed, final_converged = false, reason = :pf_failed, reason_text = "power flow failed during controlled framework run"))
+    return _pf_failed_framework_status(base_status)
   end
   if !base_status.numerical_converged
-    return merge(base_status, (outcome = :pf_failed, final_converged = false, reason = :pf_failed, reason_text = "power flow failed during controlled framework run"))
+    return _pf_failed_framework_status(base_status)
   end
   outcome = control_status === :blocked ? :control_blocked : control_status === :max_outer_iterations ? :control_max_outer_iterations : :control_not_converged
   return merge(base_status, (outcome = outcome, final_converged = false, reason = outcome, reason_text = "control loop ended with status $(control_status)"))
@@ -212,6 +223,38 @@ function _dc_status_diagnostics(dc_status)::NamedTuple
   return (solver = :dc, dc_iterations = _rect_status_get(dc_status, :iterations, 0), dc_stage = _rect_status_get(dc_status, :stage, :unknown))
 end
 
+# Plausibility check of a converged AC solution
+# (power_flow.plausibility.vmin_warn): the lowest voltage magnitude over the
+# energized buses of every level. Isolated and de-energized buses carry no
+# solved state and stay out. Returns the diagnostics fields of the result;
+# `plausibility_warning` is the warning text, "" when there is none. A run
+# that did not converge, or a threshold of 0, is :not_checked.
+function _plausibility_diagnostics(net::Net, cfg::PowerFlowPlausibilityConfig, numerical_converged::Bool)::NamedTuple
+  threshold = cfg.vmin_warn
+  not_checked = (plausibility_status = :not_checked, plausibility_vmin_warn_pu = threshold, plausibility_min_vm_pu = NaN, plausibility_min_vm_bus = "", plausibility_low_vm_count = 0, plausibility_warning = "")
+  (numerical_converged && threshold > 0.0) || return not_checked
+  iso = Set{Int}(net.isoNodes)
+  min_vm = Inf
+  min_idx = 0
+  low = 0
+  for (i, node) in enumerate(net.nodeVec)
+    (i in iso || isIsolated(node)) && continue
+    vm = node._vm_pu
+    (vm === nothing || !isfinite(vm)) && continue
+    vm < threshold && (low += 1)
+    if vm < min_vm
+      min_vm = vm
+      min_idx = i
+    end
+  end
+  min_idx == 0 && return not_checked
+  bus = get(_bus_name_by_idx(net), min_idx, string(min_idx))
+  low == 0 && return (plausibility_status = :ok, plausibility_vmin_warn_pu = threshold, plausibility_min_vm_pu = min_vm, plausibility_min_vm_bus = bus, plausibility_low_vm_count = 0, plausibility_warning = "")
+  vn = getNodeVn(net.nodeVec[min_idx])
+  warning = @sprintf("power flow plausibility: lowest voltage %.4f pu at bus %s (%.1f kV), %d energized bus(es) below power_flow.plausibility.vmin_warn = %.3g pu; the converged solution may lie on the low-voltage branch", min_vm, bus, vn, low, threshold)
+  return (plausibility_status = :low_voltage, plausibility_vmin_warn_pu = threshold, plausibility_min_vm_pu = min_vm, plausibility_min_vm_bus = bus, plausibility_low_vm_count = low, plausibility_warning = warning)
+end
+
 function _build_sparlectra_result(net::Net, cfg::SparlectraConfig, execution, performance_profile)::SparlectraRunResult
   if cfg.powerflow.solver === :dc
     dc_status = dc_pf_status(net)
@@ -234,9 +277,32 @@ function _build_sparlectra_result(net::Net, cfg::SparlectraConfig, execution, pe
   end
   status = _compose_framework_status(status, execution.control_status)
   # See the DC branch above: carry the run's iteration count for the
-  # single-island fallback of the island failure message.
-  status = _append_island_failure_message(merge(status, (iterations = execution.iterations,)), performance_profile)
+  # single-island fallback of the island failure message, and the APSLF
+  # diagnosis line, which that message replaces with the reason_text.
+  carried = rect_status !== nothing && hasproperty(rect_status, :apslf_diagnosis_line) ? (iterations = execution.iterations, apslf_diagnosis_line = rect_status.apslf_diagnosis_line) : (iterations = execution.iterations,)
+  status = _append_island_failure_message(merge(status, carried), performance_profile)
   diagnostics = cfg.powerflow.method === :rectangular ? merge(_rectangular_status_diagnostics(rect_status), _profile_start_projection_diagnostics(performance_profile)) : NamedTuple()
+  # once per run, after the solve: a converged result below the voltage
+  # threshold stays converged and gets the warning in the diagnostics and
+  # the log (run.log in the service, which captures the logger)
+  plausibility = _plausibility_diagnostics(net, cfg.powerflow.plausibility, status.numerical_converged)
+  diagnostics = merge(diagnostics, plausibility)
+  isempty(plausibility.plausibility_warning) || @warn plausibility.plausibility_warning
+  # once per run as well: the stability conditions (6)/(7) of Zhao et al.
+  # at every voltage-regulated bus of the final state. A diagnosis, the
+  # status stays; the line goes into the solver status so the result print
+  # shows the same verdict without a second check
+  # in auto mode the Q-limit configuration of the last attempt (auto record):
+  # its locks and its on/off decide locked_by and whether the check applies
+  qlim = cfg.powerflow.qlimits
+  if cfg.powerflow.mode === :auto
+    auto_rec = auto_pf_record(net)
+    auto_rec !== nothing && hasproperty(auto_rec, :final_qlimits) && (qlim = auto_rec.final_qlimits)
+  end
+  stability = _qlimit_stability_diagnostics(net, qlim, status.numerical_converged, rect_status)
+  diagnostics = merge(diagnostics, (qlimit_stability_status = stability.qlimit_stability_status, qlimit_stability_violations = stability.qlimit_stability_violations, qlimit_stability_report = stability.qlimit_stability_report))
+  rect_status isa NamedTuple && _set_rectangular_pf_status!(net, (; rect_status..., qlimit_stability_line = stability.qlimit_stability_line))
+  isempty(stability.qlimit_stability_warning) || @warn stability.qlimit_stability_warning
   return SparlectraRunResult(net, status.outcome, status.numerical_converged, status.solution_available, status.limit_validation_status, status.final_converged, status.reason, status.reason_text, execution.iterations, execution.elapsed_s, execution.solver_elapsed_s, status.final_mismatch, cfg.powerflow.method, execution.control_status, performance_profile, diagnostics)
 end
 

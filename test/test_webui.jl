@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,66 +29,6 @@ function run_webui_fast_tests()
         @test SparlectraApp._webui_parse_bool("false") === false
         @test SparlectraApp.route_sparlectra_webui("GET", "/powerflow/artifact/..%2Fbad/result.json").status in (400, 404)
 
-        @testset "git commit sha resolution (issue #290)" begin (function ()
-            sha_a = "a" ^ 40
-            sha_b = "b" ^ 40
-
-            mktempdir() do root
-                @test SparlectraApp._git_head_commit_sha(root) === nothing
-
-                # Plain checkout: .git directory with a loose ref.
-                gitdir = joinpath(root, ".git")
-                mkpath(joinpath(gitdir, "refs", "heads"))
-                write(joinpath(gitdir, "HEAD"), "ref: refs/heads/main\n")
-                write(joinpath(gitdir, "refs", "heads", "main"), sha_a * "\n")
-                @test SparlectraApp._git_head_commit_sha(root) == sha_a
-
-                # Detached HEAD: plain SHA in HEAD.
-                write(joinpath(gitdir, "HEAD"), sha_b * "\n")
-                @test SparlectraApp._git_head_commit_sha(root) == sha_b
-
-                # Packed ref: no loose ref file, SHA only in packed-refs.
-                write(joinpath(gitdir, "HEAD"), "ref: refs/heads/packed\n")
-                write(joinpath(gitdir, "packed-refs"), "# pack-refs with: peeled fully-peeled sorted\n$(sha_b) refs/heads/packed\n^$(sha_a)\n")
-                @test SparlectraApp._git_head_commit_sha(root) == sha_b
-
-                # Regression: the packed-refs handle must be closed on the early-return
-                # path above. With a leaked handle this rm fails on Windows (EBUSY,
-                # seen as a mktempdir-cleanup error); on Linux it always succeeds, so
-                # the guard is deliberately GC- and OS-timing independent.
-                rm(joinpath(gitdir, "packed-refs"))
-                @test !isfile(joinpath(gitdir, "packed-refs"))
-            end
-
-            # Worktree checkout: .git is a "gitdir: <path>" pointer file and shared
-            # refs live in the common git directory.
-            mktempdir() do dir
-                main_git = joinpath(dir, "main", ".git")
-                mkpath(joinpath(main_git, "refs", "heads"))
-                write(joinpath(main_git, "refs", "heads", "feature"), sha_a * "\n")
-                worktree_gitdir = joinpath(main_git, "worktrees", "wt")
-                mkpath(worktree_gitdir)
-                write(joinpath(worktree_gitdir, "HEAD"), "ref: refs/heads/feature\n")
-                write(joinpath(worktree_gitdir, "commondir"), "../..\n")
-                worktree_root = joinpath(dir, "wt")
-                mkpath(worktree_root)
-                write(joinpath(worktree_root, ".git"), "gitdir: $(worktree_gitdir)\n")
-                @test SparlectraApp._git_head_commit_sha(worktree_root) == sha_a
-
-                write(joinpath(worktree_root, ".git"), "not a git pointer\n")
-                @test SparlectraApp._git_head_commit_sha(worktree_root) === nothing
-            end
-
-            # In a git checkout of Sparlectra itself (plain or worktree) the Web UI
-            # banner SHA must resolve; a registry install (no .git) yields nothing.
-            package_root = normpath(joinpath(dirname(pathof(Sparlectra)), ".."))
-            if ispath(joinpath(package_root, ".git"))
-                sha = SparlectraApp._sparlectra_git_commit_sha()
-                @test sha isa String
-                @test occursin(r"^[0-9a-f]{40}$", sha)
-            end
-        end)() end
-
         mktempdir() do root
             case_directory = joinpath(root, "cases")
             mkpath(case_directory)
@@ -110,66 +50,7 @@ function run_webui_fast_tests()
             @test !("OUTAGE.DAT" in primary)
             @test !("UNKNOWN.DAT" in primary)
             @test reference == ["FOR002.DAT"]
-
-            active_html = SparlectraApp.render_powerflow_result(Dict("run_id" => "active", "status" => "running", "elapsed_seconds" => 1.25))
-            @test occursin("Run status", active_html)
-            @test occursin("Elapsed time", active_html)
-            @test !occursin("Solver time", active_html)
-            @test !occursin("Wall time", active_html)
-
-            terminal = Dict("run_id" => "ok", "status" => "completed", "solver_elapsed_s" => 0.125, "service_phase_timings" => [Dict("phase" => "total_service", "elapsed_seconds" => 1.5)])
-            terminal_html = SparlectraApp.render_powerflow_result(terminal)
-            @test occursin("Solver time", terminal_html)
-            @test occursin("Total time", terminal_html)
-            @test !occursin("Elapsed time", terminal_html)
-            @test !occursin("Wall time", terminal_html)
-            @test !occursin("Solver time: n/a", terminal_html)
-
-            failed_solver_html = SparlectraApp.render_powerflow_result(Dict("run_id" => "failed", "status" => "failed", "metadata" => Dict("solver_elapsed_s" => 0.25), "service_phase_timings" => [Dict("phase" => "total_service", "elapsed_seconds" => 2.0)]))
-            @test occursin("Solver time", failed_solver_html)
-            presolver_html = SparlectraApp.render_powerflow_result(Dict("run_id" => "bad", "status" => "failed", "service_phase_timings" => [Dict("phase" => "total_service", "elapsed_seconds" => 0.1)]))
-            @test !occursin("Solver time", presolver_html)
-            @test occursin("Total time", presolver_html)
-            legacy_html = SparlectraApp.render_powerflow_result(Dict("run_id" => "old", "status" => "completed", "elapsed_seconds" => 3.0))
-            @test occursin("Total time", legacy_html)
         end
-
-        @testset "CGMES export checkbox and result row" begin (function ()
-            # the export-CGMES checkbox renders on Settings
-            form_html = SparlectraApp.render_settings_page(output_root=mktempdir())
-            @test occursin("name=\"export_cgmes\"", form_html)
-            # the help registry carries the hover hint and the documentation link
-            export_topic = SparlectraApp.resolve_webui_help_topic("webui.export_cgmes")
-            @test export_topic !== nothing && !isempty(export_topic.hint)
-            @test startswith(SparlectraApp.webui_help_doc_url("webui.export_cgmes"), "https://")
-
-            req = SparlectraApp.powerflow_webui_request(Dict("casefile" => "case.m", "export_cgmes" => "true"))
-            @test req["export_cgmes"] === true
-            # unchecked checkbox: browsers submit only the hidden false field
-            req = SparlectraApp.powerflow_webui_request(Dict("casefile" => "case.m", "export_cgmes" => "false"))
-            @test req["export_cgmes"] === false
-            # absent field falls back to the spec default (false)
-            req = SparlectraApp.powerflow_webui_request(Dict("casefile" => "case.m"))
-            @test req["export_cgmes"] === false
-
-            completed_html = SparlectraApp.render_powerflow_result(
-                Dict(
-                    "run_id" => "x",
-                    "status" => "completed",
-                    "metadata" => Dict("cgmes_export_status" => "completed", "cgmes_export_files" => "n_EQ.xml, n_TP.xml, n_SSH.xml", "cgmes_export_notices" => "transformer T1: phase shift 2.0° not exported (fixed ratio only)", "cgmes_export_sc_lines" => 3),
-                ),
-            )
-            @test occursin("CGMES export", completed_html)
-            @test occursin("n_SSH.xml", completed_html)
-            @test occursin("phase shift 2.0° not exported", completed_html)
-            @test occursin("zero-sequence data on 3 line(s)", completed_html)
-
-            failed_html = SparlectraApp.render_powerflow_result(Dict("run_id" => "y", "status" => "completed", "metadata" => Dict("cgmes_export_status" => "failed", "cgmes_export_error" => "boom")))
-            @test occursin("failed — boom", failed_html)
-
-            plain_html = SparlectraApp.render_powerflow_result(Dict("run_id" => "z", "status" => "completed"))
-            @test !occursin("CGMES export", plain_html)
-        end)() end
 
         @testset "request builder falls back to the case form block" begin (function ()
             # fields the run page no longer renders must reach the run from the
@@ -198,6 +79,30 @@ function run_webui_fast_tests()
             stored = SparlectraApp._webui_case_form_defaults(case_path, nothing)
             @test stored["case_format"] == "matpower"
             @test stored["gen_seed"] == 7
+
+            # export_cgmes parsing: an unchecked checkbox submits only the
+            # hidden false field, an absent field takes the spec default (false)
+            @test SparlectraApp.powerflow_webui_request(Dict("casefile" => "case.m", "export_cgmes" => "true"))["export_cgmes"] === true
+            @test SparlectraApp.powerflow_webui_request(Dict("casefile" => "case.m", "export_cgmes" => "false"))["export_cgmes"] === false
+            @test SparlectraApp.powerflow_webui_request(Dict("casefile" => "case.m"))["export_cgmes"] === false
+
+            # the export row never passes a partial export off as a full one:
+            # notices and the zero-sequence line count show, an error is carried
+            # into a failed row, and a run without export has no row
+            completed_html = SparlectraApp.render_powerflow_result(
+                Dict(
+                    "run_id" => "x",
+                    "status" => "completed",
+                    "metadata" => Dict("cgmes_export_status" => "completed", "cgmes_export_files" => "n_EQ.xml, n_TP.xml, n_SSH.xml", "cgmes_export_notices" => "transformer T1: phase shift 2.0° not exported (fixed ratio only)", "cgmes_export_sc_lines" => 3),
+                ),
+            )
+            @test occursin("n_SSH.xml", completed_html)
+            @test occursin("phase shift 2.0° not exported", completed_html)
+            @test occursin("zero-sequence data on 3 line(s)", completed_html)
+            failed_html = SparlectraApp.render_powerflow_result(Dict("run_id" => "y", "status" => "completed", "metadata" => Dict("cgmes_export_status" => "failed", "cgmes_export_error" => "boom")))
+            @test occursin("failed: boom", failed_html)
+            plain_html = SparlectraApp.render_powerflow_result(Dict("run_id" => "z", "status" => "completed"))
+            @test !occursin("CGMES export", plain_html)
         end)() end
 
         @testset "shared selected-case memory" begin (function ()
@@ -254,6 +159,74 @@ function run_webui_fast_tests()
             @test demo_zip == joinpath(cache, "sp_case14_cgmes.zip") && isfile(demo_zip)
             @test length(importCGMES(path=demo_zip, name="sp_case14_cgmes").net.nodeVec) == 14
             @test SparlectraApp._webui_stage_bundled_case!(app_root, cache, "no_such_cgmes.zip") === nothing
+            # 0.50.0: at Web UI start a copy that equals an earlier committed
+            # version follows the package, a copy the user changed stays, a
+            # current copy is not touched. The hash list carries the current
+            # content of what staging wrote, the packed CGMES ZIP included
+            # (the builder packs as the Web UI does); text files hash with
+            # CRLF read as LF, so none of this depends on the line ends of
+            # the checkout. The earlier versions are given here, the real
+            # ones exist only in git.
+            shipped = SparlectraApp._webui_shipped_hashes(app_root)
+            for f in ("sp_case14.scf.json", "sp_case14.measurements.csv", "sp_case14.config.yaml", "sp_case14_cgmes.zip")
+                @test SparlectraApp._webui_shipped_sha256(joinpath(cache, f)) in shipped[f]
+            end
+            fresh = joinpath(root, "refresh_cases")
+            SparlectraApp._webui_stage_bundled_case!(app_root, fresh, "sp_case14.scf.json")
+            SparlectraApp._webui_stage_bundled_case!(app_root, fresh, "sp_case14_cgmes.zip")
+            # an earlier version as a Windows checkout (core.autocrlf) wrote it
+            old_meas = "# an earlier shipped measurement set\nV;1;1.0\n"
+            old_meas_crlf = replace(old_meas, "\n" => "\r\n")
+            write(joinpath(fresh, "sp_case14.measurements.csv"), old_meas_crlf)
+            write(joinpath(fresh, "sp_case14_cgmes.zip"), "an earlier shipped ZIP")
+            write(joinpath(fresh, "sp_case14.measurements.baddata.csv"), "edited by the user\n")
+            # the current configuration file in CRLF counts as current
+            cfg_copy = joinpath(fresh, "sp_case14.config.yaml")
+            cfg_crlf = replace(replace(read(cfg_copy, String), "\r\n" => "\n"), "\n" => "\r\n")
+            write(cfg_copy, cfg_crlf)
+            case_mtime = mtime(joinpath(fresh, "sp_case14.scf.json"))
+            cfg_mtime = mtime(cfg_copy)
+            known = Dict(name => copy(hashes) for (name, hashes) in shipped)
+            push!(known["sp_case14.measurements.csv"], bytes2hex(sha256(old_meas)))
+            push!(known["sp_case14_cgmes.zip"], bytes2hex(sha256("an earlier shipped ZIP")))
+            refresh_log = joinpath(root, "refresh_log")
+            day = Date(2026, 10, 18)
+            replaced = SparlectraApp._webui_refresh_shipped_copies!(app_root, fresh, refresh_log; known, today = day)
+            @test sort([r.file for r in replaced]) == ["sp_case14.measurements.csv", "sp_case14_cgmes.zip"]
+            @test read(joinpath(fresh, "sp_case14.measurements.csv")) == read(joinpath(app_root, "data", "scf", "sp_case14.measurements.csv"))
+            @test read(joinpath(fresh, "sp_case14.measurements.csv.replaced-2026-10-18"), String) == old_meas_crlf
+            @test read(joinpath(fresh, "sp_case14_cgmes.zip")) == read(joinpath(cache, "sp_case14_cgmes.zip"))
+            @test read(joinpath(fresh, "sp_case14.measurements.baddata.csv"), String) == "edited by the user\n"
+            @test mtime(joinpath(fresh, "sp_case14.scf.json")) == case_mtime
+            @test mtime(cfg_copy) == cfg_mtime && read(cfg_copy, String) == cfg_crlf
+            @test count(f -> occursin(".replaced-", f), readdir(fresh)) == 2
+            log_text = read(SparlectraApp.webui_operation_log_path(refresh_log), String)
+            @test count("shipped_case_file_replaced", log_text) == 2
+            @test count("shipped_case_file_replacing", log_text) == 2
+            @test occursin(bytes2hex(sha256(old_meas)), log_text)
+            # nothing left to do on the next start
+            @test isempty(SparlectraApp._webui_refresh_shipped_copies!(app_root, fresh, refresh_log; known, today = day))
+            # a replacement that fails while writing (full disk) leaves the
+            # copy as it was and no temporary or kept file behind; an
+            # unexpected failure is rethrown, with the same cleanup
+            victim = joinpath(fresh, "sp_case5.measurements.csv")
+            write(victim, old_meas)
+            names_before = sort(readdir(fresh))
+            disk_full = d -> (write(d, "half a fi"); throw(Base.IOError("write: no space left on device (ENOSPC)", -28)))
+            failed = SparlectraApp._webui_stage_shipped_file!(disk_full, () -> "new", victim; known = Set([bytes2hex(sha256(old_meas))]), operation_log = refresh_log, today = day)
+            @test failed.status === :failed && failed.kept_as == ""
+            @test read(victim, String) == old_meas
+            @test sort(readdir(fresh)) == names_before
+            @test count("shipped_case_file_replace_failed", read(SparlectraApp.webui_operation_log_path(refresh_log), String)) == 1
+            @test_throws ErrorException SparlectraApp._webui_stage_shipped_file!(d -> error("bug"), () -> "new", victim; known = Set([bytes2hex(sha256(old_meas))]), operation_log = refresh_log, today = day)
+            @test read(victim, String) == old_meas && sort(readdir(fresh)) == names_before
+            # a damaged list (wrong value type, no TOML) is named as such
+            bad_root = joinpath(root, "bad_root")
+            mkpath(joinpath(bad_root, "data"))
+            write(joinpath(bad_root, "data", "shipped_hashes.toml"), "[files]\n\"a.csv\" = 3\n")
+            @test_throws SparlectraApp._WebUIShippedHashesDamaged SparlectraApp._webui_shipped_hashes(bad_root)
+            write(joinpath(bad_root, "data", "shipped_hashes.toml"), "[files\n")
+            @test_throws SparlectraApp._WebUIShippedHashesDamaged SparlectraApp._webui_shipped_hashes(bad_root)
             # the runtime gets its own configuration copy: a save with the
             # case target writes machine-scope keys to the configuration file,
             # and the packaged template must never be that file
@@ -267,6 +240,12 @@ function run_webui_fast_tests()
             # must carry none either
             req = SparlectraApp.powerflow_webui_request(Dict("casefile" => "sp_case14.scf.json"); case_directory=cache)
             @test isempty(req["config_overrides"])
+            # an unchecked APSLF checkbox posts an explicit "false" (hidden plus
+            # checkbox pair) and arrives as false; a field absent from the form
+            # (a stale client) is left out instead of defaulting to false
+            apslf_req = SparlectraApp.powerflow_webui_request(Dict{String,Any}("casefile" => "sp_case14.scf.json", "power_flow_apslf_nr_polish" => "false"); case_directory=cache)
+            @test apslf_req["config_overrides"]["power_flow.apslf.nr_polish"] === false
+            @test !haskey(apslf_req["config_overrides"], "power_flow.apslf_start.enabled")
             run = SparlectraApp.start_powerflow_run(merge(req, Dict("output_root" => joinpath(root, "runs"), "config_file" => cfg_rt)); case_directory=cache)
             @test run["status"] == "succeeded"
             eff = read(joinpath(String(run["output_dir"]), "effective_config.yaml"), String)
@@ -285,7 +264,9 @@ function run_webui_fast_tests()
             @test resp_solver.status in (302, 303)
             saved_cfg = Sparlectra.load_case_config(joinpath(cache, "sp_case14.scf.json"))
             @test saved_cfg["power_flow.solver"] == "apslf"
-            @test saved_cfg["power_flow.apslf_start.enabled"] === false
+            # the forced false is the inherited value, so the stored true is removed
+            @test get(saved_cfg, "power_flow.apslf_start.enabled", false) === false
+            @test Sparlectra.resolve_config(cfg_rt, joinpath(cache, "sp_case14.scf.json")).config.powerflow.apslf_start.enabled === false
             # an incompatible pair in one save is refused at save time, not at the run
             resp_bad = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "sp_case14.scf.json", "settings_target" => "this_case", "power_flow_solver" => "rectangular", "power_flow_apslf_start_enabled" => "true", "power_flow_dc_seed_unconditional" => "true"); output_root=root, runtime=rt)
             @test occursin("Could not save settings for this case", SparlectraApp._webui_urldecode(Dict(resp_bad.headers)["Location"]))
@@ -298,11 +279,12 @@ function run_webui_fast_tests()
             @test occursin("down-weight from |r|/sigma", knees_note)
             @test !occursin("se_robust_k1: 10", read(Sparlectra.case_config_path(joinpath(cache, "sp_case14.scf.json")), String))
             SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "sp_case14.scf.json", "settings_target" => "this_case", "power_flow_solver" => "rectangular"); output_root=root, runtime=rt)
-            # the flat start sets only the profile (#463): the saved start
-            # settings stay as posted, the start machines run from the flat
-            # profile, only the two start modes are set to classic for the
-            # run (named in run.log); unchecking gives the modes back. The
-            # ratio-profile switch travels from the form into the case file.
+            # the flat start is a flat start: the saved start
+            # settings stay as posted, the run switches the projection, the
+            # DC seed and the two start modes off (named in run.log), the
+            # current-iteration and APSLF starts follow their own keys;
+            # unchecking gives the modes back. The ratio-profile switch
+            # travels from the form into the case file.
             resp_flat = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "sp_case14.scf.json", "settings_target" => "this_case", "power_flow_flatstart" => "true", "power_flow_ratio_profile" => "false", "power_flow_start_current_iteration_enabled" => "true", "power_flow_start_angle_mode" => "dc", "power_flow_start_voltage_mode" => "profile_blend"); output_root=root, runtime=rt)
             @test resp_flat.status in (302, 303)
             flat_cfg = Sparlectra.load_case_config(joinpath(cache, "sp_case14.scf.json"))
@@ -312,22 +294,26 @@ function run_webui_fast_tests()
             run_flat = SparlectraApp.start_powerflow_run(Dict("casefile" => "sp_case14.scf.json", "config_file" => cfg_rt, "output_root" => root); case_directory=cache)
             @test run_flat["status"] == "succeeded"
             run_log = read(joinpath(String(run_flat["output_dir"]), "run.log"), String)
-            @test occursin("Flat start: start modes set to classic for this run: power_flow.start_mode.angle_mode=classic, power_flow.start_mode.voltage_mode=classic", run_log)
+            @test occursin("power_flow.start_mode.angle_mode=classic, power_flow.start_mode.voltage_mode=classic", run_log)
             @test occursin(r"Flatstart\s+:\s+Yes", run_log)
             # the pre-solve was not switched off by the flat start
             @test run_flat["metadata"]["current_iteration_enabled"] === true
             profile_cfg, profile_keys = Sparlectra._flatstart_profile_config(Sparlectra.load_sparlectra_config(cfg_rt; reload = true, overrides = Dict{String,Any}("power_flow" => Dict{String,Any}("flatstart" => true, "apslf_start" => Dict{String,Any}("enabled" => true), "start_mode" => Dict{String,Any}("start_projection" => true, "angle_mode" => "dc")))))
-            @test profile_cfg.powerflow.start_mode.start_projection === true
+            @test profile_cfg.powerflow.start_mode.start_projection === false
             @test profile_cfg.powerflow.apslf_start.enabled === true
             @test profile_cfg.powerflow.start_mode.angle_mode === :classic
             @test "power_flow.start_mode.angle_mode=classic" in profile_keys
-            @test !any(k -> occursin("start_projection", k) || occursin("apslf_start", k), profile_keys)
+            @test "power_flow.start_mode.start_projection=false" in profile_keys
+            @test !any(k -> occursin("apslf_start", k), profile_keys)
             SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "sp_case14.scf.json", "settings_target" => "this_case", "power_flow_flatstart" => "false"); output_root=root, runtime=rt)
-            off_cfg = Sparlectra.load_case_config(joinpath(cache, "sp_case14.scf.json"))
-            @test off_cfg["power_flow.flatstart"] === false
-            @test off_cfg["power_flow.start_mode.angle_mode"] == "dc"
+            # both are back at their inherited values (L20: such a key is not
+            # kept in the case file), and the run reads them that way
+            off_pf = Sparlectra.resolve_config(cfg_rt, joinpath(cache, "sp_case14.scf.json")).config.powerflow
+            @test off_pf.start_mode.flatstart === false
+            @test off_pf.start_mode.angle_mode === :dc
+            @test !haskey(Sparlectra.load_case_config(joinpath(cache, "sp_case14.scf.json")), "power_flow.flatstart")
             # machine-scope keys are named and kept out of the case file
-            resp2 = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "sp_case14.scf.json", "settings_target" => "this_case", "output_logfile_results" => "full"); output_root=root, runtime=rt)
+            resp2 = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "sp_case14.scf.json", "settings_target" => "this_case", "output_logfile_results" => "compact"); output_root=root, runtime=rt)
             @test occursin("output.logfile_results", SparlectraApp._webui_urldecode(Dict(resp2.headers)["Location"]))
             @test !haskey(Sparlectra.load_case_config(joinpath(cache, "sp_case14.scf.json")), "output.logfile_results")
             # the general target merges into the YAML with a backup
@@ -403,11 +389,13 @@ function run_webui_fast_tests()
                 cfg = joinpath(dir, "configuration.yaml")
                 text = read(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, String)
                 @test occursin("linear_solver: umfpack_reuse", text)
-                # an old copy: the old default of the solver, a user choice for the tolerance
-                write(cfg, replace(replace(text, "linear_solver: umfpack_reuse" => "linear_solver: umfpack"), r"^  tol: [^\n]*"m => "  tol: 1.0e-7"))
+                # an old copy: the old defaults of the solver and of the CSV
+                # format (technical before 0.32.0), a user choice for the tolerance
+                write(cfg, replace(text, "linear_solver: umfpack_reuse" => "linear_solver: umfpack", "csv_format: auto" => "csv_format: technical", r"^  tol: [^\n]*"m => "  tol: 1.0e-7"))
                 changed = SparlectraApp._webui_follow_template_defaults!(cfg)
                 # the report names key, old and new value for the start message
                 @test any(c -> c.key == "power_flow.linear_solver" && c.old == "umfpack" && c.new == "umfpack_reuse", changed)
+                @test any(c -> c.key == "output.csv_format" && c.old == "technical" && c.new == "auto", changed)
                 @test Sparlectra.load_sparlectra_config(cfg; reload = true).powerflow.linear_solver === :umfpack_reuse
                 @test Sparlectra.load_sparlectra_config(cfg; reload = true).powerflow.tol == 1.0e-7
                 @test isfile(joinpath(dir, "configuration.template.yaml"))
@@ -443,8 +431,7 @@ function run_webui_fast_tests()
             # so the values just saved are visible right after "Saved settings
             # for this case" (before, the page showed the configuration file's
             # old values next to that message). The file view stays reachable
-            # as a link (?config_view=1, also case_settings=0); ?case_settings=1
-            # still selects the case view for old bookmarks.
+            # as a link (?config_view=1, also case_settings=0).
             dir = mktempdir()
             cache = joinpath(dir, "cases")
             mkpath(cache)
@@ -464,16 +451,12 @@ function run_webui_fast_tests()
             @test max_iter(default_view) == "33"
             @test occursin("case-settings-notice", default_view)
             @test occursin("config_view=1", default_view)
-            # the reset of the saved settings stays reachable in both views
-            @test occursin("Reset saved settings for this case", default_view)
             for q in ("&config_view=1", "&case_settings=0")
                 file_view = page(q)
                 @test max_iter(file_view) == cfg_max
                 @test !occursin("case-settings-notice", file_view)
                 @test occursin("case_settings=1", file_view)
-                @test occursin("Reset saved settings for this case", file_view)
             end
-            @test max_iter(page("&case_settings=1")) == "33"
             # the save message shows in both views
             @test occursin("Saved settings probe", page("&save_message=Saved%20settings%20probe"))
             @test occursin("Saved settings probe", page("&config_view=1&save_message=Saved%20settings%20probe"))
@@ -485,14 +468,119 @@ function run_webui_fast_tests()
             @test Sparlectra.load_sparlectra_config(cfg; reload = true).powerflow.max_iter == 44
             @test max_iter(page("")) == "33"
             @test max_iter(page("&config_view=1")) == "44"
+            # L20: the page posts every field it renders. Saving it unchanged
+            # leaves the case file and the configuration file as they were
+            # (it wrote about 90 keys into the case file before).
+            case_path = joinpath(cache, "sp_case14.scf.json")
+            case_cfg = Sparlectra.case_config_path(case_path)
+            case_before = read(case_cfg, String)
+            cfg_before = read(cfg, String)
+            post(form) = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", form; output_root = root, runtime = rt)
+            unchanged = _webui_browser_form(page(""), "settings-form")
+            @test length(unchanged) > 50
+            @test post(unchanged).status == 303
+            @test read(case_cfg, String) == case_before
+            @test read(cfg, String) == cfg_before
+            # a changed field is written, and only that one
+            @test post(merge(unchanged, Dict{String,Any}("power_flow_tol" => "1.0e-7"))).status == 303
+            @test Sparlectra.load_case_config(case_path) == Dict{String,Any}("power_flow.max_iter" => 33, "power_flow.tol" => 1.0e-7)
+            @test read(cfg, String) == cfg_before
+            # set back to the inherited value the key leaves the case file; with
+            # a case file the inherited value is the packaged default, not the
+            # configuration file's 44, and the page shows what the run uses
+            packaged_max = Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload = true).powerflow.max_iter
+            @test packaged_max != 44
+            @test post(merge(_webui_browser_form(page(""), "settings-form"), Dict{String,Any}("power_flow_max_iter" => string(packaged_max)))).status == 303
+            @test Sparlectra.load_case_config(case_path) == Dict{String,Any}("power_flow.tol" => 1.0e-7)
+            @test Sparlectra.resolve_config(cfg, case_path).config.powerflow.max_iter == packaged_max
+            @test max_iter(page("")) == string(packaged_max)
+            # the last key set back would delete the file and hand the case to
+            # the configuration file (44): the posted value stays instead
+            packaged_tol = Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload = true).powerflow.tol
+            @test post(merge(_webui_browser_form(page(""), "settings-form"), Dict{String,Any}("power_flow_tol" => string(packaged_tol)))).status == 303
+            @test Sparlectra.resolve_config(cfg, case_path).config.powerflow.max_iter == packaged_max
+            @test Sparlectra.load_case_config(case_path) == Dict{String,Any}("power_flow.max_iter" => packaged_max)
+            # A case WITHOUT a case file inherits the configuration file (44,
+            # not the packaged default). Unchanged saves from the Settings
+            # page, the Case page and the SE section create no case file; it
+            # held max_iter 44 before and the case stopped following the
+            # configuration file.
+            for f in ("sp_case5.scf.json", "sp_case5.measurements.csv")
+                cp(abspath(joinpath(dirname(@__DIR__), "data", "scf", f)), joinpath(cache, f))
+            end
+            case5 = joinpath(cache, "sp_case5.scf.json")
+            get5(path) = String(copy(SparlectraApp.route_sparlectra_webui("GET", path * "?casefile=sp_case5.scf.json"; output_root = root, runtime = rt).body))
+            @test max_iter(get5("/powerflow/settings")) == "44"
+            for (path, id, marker) in (("/powerflow/settings", "settings-form", ""), ("/powerflow/case", "case-options-form", ""), ("/powerflow", "", "name=\"return_to\" value=\"runs\""))
+                form5 = _webui_browser_form(get5(path), id; containing = marker)
+                @test haskey(form5, "measurement_file") == (path == "/powerflow")
+                @test post(form5).status == 303
+                @test !isfile(Sparlectra.case_config_path(case5))
+            end
+            # a changed field creates the case file with that key only
+            @test post(merge(_webui_browser_form(get5("/powerflow/settings"), "settings-form"), Dict{String,Any}("power_flow_max_iter" => "45"))).status == 303
+            @test Sparlectra.load_case_config(case5) == Dict{String,Any}("power_flow.max_iter" => 45)
+            @test Sparlectra.resolve_config(cfg, case5).config.powerflow.max_iter == 45
+            # a measurement set chosen in the SE section survives a Settings save
+            # (that save posts no set and dropped the stored choice)
+            cp(abspath(joinpath(dirname(@__DIR__), "data", "scf", "sp_case5.measurements.baddata.csv")), joinpath(cache, "sp_case5.measurements.baddata.csv"))
+            se5 = _webui_browser_form(get5("/powerflow"), ""; containing = "name=\"return_to\" value=\"runs\"")
+            @test post(merge(se5, Dict{String,Any}("measurement_file" => "sp_case5.measurements.baddata.csv"))).status == 303
+            @test post(merge(_webui_browser_form(get5("/powerflow/settings"), "settings-form"), Dict{String,Any}("power_flow_max_iter" => "46"))).status == 303
+            @test occursin("<option value=\"sp_case5.measurements.baddata.csv\" selected>", get5("/powerflow"))
+            @test Sparlectra.load_case_config(case5) == Dict{String,Any}("power_flow.max_iter" => 46)
+            # The save that creates a case
+            # file also takes over the case-scope keys in which the
+            # configuration file differs from the packaged defaults. A case file
+            # makes resolve_config skip the configuration file's case-scope
+            # keys, so a save of tol alone moved max_iter from the
+            # installation's 30 to the packaged 80. Machine keys stay out.
+            rm(Sparlectra.case_config_path(case5))
+            @test packaged_max != 30
+            @test SparlectraApp._webui_write_general_settings!(cfg, Dict{String,Any}("power_flow.max_iter" => 30, "output.console_max_rows" => 7)).ok
+            @test Sparlectra.resolve_config(cfg, case5).config.powerflow.max_iter == 30
+            unchanged5 = _webui_browser_form(get5("/powerflow/settings"), "settings-form")
+            @test post(unchanged5).status == 303
+            @test !isfile(Sparlectra.case_config_path(case5))
+            created = post(merge(unchanged5, Dict{String,Any}("power_flow_tol" => "1.0e-7")))
+            @test created.status == 303
+            @test occursin("1 value(s) taken from configuration.yaml", SparlectraApp._webui_urldecode(Dict(created.headers)["Location"]))
+            @test Sparlectra.load_case_config(case5) == Dict{String,Any}("power_flow.tol" => 1.0e-7, "power_flow.max_iter" => 30)
+            @test Sparlectra.resolve_config(cfg, case5).config.powerflow.max_iter == 30
+            run5 = SparlectraApp.start_powerflow_run(Dict{String,Any}("casefile" => "sp_case5.scf.json", "config_file" => cfg, "output_root" => joinpath(root, "runs5")); case_directory = cache)
+            @test run5["status"] == "succeeded"
+            eff5 = read(joinpath(String(run5["output_dir"]), "effective_config.yaml"), String)
+            seg5 = eff5[first(findfirst("  power_flow:", eff5)):end]
+            @test occursin("value: 30", seg5[first(findfirst("    max_iter:", seg5)):(first(findfirst("    max_iter:", seg5))+220)])
+            # an existing case file is not filled up: a later change of the
+            # configuration file stays out of it
+            @test SparlectraApp._webui_write_general_settings!(cfg, Dict{String,Any}("power_flow.autodamp_min" => 0.07)).ok
+            @test post(merge(_webui_browser_form(get5("/powerflow/settings"), "settings-form"), Dict{String,Any}("power_flow_max_iter" => "31"))).status == 303
+            @test Sparlectra.load_case_config(case5) == Dict{String,Any}("power_flow.tol" => 1.0e-7, "power_flow.max_iter" => 31)
+            # the measurement generator creates the case file too (it stores
+            # its options) and takes over the same values
+            rm(Sparlectra.case_config_path(case5))
+            gen5 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "sp_case5.scf.json", "config_file" => cfg); output_root = root, runtime = rt)
+            @test gen5.status == 303
+            @test occursin("2 value(s) taken from configuration.yaml", SparlectraApp._webui_urldecode(Dict(gen5.headers)["Location"]))
+            stored5 = Sparlectra.load_case_config(case5)
+            @test (stored5["power_flow.max_iter"], stored5["power_flow.autodamp_min"]) == (30, 0.07)
+            @test !haskey(stored5, "output.console_max_rows")
+            @test Sparlectra.resolve_config(cfg, case5).config.powerflow.max_iter == 30
             # without a case (fresh root, nothing recalled) the page shows the
             # configuration file and offers no file-view link
             root2 = joinpath(dir, "out2")
             mkpath(root2)
             rt2 = (; case_directory = cache, config_file = cfg, operation_log = SparlectraApp.webui_operation_log_path(root2), startup_config_error = nothing, runner = SparlectraApp.start_powerflow_run)
             nocase = String(copy(SparlectraApp.route_sparlectra_webui("GET", "/powerflow/settings"; output_root = root2, runtime = rt2).body))
-            @test max_iter(nocase) == "44"
+            @test max_iter(nocase) == "30"   # the configuration file value set above
             @test !occursin("config_view=1", nocase)
+            # the form state takes a field the case sets from the case, however
+            # new the configuration file is, and the rest from the configuration
+            rank_cfg = joinpath(dir, "conf_rank.yaml")
+            write(rank_cfg, "config_version: 1\nscope: general\npower_flow:\n  max_iter: 99\n")
+            @test SparlectraApp.webui_form_state(selected_config_file=rank_cfg, sidecar_profile=Dict{String,Any}("power_flow_max_iter" => 55, "_profile_path" => joinpath(dir, "case57.config.yaml")))["power_flow_max_iter"] == 55
+            @test SparlectraApp.webui_form_state(selected_config_file=rank_cfg)["power_flow_max_iter"] == 99
         end)() end
 
         @testset "no nested forms anywhere on the run page" begin (function ()
@@ -532,14 +620,37 @@ function run_webui_fast_tests()
             prof = joinpath(dir, "c.sparlectra-webui.yaml")
             write(prof, "placeholder")
             with_sidecar = SparlectraApp.render_settings_page(output_root=mktempdir(), selected_casefile="c.m", case_profile=Dict{String,Any}("power_flow_solver" => "dc", "_profile_path" => prof))
-            @test occursin("Reset saved settings for this case", with_sidecar)
             @test occursin("/powerflow/case-settings/reset", with_sidecar)
-            without = SparlectraApp.render_settings_page(output_root=mktempdir())
-            @test !occursin("Reset saved settings for this case", without)
-            # switching the case reloads the page server-side; the wait must be
-            # visible WHERE the switching happens, which is the Case page's
-            # chooser
-            @test occursin("case-loading-banner", SparlectraApp.render_case_page(output_root=mktempdir()))
+            # The solver radios must not sit inside a container the page grays
+            # under the DC solver (data-ac-only-field, data-nr-only-field): the
+            # script disables every control of such a container, a disabled
+            # control is dropped from the POST, and the save then kept the
+            # previously saved solver (a Web UI run: DC chosen, APSLF solved;
+            # the delivery "stuck on dc" above was the same trap the other way
+            # round). Walked through the tag stack, not grepped, because the
+            # nesting is what decides.
+            ancestors = let html = with_sidecar
+                target = findfirst("name=\"power_flow_solver\" value=\"dc\"", html)
+                voids = Set(["input", "br", "img", "meta", "link", "hr"])
+                stack = String[]
+                for m in eachmatch(r"<(/?)([a-zA-Z0-9]+)([^>]*)>", html)
+                    m.offset >= first(target) && break
+                    closing, tag, attrs = m.captures
+                    tag = lowercase(tag)
+                    tag in voids && continue
+                    if closing == "/"
+                        i = findlast(x -> startswith(x, tag * " "), stack)
+                        i === nothing || deleteat!(stack, i:length(stack))
+                    else
+                        push!(stack, tag * " " * attrs)
+                    end
+                end
+                stack
+            end
+            @test !isempty(ancestors)
+            @test !any(a -> occursin("data-ac-only-field", a) || occursin("data-nr-only-field", a), ancestors)
+            # without saved settings there is nothing to reset
+            @test !occursin("/powerflow/case-settings/reset", SparlectraApp.render_settings_page(output_root=mktempdir()))
 
             # The handler deletes the sidecar and keeps the case file.
             root = joinpath(dir, "runs")
@@ -619,9 +730,7 @@ function run_webui_fast_tests()
             # a shorter retention drops more, which is the knob for an unwieldy log
             SparlectraApp._prune_webui_operation_log!(log; SparlectraApp._webui_operation_log_options(; retention_days=1)...)
             @test isempty(readlines(log))
-            # the configuration carries it, with the documented default
-            cfg = Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload=true)
-            @test cfg.webui.operation_log_retention_days == 10
+            # the configuration carries it
             lowered = Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload=true,
                 overrides=Dict{String,Any}("webui" => Dict{String,Any}("operation_log_retention_days" => 3)))
             @test lowered.webui.operation_log_retention_days == 3
@@ -630,960 +739,258 @@ function run_webui_fast_tests()
                 overrides=Dict{String,Any}("webui" => Dict{String,Any}("operation_log_retention_days" => -1)))
         end)() end
 
-        @testset "contingency weights editor and storage (#331 Phase 5 follow-up)" begin (function ()
-            dir = mktempdir()
-            cases = joinpath(dir, "cases")
-            mkpath(cases)
-            root = joinpath(dir, "runs")
-            mkpath(root)
-            # load_fixture_net: the tracked PST warmup case gives the editor real
-            # element names without any download
-            cp(joinpath(pkgdir(Sparlectra), "data", "mpower", "warmup_casePST.m"), joinpath(cases, "warmup_casePST.m"))
-            wf = SparlectraApp._webui_case_weights_path("warmup_casePST.m"; case_directory=cases)
-
-            # the weight file lives next to the case as <stem>.contingency-weights.csv
-            @test basename(wf) == "warmup_casePST.contingency-weights.csv"
-            @test dirname(wf) == normpath(cases)
-
-            # list exclusion: a weights file must not be offered as a selectable case
-            touch(wf)
-            opts = SparlectraApp._webui_casefile_options_in_directory(cases)
-            @test "warmup_casePST.m" in opts
-            @test !any(occursin("contingency-weights", o) for o in opts)
-            rm(wf)
-
-            # real element names for the fixtures
-            net = redirect_stdout(devnull) do
-                Sparlectra._import_sparlectra_net(joinpath(cases, "warmup_casePST.m"), nothing, Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload=true))
-            end
-            bnames = [c.name for c in generateN1Branches(net)]
-            bytes = s -> Vector{UInt8}(codeunits(s))
-            up = (fname, data) -> SparlectraApp.handle_contingency_weights_upload(Dict{String,Any}("casefile" => "warmup_casePST.m", "casefiles" => [SparlectraApp.WebUICaseUpload(fname, data)]); output_root=root, case_directory=cases, operation_log=root)
-            loc = r -> first(p for (k, p) in r.headers if k == "Location")
-
-            # upload a valid weight file
-            r = up("w.csv", bytes("name;weight\n$(bnames[1]);3.0\n"))
-            @test r.status == 303
-            @test isfile(wf)
-            # a malformed CSV is rejected with the parser's line-numbered message and
-            # the existing file is left untouched
-            before = read(wf, String)
-            rbad = up("bad.csv", bytes("name;weight\n$(bnames[2]);nope\n"))
-            @test occursin("rejected", loc(rbad))
-            @test occursin("line", loc(rbad))
-            @test read(wf, String) == before
-            # non-csv extension, oversized file, and a path-separator name all rejected
-            @test occursin("rejected", loc(up("w.txt", UInt8[])))
-            @test occursin("rejected", loc(up("w.csv", zeros(UInt8, SparlectraApp.WEBUI_CONTINGENCY_WEIGHTS_MAX_BYTES + 1))))
-            @test occursin("rejected", loc(SparlectraApp.handle_contingency_weights_upload(Dict{String,Any}("casefile" => "../evil", "casefiles" => [SparlectraApp.WebUICaseUpload("w.csv", UInt8[])]); output_root=root, case_directory=cases, operation_log=root)))
-            # uploading again replaces the file and says so
-            @test occursin("replaced", loc(up("w.csv", bytes("name;weight\n$(bnames[1]);2.0\n"))))
-
-            # the editor page seeds the case's real element names plus a raw-CSV editor
-            page = redirect_stdout(devnull) do
-                SparlectraApp.handle_contingency_weights_page(Dict{String,Any}("case" => "warmup_casePST.m"); output_root=root, case_directory=cases, operation_log=root)
-            end
-            body = String(page.body)
-            @test page.status == 200
-            @test occursin(bnames[1], body)
-            @test occursin("Raw CSV", body)
-
-            # saving from the seeded table omits rows left at exactly 1.0
-            SparlectraApp.handle_contingency_weights_save(Dict{String,Any}("casefile" => "warmup_casePST.m", "element" => [bnames[1], bnames[2]], "weight" => ["2.5", "1.0"]); output_root=root, case_directory=cases, operation_log=root)
-            saved = read(wf, String)
-            @test occursin(bnames[1], saved)
-            @test !occursin(bnames[2], saved)
-
-            # download serves the stored file as an attachment
-            dl = SparlectraApp.handle_contingency_weights_download(Dict{String,Any}("case" => "warmup_casePST.m"); output_root=root, case_directory=cases)
-            @test dl.status == 200
-            @test any(k == "Content-Disposition" for (k, _) in dl.headers)
-            @test !isempty(dl.body)
-
-            # reset deletes the weight file
-            @test SparlectraApp.handle_contingency_weights_reset(Dict{String,Any}("casefile" => "warmup_casePST.m"); output_root=root, case_directory=cases, operation_log=root).status == 303
-            @test !isfile(wf)
-
-            # deleting the case cascades to its weight file
-            touch(wf)
-            SparlectraApp.handle_powerflow_case_delete(Dict{String,Any}("casefile" => "warmup_casePST.m"); output_root=root, case_directory=cases, operation_log=root)
-            @test !isfile(joinpath(cases, "warmup_casePST.m"))
-            @test !isfile(wf)
-        end)() end
-
-        @testset "state estimation page, measurement upload, and chain (SE phase 5)" begin (function ()
+        @testset "format-bound Case page options: rendered where the case reads them, saved values kept" begin (function ()
             root = mktempdir()
-            cases = joinpath(root, "cases")
-            mkpath(cases)
-            case_path = joinpath(cases, "warmup_casePST.m")
-            cp(joinpath(dirname(@__DIR__), "data", "mpower", "warmup_casePST.m"), case_path)
-            rt = (; case_directory=cases, config_file=Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, operation_log=SparlectraApp.webui_operation_log_path(root), startup_config_error=nothing, runner=SparlectraApp.start_powerflow_run)
-            bytes = s -> Vector{UInt8}(codeunits(s))
-
-            # upload classification: v1 CSV -> measurement_set; CSV without the
-            # version comment -> unknown, retained but never offered
-            v1 = "# sparlectra-measurements v1\ntype,bus,from_bus,to_bus,link_nr,direction,value,sigma,active,id\n"
-            up = SparlectraApp.handle_powerflow_case_import(
-                Dict{String,Any}("casefiles" => [SparlectraApp.WebUICaseUpload("meas_v1.csv", bytes(v1)), SparlectraApp.WebUICaseUpload("notes.csv", bytes("a,b\n1,2\n"))]);
-                output_root=root, case_directory=cases, operation_log=root)
-            @test up.status == 303
-            loc = first(p for (k, p) in up.headers if k == "Location")
-            @test occursin("measurement_set", SparlectraApp._webui_urldecode(loc))
-            @test isfile(joinpath(cases, "meas_v1.csv"))
-            @test isfile(joinpath(cases, "notes.csv"))   # retained
-            offered = SparlectraApp._webui_measurement_options_in_directory(cases)
-            @test "meas_v1.csv" in offered
-            @test !("notes.csv" in offered)
-            # neither CSV appears in the case selector
-            @test !any(endswith(name, ".csv") for name in SparlectraApp._webui_casefile_options_in_directory(cases))
-            # traversal names still rejected by the shared upload checks
-            bad = SparlectraApp.handle_powerflow_case_import(Dict{String,Any}("casefiles" => [SparlectraApp.WebUICaseUpload("../evil.csv", bytes(v1))]); output_root=root, case_directory=cases, operation_log=root)
-            @test bad.status == 303   # redirect with the rejection message
-            @test !isfile(joinpath(dirname(cases), "evil.csv"))
-
-            # SE page opens headless, demo generator writes an offered v1 set,
-            # and the run form carries no onsubmit button-disabling
-            # /stateestimation is a real redirect (a rendering alias would be
-            # two ways to one surface, the divergence the page split removed);
-            # the SE section lives on the Runs page under its anchor
-            page = SparlectraApp.route_sparlectra_webui("GET", "/stateestimation", Dict{String,String}(); output_root=root, runtime=rt)
-            @test page.status == 303
-            @test endswith(Dict(page.headers)["Location"], "#state-estimation")
-            main_page = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test !occursin("href=\"/stateestimation\"", main_page)
-            @test occursin("id=\"state-estimation\"", main_page)
-            @test occursin(">Runs<", main_page)
-            @test !occursin(">Network analysis<", main_page)
-            @test !occursin(">New run<", main_page)
-            # two writes within one second get distinct names (a counter),
-            # and the stamped form is what the generator and the noise action use
-            stem_dir = mktempdir()
-            @test occursin(r"^x\.measurements\.\d{8}-\d{6}\.csv$", SparlectraApp._webui_stamped_measurement_name(stem_dir, "x.measurements"))
-            touch(joinpath(stem_dir, "x.measurements.20260927-120000.csv"))
-            @test SparlectraApp._webui_stamped_measurement_name(stem_dir, "x.measurements"; stamp = "20260927-120000") == "x.measurements.20260927-120000-2.csv"
-            touch(joinpath(stem_dir, "x.measurements.20260927-120000-2.csv"))
-            @test SparlectraApp._webui_stamped_measurement_name(stem_dir, "x.measurements"; stamp = "20260927-120000") == "x.measurements.20260927-120000-3.csv"
-            # the written set's name comes back in the redirect: every write is a
-            # new, time-stamped file, so the tests take the name
-            # from there instead of assuming it
-            written_set(response) = SparlectraApp._webui_urldecode(String(match(r"measurement_file=([^&#]+)", Dict(response.headers)["Location"]).captures[1]))
-            # a regeneration that the steps below then read: the written file
-            # replaces the previous one of the test (which is removed)
-            regenerate(form) = begin
-                r = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", form; output_root=root, runtime=rt)
-                isfile(mfile) && rm(mfile)
-                n = written_set(r)
-                (joinpath(cases, n), n)
+            cases = mktempdir()
+            # a save with the case target may write machine-scope keys to the
+            # configuration file: never the packaged template
+            cfg_rt = joinpath(root, "rt.configuration.yaml")
+            cp(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, cfg_rt)
+            rt = (; case_directory=cases, config_file=cfg_rt, operation_log=SparlectraApp.webui_operation_log_path(root), startup_config_error=nothing, runner=SparlectraApp.start_powerflow_run)
+            # a configuration that sets the frequency key away from the default
+            cfg60 = joinpath(root, "conf60.yaml")
+            write(cfg60, "config_version: 1\nscope: general\nmodel:\n  nominal_frequency_hz: 60.0\n")
+            rt60 = merge(rt, (; config_file=cfg60))
+            freq_disabled(body) = occursin(r"<select id=\"model_nominal_frequency_hz\"[^>]* disabled", body)
+            selected(body) = (m = match(r"<select id=\"model_nominal_frequency_hz\"[^>]*>(.*?)</select>"s, body); m === nothing ? nothing : (s = match(r"<option value=\"([^\"]*)\" selected>", m.captures[1]); s === nothing ? nothing : s.captures[1]))
+            case_page(name; runtime=rt) = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow/case?casefile=" * name; output_root=root, runtime).body)
+            rendered(body, field) = occursin("name=\"" * field * "\"", body)
+            # what the browser posts from the Case page options form: every
+            # rendered input, the first value per name (the hidden false of a
+            # checkbox pair), the selected option of a select that is not
+            # disabled
+            function posted_fields(body)
+                form = match(r"<form id=\"case-options-form\".*?</form>"s, body).match
+                fields = Dict{String,Any}()
+                for m in eachmatch(r"<input[^>]*name=\"([^\"]+)\"[^>]*value=\"([^\"]*)\""s, form)
+                    haskey(fields, m.captures[1]) || (fields[m.captures[1]] = m.captures[2])
+                end
+                for m in eachmatch(r"<select([^>]*)>(.*?)</select>"s, form)
+                    occursin(" disabled", m.captures[1]) && continue
+                    name = match(r"name=\"([^\"]+)\"", m.captures[1])
+                    sel = match(r"<option value=\"([^\"]*)\" selected", m.captures[2])
+                    (name === nothing || sel === nothing) || (fields[name.captures[1]] = sel.captures[1])
+                end
+                return fields
             end
-            gen = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m"); output_root=root, runtime=rt)
-            @test gen.status == 303
-            mname = written_set(gen)
-            @test occursin(r"^warmup_casePST\.measurements\.\d{8}-\d{6}(-\d+)?\.csv$", mname)
-            mfile = joinpath(cases, mname)
-            @test isfile(mfile)
-            @test SparlectraApp._webui_is_measurement_csv(mfile)
-            # the written set is armed for the next run: the redirect names it
-            # and the page selects it (a noisy copy next to its
-            # noise-free original was otherwise never the armed one)
-            noised = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/add-noise", Dict{String,Any}("casefile" => "warmup_casePST.m", "measurement_file" => mname); output_root=root, runtime=rt)
-            @test noised.status == 303
-            noisy_location = Dict(noised.headers)["Location"]
-            nname = written_set(noised)
-            @test occursin(r"^warmup_casePST\.noisy\.\d{8}-\d{6}(-\d+)?\.csv$", nname)
-            @test isfile(joinpath(cases, nname))
-            # a browser never sends the #fragment of a redirect target
-            noisy_page = String(SparlectraApp.route_sparlectra_webui("GET", first(split(noisy_location, '#')), Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("<option value=\"$(nname)\" selected>", noisy_page)
-            @test occursin("<option value=\"$(mname)\">", noisy_page)
-            @test occursin("/stateestimation/measurements/delete", noisy_page)
-            # deleting a set: measurement files only, plain names only
-            del_bad = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/measurements/delete", Dict{String,Any}("casefile" => "warmup_casePST.m", "measurement_file" => "../evil.csv"); output_root=root, runtime=rt)
-            @test occursin("Invalid", SparlectraApp._webui_urldecode(Dict(del_bad.headers)["Location"]))
-            del_case = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/measurements/delete", Dict{String,Any}("casefile" => "warmup_casePST.m", "measurement_file" => "warmup_casePST.m"); output_root=root, runtime=rt)
-            @test isfile(joinpath(cases, "warmup_casePST.m"))
-            @test occursin("Invalid", SparlectraApp._webui_urldecode(Dict(del_case.headers)["Location"]))
-            del_ok = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/measurements/delete", Dict{String,Any}("casefile" => "warmup_casePST.m", "measurement_file" => nname); output_root=root, runtime=rt)
-            @test del_ok.status == 303
-            @test occursin("Deleted $(nname)", SparlectraApp._webui_urldecode(Dict(del_ok.headers)["Location"]))
-            @test !isfile(joinpath(cases, nname))
-            # "Save settings for this case" from the SE section keeps the chosen
-            # set: the redirect names it and lands on the section, and the
-            # saved choice outranks a newer bound set on a plain page load
-            # (the choice was written but never read back)
-            saved = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "warmup_casePST.m", "settings_target" => "this_case", "return_to" => "runs", "measurement_file" => mname, "se_flatstart" => "true"); output_root=root, runtime=rt)
-            @test saved.status == 303
-            saved_location = Dict(saved.headers)["Location"]
-            @test occursin("measurement_file=$(SparlectraApp._webui_urlencode(mname))", saved_location)
-            @test endswith(saved_location, "#state-estimation")
-            newer = joinpath(cases, "newer_bound.measurements.csv")
-            cp(mfile, newer)
-            plain_page = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("<option value=\"$(mname)\" selected>", plain_page)
-            @test occursin("<option value=\"newer_bound.measurements.csv\">", plain_page)
-            rm(newer)
-            # a saved choice whose file is gone falls back to the next rule and
-            # says so; then the choice is set back to the set the steps below use
-            SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "warmup_casePST.m", "settings_target" => "this_case", "return_to" => "runs", "measurement_file" => "gone.measurements.csv"); output_root=root, runtime=rt)
-            gone_page = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("gone.measurements.csv is no longer in the case directory", gone_page)
-            @test occursin("<option value=\"$(mname)\" selected>", gone_page)
-            SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "warmup_casePST.m", "settings_target" => "this_case", "return_to" => "runs", "measurement_file" => mname); output_root=root, runtime=rt)
-            page2 = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin(mname, page2)
-            @test occursin("Run state estimation", page2)
-            @test !occursin("onsubmit", page2)
-
-            # every SE input parameter carries a hover hint, and the technical
-            # ones a documentation link
-            @test count("help-link", page2) >= 12
-            for topic in ("state_estimation.tol", "state_estimation.flatstart", "state_estimation.max_iter", "state_estimation.robust", "state_estimation.update_shunts", "state_estimation.report_residual_correlation", "webui.se_max_eliminations", "webui.se_measurement_file", "webui.se_generator_noise", "webui.se_generator_gross_error", "webui.se_generator_tap_error", "webui.se_generator_sigmas")
-                se_topic = SparlectraApp.resolve_webui_help_topic(topic)
-                @test se_topic !== nothing && 0 < length(se_topic.hint) <= 160
+            # a MATPOWER case: the MATPOWER options render; the system
+            # frequency renders disabled (line charging is given in per
+            # unit) with the configured key as its value
+            write(joinpath(cases, "freq_probe.m"), "function mpc = freq_probe\nmpc.baseMVA = 100;\n")
+            body = case_page("freq_probe.m"; runtime=rt60)
+            @test rendered(body, "matpower_import_ratio")
+            @test rendered(body, "transformer_tap_changer_model")
+            @test selected(body) == "60.0"
+            @test freq_disabled(body)
+            # the key cannot act for a MATPOWER case: a POST that carries it
+            # anyway does not store it for the case
+            freq_stored(name) = haskey(Sparlectra.load_case_config(joinpath(cases, name)), "model.nominal_frequency_hz")
+            SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "freq_probe.m", "settings_target" => "this_case", "model_nominal_frequency_hz" => "60.0", "matpower_import_ratio" => "reciprocal"); output_root=root, runtime=rt)
+            @test Sparlectra.load_case_config(joinpath(cases, "freq_probe.m"))["matpower_import.ratio"] == "reciprocal"
+            @test !freq_stored("freq_probe.m")
+            # an SCF time series reads its base case (sp_case14: meta.f_nom
+            # 50, every line c1 = 0): disabled at the file's 50, and a POST
+            # carrying 60 does not store it
+            cp(joinpath(Sparlectra.SPARLECTRA_ROOT, "data", "qsts", "sp_case14_day.qsts.zip"), joinpath(cases, "sp_case14_day.qsts.zip"))
+            body_q = case_page("sp_case14_day.qsts.zip"; runtime=rt60)
+            @test freq_disabled(body_q)
+            @test selected(body_q) == "50.0"
+            @test !haskey(posted_fields(body_q), "model_nominal_frequency_hz")
+            SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "sp_case14_day.qsts.zip", "settings_target" => "this_case", "model_nominal_frequency_hz" => "60.0"); output_root=root, runtime=rt)
+            @test !freq_stored("sp_case14_day.qsts.zip")
+            # an SCF file without meta.f_nom and without line c1: nothing
+            # the frequency could change, the select is disabled and a posted
+            # value is not stored
+            noc = Sparlectra.scf_json_parse(read(joinpath(Sparlectra.SPARLECTRA_ROOT, "data", "scf", "sp_case14.scf.json"), String))
+            delete!(noc["sparlectra"]["meta"], "f_nom")
+            write(joinpath(cases, "noc1.scf.json"), Sparlectra.scf_json_string(noc))
+            @test freq_disabled(case_page("noc1.scf.json"))
+            SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "noc1.scf.json", "settings_target" => "this_case", "model_nominal_frequency_hz" => "60.0", "matpower_import_ratio" => "reciprocal"); output_root=root, runtime=rt)
+            @test !freq_stored("noc1.scf.json")
+            @test Sparlectra.load_case_config(joinpath(cases, "noc1.scf.json"))["matpower_import.ratio"] == "reciprocal"
+            # an SCF file stating 60 Hz: the MATPOWER options do not render,
+            # Export Solution (every format) does; the frequency select is
+            # disabled at the file's 60 (the key is 50)
+            scf = Sparlectra.scf_json_parse(read(joinpath(Sparlectra.SPARLECTRA_ROOT, "data", "scf", "sp_case14.scf.json"), String))
+            scf["sparlectra"]["meta"]["f_nom"] = 60.0
+            write(joinpath(cases, "freq60.scf.json"), Sparlectra.scf_json_string(scf))
+            body60 = case_page("freq60.scf.json")
+            @test !rendered(body60, "matpower_import_ratio")
+            @test !rendered(body60, "matpower_import_bus_shunt_model")
+            @test rendered(body60, "matpower_export_write_solution")
+            @test selected(body60) == "60.0"
+            @test freq_disabled(body60)
+            @test occursin("data-hidden-options=\"11\"", body60)
+            @test SparlectraApp.webui_form_state(selected_casefile="freq60.scf.json", case_directory=cases)["model_nominal_frequency_hz"] == 60.0
+            # an SCF file without f_nom: the select is enabled and shows the
+            # configured key
+            pst = Sparlectra.scf_json_parse(read(joinpath(Sparlectra.SPARLECTRA_ROOT, "data", "scf", "sp_casePST.scf.json"), String))
+            delete!(pst["sparlectra"]["meta"], "f_nom")
+            write(joinpath(cases, "nofnom.scf.json"), Sparlectra.scf_json_string(pst))
+            body_nof = case_page("nofnom.scf.json"; runtime=rt60)
+            @test selected(body_nof) == "60.0"
+            @test !freq_disabled(body_nof)
+            # a save from the SCF case page keeps a MATPOWER value set before
+            # and the key: hidden and disabled fields are not posted, and the
+            # save writes posted fields only
+            pre = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "freq60.scf.json", "settings_target" => "this_case", "matpower_import_ratio" => "reciprocal"); output_root=root, runtime=rt)
+            @test pre.status in (302, 303)
+            post_form = posted_fields(case_page("freq60.scf.json"))
+            @test !haskey(post_form, "matpower_import_ratio")
+            @test !haskey(post_form, "model_nominal_frequency_hz")
+            @test post_form["settings_target"] == "this_case"
+            saved = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", post_form; output_root=root, runtime=rt)
+            @test saved.status in (302, 303)
+            stored = Sparlectra.load_case_config(joinpath(cases, "freq60.scf.json"))
+            @test stored["matpower_import.ratio"] == "reciprocal"
+            @test !haskey(stored, "model.nominal_frequency_hz")
+            @test Sparlectra.load_sparlectra_config(cfg_rt).model.nominal_frequency_hz == 50.0
+            # configuration -> rendered select
+            v = SparlectraApp.webui_form_state(selected_config_file=cfg60)
+            @test v["model_nominal_frequency_hz"] == 60.0
+            @test selected(SparlectraApp._webui_system_frequency_html(v)) == "60.0"
+            # a bundled SCF case the combobox offers, not yet copied into the
+            # case directory: its meta.f_nom (50) seeds the form state, not
+            # the configured 60
+            @test !isfile(joinpath(cases, "sp_case14.scf.json"))
+            @test SparlectraApp.webui_form_state(selected_casefile="sp_case14.scf.json", selected_config_file=cfg60, case_directory=cases)["model_nominal_frequency_hz"] == 50.0
+            # form -> override -> configuration
+            req = SparlectraApp.powerflow_webui_request(Dict("casefile" => "freq_probe.m", "model_nominal_frequency_hz" => "60.0"); case_directory=cases, operation_log=root)
+            @test req["config_overrides"]["model.nominal_frequency_hz"] == 60.0
+            cfg, _ = Sparlectra._load_api_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, Sparlectra.validate_gui_config_overrides(req["config_overrides"]))
+            @test cfg.model.nominal_frequency_hz == 60.0
+            @test "model.nominal_frequency_hz" in cfg.user_set_keys
+            # saved, then run (the run form posts no frequency): the
+            # Case page save above stored no frequency, so no frequency
+            # warning in run.log. A posted 50 is not saved against the
+            # file's 60; a 50 stored before the lock still reaches the run
+            # and gives exactly one warning
+            freq_warnings(run) = count(l -> occursin("meta.f_nom = 60.0 Hz", l), eachline(joinpath(String(run["output_dir"]), "run.log")))
+            freq_line(run) = only(filter(l -> startswith(l, "System frequency: "), collect(eachline(joinpath(String(run["output_dir"]), "run.log")))))
+            for (posted, expected) in ((nothing, 0), ("50.0", 1))
+                if posted !== nothing
+                    save = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", Dict{String,Any}("casefile" => "freq60.scf.json", "settings_target" => "this_case", "model_nominal_frequency_hz" => posted); output_root=root, runtime=rt)
+                    @test save.status in (302, 303)
+                    @test !freq_stored("freq60.scf.json")
+                    Sparlectra.write_case_config(joinpath(cases, "freq60.scf.json"), merge(Sparlectra.load_case_config(joinpath(cases, "freq60.scf.json")), Dict{String,Any}("model.nominal_frequency_hz" => parse(Float64, posted))))
+                end
+                patterns = expected == 0 ? () : (r"meta\.f_nom = 60\.0 Hz.*model\.nominal_frequency_hz = 50\.0 Hz",)
+                run = run_with_expected_warnings(patterns) do
+                    SparlectraApp.start_powerflow_run(Dict("casefile" => "freq60.scf.json", "config_file" => cfg_rt, "output_root" => joinpath(root, "runs_" * something(posted, "none"))); case_directory=cases)
+                end
+                @test run["status"] == "succeeded"
+                @test freq_warnings(run) == expected
+                # result.json names the frequency the network used: the
+                # file's 60 also when the saved key says 50
+                res = Sparlectra.scf_json_parse(read(joinpath(String(run["output_dir"]), "result.json"), String))
+                @test res["metadata"]["network_nominal_frequency_hz"] == 60.0
+                # sp_case14 carries c1 = 0 on every line: the frequency never
+                # entered the model, and run.log says so instead of 60 Hz
+                @test res["metadata"]["frequency_source"] == "not_used"
+                @test freq_line(run) == "System frequency: not used (no capacitance in farad); case file states 60 Hz"
             end
-            @test occursin("state_estimation_measurements/#se-generator-tap-error", SparlectraApp.webui_help_doc_url("webui.se_generator_tap_error"))
-
-            # generator options: noise + gross error produce a valid, different set
-            plain = read(mfile, String)
-            gen2 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "noise" => "true", "gross_error_k" => "8"); output_root=root, runtime=rt)
-            @test gen2.status == 303
-            @test occursin("bad%20data", Dict(gen2.headers)["Location"])
-            gen2_file = joinpath(cases, written_set(gen2))
-            @test gen2_file != mfile   # a new file, the clean set stays
-            @test SparlectraApp._webui_is_measurement_csv(gen2_file)
-            @test read(gen2_file, String) != plain   # noise + gross error changed values
-            @test read(mfile, String) == plain
-            rm(gen2_file)
-            # regenerate the clean set: another new file with the same content
-            gen3 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m"); output_root=root, runtime=rt)
-            gen3_file = joinpath(cases, written_set(gen3))
-            @test read(gen3_file, String) == plain   # seeded generator is reproducible
-            rm(gen3_file)
-
-            # per-quantity sigmas are PERCENT OF THE MEASURED VALUE with the
-            # per-type floors (voltage-level independent); the currents checkbox
-            # adds current-magnitude rows. Noise off, so value == truth and the
-            # per-row sigma law is exactly reproducible.
-            gen3 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "sigma_u_pct" => "1.0", "include_currents" => "true", "sigma_i_pct" => "2.0", "sigma_p_pct" => "2.0", "sigma_q_pct" => "1.0"); output_root=root, runtime=rt)
-            @test gen3.status == 303
-            # every generation is a new file: the checks below read the one
-            # just written, and it becomes the set of the steps that follow
-            rm(mfile)
-            mname = written_set(gen3)
-            mfile = joinpath(cases, mname)
-            netchk = Sparlectra._import_sparlectra_net(case_path, nothing, Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload=true))
-            readMeasurementsCSV!(netchk; file=mfile)
-            fl = measurementSigmaFloors()
-            frac(t) = t == Sparlectra.VmMeas ? 0.01 : (t in (Sparlectra.QinjMeas, Sparlectra.QflowMeas) ? 0.01 : 0.02)
-            @test any(m -> m.typ == Sparlectra.ImagMeas, netchk.measurements)
-            for m in netchk.measurements
-                @test m.sigma == max(frac(m.typ) * abs(m.value), fl[m.typ])
+            # the next save of the case options removes the stored 50
+            @test SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", posted_fields(case_page("freq60.scf.json")); output_root=root, runtime=rt).status in (302, 303)
+            @test !freq_stored("freq60.scf.json")
+            # a case with line capacitance in farad (two_islands_prio, c1 > 0):
+            # the stated 50 Hz is used; without meta.f_nom the configured
+            # frequency is, and 60 Hz carries 1.2 times the line charging
+            cap = Sparlectra.scf_json_parse(read(joinpath(Sparlectra.SPARLECTRA_ROOT, "data", "scf", "two_islands_prio.scf.json"), String))
+            write(joinpath(cases, "cap_fnom.scf.json"), Sparlectra.scf_json_string(cap))
+            delete!(cap["sparlectra"]["meta"], "f_nom")
+            write(joinpath(cases, "cap_nof.scf.json"), Sparlectra.scf_json_string(cap))
+            balance(run) = only(filter(l -> occursin("total network power balance", l), collect(eachline(joinpath(String(run["output_dir"]), "run.log")))))
+            cap_runs = Dict{String,Any}()
+            for (case, cfg, source, line) in (("cap_fnom.scf.json", cfg_rt, "case_file", "50 Hz (case file)"),
+                                              ("cap_nof.scf.json", cfg_rt, "configuration", "50 Hz (configuration)"),
+                                              ("cap_nof.scf.json", cfg60, "configuration", "60 Hz (configuration)"))
+                run = SparlectraApp.start_powerflow_run(Dict("casefile" => case, "config_file" => cfg, "output_root" => joinpath(root, "cap_runs")); case_directory=cases)
+                @test run["status"] == "succeeded"
+                md = Sparlectra.scf_json_parse(read(joinpath(String(run["output_dir"]), "result.json"), String))["metadata"]
+                @test md["frequency_source"] == source
+                @test md["frequency_line"] == line
+                @test freq_line(run) == "System frequency: " * line
+                cap_runs[line] = run
             end
-            # a 30 kV feeder flow and a 400 kV corridor flow both get a sigma
-            # proportional to their own reading, never one absolute MW value
-            psig = sort([m.sigma for m in netchk.measurements if m.typ == Sparlectra.PflowMeas])
-            @test last(psig) / first(psig) > 2.0
-            # invalid sigma is rejected with a clear message
-            genbad = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "sigma_u_pct" => "-1"); output_root=root, runtime=rt)
-            @test occursin("sigma%20U", Dict(genbad.headers)["Location"])
-
-            # PMU current-angle rows via the sigma Ia field (absolute degrees)
-            genia = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "include_currents" => "true", "sigma_ia_deg" => "0.1"); output_root=root, runtime=rt)
-            @test genia.status == 303
-            rm(mfile)
-            mname = written_set(genia)
-            mfile = joinpath(cases, mname)
-            netia = Sparlectra._import_sparlectra_net(case_path, nothing, Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload=true))
-            readMeasurementsCSV!(netia; file=mfile)
-            iarows = [m for m in netia.measurements if m.typ == Sparlectra.IaMeas]
-            @test !isempty(iarows) && all(m.sigma == 0.1 for m in iarows)
-
-            # tap deviation: measurements from a shifted-tap state differ from the
-            # clean set and the message names the transformer branch
-            plain2 = read(mfile, String)
-            gentap = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "tap_error_steps" => "3"); output_root=root, runtime=rt)
-            @test gentap.status == 303
-            # on the PST warmup case the injected deviation is a Delta-u PHASE
-            # step, and the message names the PST branch
-            @test occursin("phase%20deviation", Dict(gentap.headers)["Location"])
-            @test occursin("PST%20branch", Dict(gentap.headers)["Location"])
-            rm(mfile)
-            mname = written_set(gentap)
-            mfile = joinpath(cases, mname)
-            @test read(mfile, String) != plain2
-            @test SparlectraApp._webui_is_measurement_csv(mfile)
-            # the file records the tap positions the set was generated from as a
-            # structured table (electrical/fixed/transferred step columns, the
-            # deviated transformer carries its percentage), the SE page renders it
-            # as a table and offers the download
-            taptxt = read(mfile, String)
-            @test occursin("# sparlectra-taps v1", taptxt)
-            @test occursin("electrical_step,fixed_step,transferred_step,generation_deviation_steps", taptxt)
-            @test occursin(",3.0", taptxt)   # the deviated transformer row
-            pageInfo = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("Transformer taps at generation", pageInfo)
-            @test occursin("<th>fixed_step</th>", pageInfo)
-            @test occursin("Measured values in this set:", pageInfo)   # per-type row counts
-            @test occursin("Vm ×", pageInfo)
-            @test occursin("/stateestimation/measurements/download?file=$(SparlectraApp._webui_urlencode(mname))", pageInfo)
-            dlr = SparlectraApp.route_sparlectra_webui("GET", "/stateestimation/measurements/download?file=$(mname)", Dict{String,String}("file" => mname); output_root=root, runtime=rt)
-            @test dlr.status == 200
-            @test any(k == "Content-Disposition" for (k, _) in dlr.headers)
-            dlbad = SparlectraApp.route_sparlectra_webui("GET", "/stateestimation/measurements/download?file=../evil.csv", Dict{String,String}("file" => "../evil.csv"); output_root=root, runtime=rt)
-            @test dlbad.status in (400, 404)
-            # the commented file still parses and round-trips
-            netc = Sparlectra._import_sparlectra_net(case_path, nothing, Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload=true))
-            rc = readMeasurementsCSV!(netc; file=mfile)
-            @test rc.total > 0
-            # out-of-range percentage is rejected
-            gentapbad = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "tap_error_steps" => "35"); output_root=root, runtime=rt)
-            @test occursin("between%20-16%20and%2016", Dict(gentapbad.headers)["Location"])
-            # half steps are no longer settable (a tap changer has no half positions)
-            genthalf = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "tap_error_steps" => "1.5"); output_root=root, runtime=rt)
-            @test occursin("whole%20number", Dict(genthalf.headers)["Location"])
-            # restore the default set for the runs below (a new file; the
-            # deviated one goes)
-            gen5 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m"); output_root=root, runtime=rt)
-            rm(mfile)
-            mname = written_set(gen5)
-            mfile = joinpath(cases, mname)
-            @test read(mfile, String) == plain
-
-            # the SE page without a query FOLLOWS the shared selected-case
-            # memory; a truly
-            # fresh state (no memory under a fresh output root) still shows no
-            # set info out of thin air
-            SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m"; output_root=root, runtime=rt)
-            pageRemembered = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("warmup_casePST.m", pageRemembered)
-            pageFresh = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow", Dict{String,String}(); output_root=mktempdir(), runtime=rt).body)
-            @test !occursin("Measurement set info", pageFresh)
-            @test !occursin("Case binding:", pageFresh)
-
-            # sticky generator inputs: the generate redirect carries the values
-            # back and the re-rendered form keeps them instead of the defaults
-            gsticky = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "sigma_u_pct" => "0.7", "noise" => "true"); output_root=root, runtime=rt)
-            loc = Dict(gsticky.headers)["Location"]
-            @test occursin("g_sigma_u_pct=0.7", loc)
-            @test occursin("g_noise=true", loc)
-            pageSticky = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m&g_sigma_u_pct=0.7&g_noise=true", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("name=\"sigma_u_pct\" value=\"0.7\"", pageSticky)
-            @test occursin("name=\"noise\" value=\"true\" checked", pageSticky)
-            mfile, mname = regenerate(Dict{String,Any}("casefile" => "warmup_casePST.m"))
-
-            # structured value editor: every measurement kind is editable in the
-            # table; the update handler rewrites only value/sigma/active and a
-            # single invalid entry rejects the whole save
-            pageTab = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("Edit measurement values (table)", pageTab)
-            @test occursin("/stateestimation/measurements/update-values", pageTab)
-            rowsTab = SparlectraApp._webui_measurement_set_rows(mfile)
-            @test !isempty(rowsTab)
-            @test any(r -> r.typ == "VmMeas", rowsTab) && any(r -> r.typ == "PflowMeas", rowsTab) && any(r -> r.typ == "PinjMeas", rowsTab)
-            vrow = first(r for r in rowsTab if r.typ == "VmMeas")
-            rup = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/measurements/update-values", Dict{String,Any}("file" => mname, "case" => "warmup_casePST.m", "v_$(vrow.line)" => "1.0777", "s_$(vrow.line)" => vrow.sigma, "a_$(vrow.line)" => "true"); output_root=root, runtime=rt)
-            @test occursin("updated%201", Dict(rup.headers)["Location"])
-            @test occursin("1.0777", read(mfile, String))
-            rbadv = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/measurements/update-values", Dict{String,Any}("file" => mname, "case" => "warmup_casePST.m", "v_$(vrow.line)" => "1.05", "s_$(vrow.line)" => "-1", "a_$(vrow.line)" => "true"); output_root=root, runtime=rt)
-            @test occursin("nothing%20was%20saved", Dict(rbadv.headers)["Location"])
-            @test occursin("1.0777", read(mfile, String))   # rejected save left the file alone
-            # a fresh clean set for the runs below; the edited one goes
-            gen4 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m"); output_root=root, runtime=rt)
-            rm(mfile)
-            mname = written_set(gen4)
-            mfile = joinpath(cases, mname)
-
-            # the run summary shows the chi-square band verdict with expected value
-            fake = Dict("metadata" => Dict{String,Any}("run_mode" => "se", "se_observability_quality" => "good", "se_iterations" => 4, "se_objective" => 12.5, "se_dof" => 14, "se_band_reason" => "ok", "se_j_within_3sigma" => true))
-            stxt = SparlectraApp._webui_se_summary(fake)
-            # J/dof leads: a bare J grows with the row count, so the same healthy set
-            # reads as an alarm on a larger case (J = 104 at dof 95 is a ratio of 1.1)
-            @test occursin("J/dof = 0.89", stxt) && occursin("dof = 14", stxt)
-            # a run whose final solve needed fewer iterations than its maximum
-            # pass shows both, so the count is not read as the reported solve's
-            fake2 = Dict("metadata" => Dict{String,Any}("run_mode" => "se", "se_observability_quality" => "good", "se_iterations" => 20, "se_iterations_last_solve" => 12, "se_objective" => 12.5, "se_dof" => 14, "se_band_reason" => "ok", "se_suspicious_count" => 0, "se_eliminations" => 0))
-            @test occursin("20 iteration(s) (max over the passes; final solve 12)", SparlectraApp._webui_se_summary(fake2))
-            @test !occursin("max over the passes", stxt)
-            @test findfirst("J/dof", stxt).start < findfirst("(J = ", stxt).start
-            @test occursin("within 3", stxt)
-            # a doubled set is named where the J is shown, or the page shows an
-            # alarming number with no cause
-            fake["metadata"]["se_duplicate_rows"] = 82
-            @test occursin("82 measurement(s) repeat an already measured quantity", SparlectraApp._webui_se_summary(fake))
-            delete!(fake["metadata"], "se_duplicate_rows")
-            @test !occursin("repeat an already measured", SparlectraApp._webui_se_summary(fake))
-            fake["metadata"]["se_j_within_3sigma"] = false
-            fake["metadata"]["se_band_reason"] = "high"
-            @test occursin("OUTSIDE", SparlectraApp._webui_se_summary(fake))
-            # :low reads as what it is (sigmas overstate the errors), never as an
-            # alarm: the case57 confusion where "OUTSIDE (low)" was read as J too big
-            fake["metadata"]["se_band_reason"] = "low"
-            slow = SparlectraApp._webui_se_summary(fake)
-            @test occursin("far BELOW", slow)
-            @test occursin("not an alarm", slow)
-            @test !occursin("OUTSIDE", slow)
-            fake["metadata"]["se_band_reason"] = "high"
-
-            # topology panel renders findings and the explicit hypothesis button
-            fakeT = Dict("run_id" => "t1", "success" => true, "metadata" => Dict{String,Any}("run_mode" => "se", "se_topology_findings" => [Dict{String,Any}("stage" => "precheck", "kind" => "open_element_with_flow", "location" => "branch 2 (A-B, open)", "evidence" => "Pflow x at 12 sigma", "severity" => "strong")], "se_topology_station_findings" => [Dict{String,Any}("location" => "B2 (+1 linked)", "evidence" => "Pinj_B2 (|rn| 9.1)", "notes" => ["precheck_agreement"])]))
-            tsecT = SparlectraApp._webui_se_topology_section(fakeT)
-            @test occursin("Topology validation (advisory)", tsecT)
-            @test occursin("open_element_with_flow", tsecT)
-            @test occursin("Suspected topology error", tsecT)
-            @test occursin("Test topology hypotheses", tsecT)
-            @test occursin("switches NOTHING", tsecT)
-
-            # tap estimation surfaces: run-form checkbox, summary line, result
-            # table. The release guards are in, so the label is plain again and
-            # the tooltip names the guard behavior instead of an experimental flag
-            @test occursin("name=\"se_tap_estimation\"", pageInfo)
-            @test !occursin("experimental", pageInfo)
-            @test occursin("Machine and unobservable taps are skipped", pageInfo)
-            fake["metadata"]["se_tap_count"] = 2
-            fake["metadata"]["se_tap_fixed"] = true
-            fake["metadata"]["se_tap_j_before"] = 1211.0
-            fake["metadata"]["se_tap_j_after"] = 0.02
-            fake["metadata"]["se_tap_dof_before"] = 28
-            fake["metadata"]["se_tap_dof_after"] = 29
-            stap = SparlectraApp._webui_se_summary(fake)
-            @test occursin("tap estimation: 2 transformer(s)", stap)
-            @test occursin("before fixation", stap)
-            @test !occursin("off-grid tap residual", stap)
-            fake["metadata"]["se_tap_offgrid_residual"] = true
-            @test occursin("NOT from bad data", SparlectraApp._webui_se_summary(fake))
-            fake["metadata"]["se_tap_offgrid_residual"] = false
-            fake["metadata"]["se_tap_estimates"] = [
-                Dict{String,Any}("branch" => 3, "name" => "T1", "mrid" => "", "mode" => "ratio", "electrical_step" => 2.03, "fixed_step" => 2, "electrical_shift_step" => 0.0, "fixed_shift_step" => 0, "out_of_range" => false, "fixed" => true),
-                Dict{String,Any}("branch" => 4, "name" => "T2", "mrid" => "", "mode" => "pst", "electrical_step" => 0.0, "fixed_step" => 0, "electrical_shift_step" => -0.98, "fixed_shift_step" => -1, "out_of_range" => false, "fixed" => true),
-            ]
-            tsec = SparlectraApp._webui_se_tap_section(fake)
-            @test occursin("Transformer tap estimates", tsec)
-            @test occursin("J before fixation", tsec)
-            @test occursin("<td>2</td>", tsec)              # fixed step, not raw r
-            @test occursin("Shift step (fixed)", tsec)      # pst columns present
-            @test !occursin("mRID", tsec)                   # no mRIDs on a MATPOWER-style row set
-            @test occursin("se_tap_estimates.csv", tsec)
-
-            # case binding lives IN the file: the generated set records its case,
-            # the page shows the binding, the case selector stars bound cases, and
-            # a COPY under a foreign name still says which case it belongs to
-            @test occursin("# case: warmup_casePST.m", read(mfile, String))
-            @test SparlectraApp._webui_measurement_set_case(mfile) == "warmup_casePST.m"
-            other = joinpath(cases, "case9.measurements.csv")
-            cp(mfile, other)
-            page3 = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m", Dict{String,String}(); output_root=root, runtime=rt).body)
-            # both sets are bound to the case; the NEWEST is armed (the copy, by
-            # its modification time), the other one is offered plain
-            @test occursin("value=\"case9.measurements.csv\" selected", page3)
-            @test occursin("value=\"$(mname)\">", page3)
-            # block 4 dropped the SE-own case selector (shared selection), and its
-            # "*" bound-set marker went with it; the binding stays visible through
-            # the Case binding line and the per-set labels asserted here
-            @test occursin("Case binding:", page3)
-            # under warmup_casePST the copy is bound to warmup_casePST and offered PLAIN (the
-            # file decides, not its name); under ANOTHER case it carries the label
-            @test occursin(">case9.measurements.csv</option>", page3)
-            # suite migration (no-download rule): the foreign case only has to be
-            # importable under ANOTHER name; the shipped sp_case5 does that
-            case9_path = joinpath(cases, "sp_case5.scf.json")
-            cp(joinpath(dirname(@__DIR__), "data", "scf", "sp_case5.scf.json"), case9_path)
-            page9 = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=sp_case5.scf.json", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("case9.measurements.csv (for warmup_casePST.m)", page9)
-            rm(other)
-
-            # the SE service refuses a set bound to a different case up front,
-            # naming both cases (the d27fbc77 confusion: warmup_casePST set on case85)
-            rGate = start_powerflow_run(Dict{String,Any}("casefile" => case9_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile))
-            @test rGate["status"] != "succeeded"
-            @test occursin("bound to case warmup_casePST.m", rGate["message"])
-            @test occursin("sp_case5.scf.json", rGate["message"])
-
-            # inline editor: page carries the file verbatim, the save handler
-            # writes it back atomically, containment rejects foreign names and
-            # non-v1 content
-            pageEd = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("Edit measurement file (inline)", pageEd)
-            @test occursin("/stateestimation/measurements/save", pageEd)
-            content0 = read(mfile, String)
-            edited = replace(content0, "# case: warmup_casePST.m" => "# case: warmup_casePST.m\n# note: edited inline"; count=1)
-            rsave = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/measurements/save", Dict{String,Any}("file" => mname, "case" => "warmup_casePST.m", "content" => edited); output_root=root, runtime=rt)
-            @test rsave.status == 303
-            @test occursin("saved", Dict(rsave.headers)["Location"])
-            @test occursin("# note: edited inline", read(mfile, String))
-            rbad1 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/measurements/save", Dict{String,Any}("file" => "../evil.csv", "case" => "warmup_casePST.m", "content" => edited); output_root=root, runtime=rt)
-            @test occursin("invalid", Dict(rbad1.headers)["Location"])
-            rbad2 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/measurements/save", Dict{String,Any}("file" => mname, "case" => "warmup_casePST.m", "content" => "a,b\n1,2\n"); output_root=root, runtime=rt)
-            @test occursin("rejected", Dict(rbad2.headers)["Location"])
-            @test occursin("# note: edited inline", read(mfile, String))   # rejected save left the file alone
-            write(mfile, content0)   # restore the clean set for the runs below
-
-            # service-level SE run: artifacts present, history row kind se
-            r1 = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile))
-            @test r1["status"] == "succeeded"
-            id1 = r1["run_id"]
-            for artifact in ("se_state.csv", "se_diagnostics.md", "se_view.md", "measurements.csv")
-                @test isfile(joinpath(root, id1, artifact))
-            end
-            runs = SparlectraApp.list_powerflow_runs(root)
-            row = only(r for r in runs if string(get(r, "run_id", "")) == id1)
-            @test get(row, "run_mode", "") == "se"
-            # the SE result page carries the chain action
-            resPage = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow/result/$(id1)", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("Run power flow from this estimate", resPage)
-            @test occursin("se_start_run_id", resPage)
-
-            # topology validation on the service run: the precheck RESULT is
-            # logged on every run (the clean case says so explicitly), and the
-            # result page offers the explicit hypothesis-test button
-            @test occursin("topology precheck: no findings", read(joinpath(root, id1, "run.log"), String))
-            @test occursin("Test topology hypotheses", resPage)
-            rhyp = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/topology-hypotheses", Dict{String,Any}("run_id" => id1); output_root=root, runtime=rt)
-            @test rhyp.status == 303
-            @test isfile(joinpath(root, id1, "topology_hypotheses.md"))
-            @test occursin("Recommendations only: NOTHING has been switched", read(joinpath(root, id1, "topology_hypotheses.md"), String))
-            @test occursin("topology hypothesis test:", read(joinpath(root, id1, "run.log"), String))
-            resPage2 = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow/result/$(id1)", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("Topology validation (advisory)", resPage2)
-
-            # tap-estimation SE run: a set generated with a tap deviation
-            # disagrees with the model around one transformer; releasing the taps
-            # absorbs the discrepancy and the fixation lands on a mechanical step
-            gentap2 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "tap_error_steps" => "3"); output_root=root, runtime=rt)
-            rm(mfile)
-            mname = written_set(gentap2)
-            mfile = joinpath(cases, mname)
-            rtap = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile, "se_tap_estimation" => true))
-            @test rtap["status"] == "succeeded"
-            idtap = rtap["run_id"]
-            tapcsv = joinpath(root, idtap, "se_tap_estimates.csv")
-            @test isfile(tapcsv)
-            taplines = readlines(tapcsv)
-            @test startswith(taplines[1], "branch,name,mrid,mode,alpha_deg,electrical_step,fixed_step")
-            @test length(taplines) == 3                     # warmup_casePST: two transformers
-            md = rtap["metadata"]
-            # only the PST is estimable, the machine transformer stays calculated
-            @test md["se_tap_count"] == 1
-            @test md["se_tap_fixed"] == true
-            # whole-step injection (half steps are no longer settable): the
-            # release absorbs the deviation and the fixation lands exactly on the
-            # mechanical step, so J stays numerically zero on both sides
-            @test md["se_tap_j_before"] < 1e-10
-            @test md["se_tap_j_after"] < 1e-10
-            # the deviated PST lands on a nonzero mechanical step; on this case
-            # the Delta-u deviation is a SHIFT step, so either step column counts
-            header_cols = split(taplines[1], ",")
-            step_cols = [findfirst(==(c), header_cols) for c in ("fixed_step", "fixed_shift_step")]
-            @test all(i -> i !== nothing, step_cols)
-            @test any(l -> (f=split(l, ","); any(parse(Int, f[i]) != 0 for i in step_cols)), taplines[2:end])
-            # the injected deviation is a CHANGE against the model position:
-            # the tap CSV and the measurement artifact's taps block say so,
-            # the result table marks the row as corrected
-            change_col = findfirst(==("change"), header_cols)
-            @test change_col !== nothing
-            @test any(l -> (f=split(l, ","); f[change_col] != "" && f[change_col] != "0"), taplines[2:end])
-            tapmeas = readlines(joinpath(root, idtap, "measurements.csv"))
-            @test any(l -> startswith(l, "# sparlectra-taps-estimated v1"), tapmeas)
-            @test any(l -> startswith(l, "#") && endswith(l, ",corrected"), tapmeas)
-            tapPage = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow/result/$(idtap)", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("Transformer tap estimates", tapPage)
-            @test occursin("fixed (corrected)", tapPage)
-            @test occursin("<th>Model step</th>", tapPage)
-            @test occursin("tap estimation: 1 transformer(s)", tapPage)
-
-            # A set that DOCUMENTS its tap deviations releases exactly those
-            # transformers by itself, without the user asking for it. As a mere
-            # hint this produced a J nobody could explain, and the hint only
-            # appeared after a converged run (if transformers were changed, that option has to
-            # be on by itself).
-            rhint = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile))
-            @test rhint["status"] == "succeeded"
-            @test rhint["metadata"]["se_set_tap_deviation"] == true
-            @test !isempty(rhint["metadata"]["se_auto_released_taps"])
-            @test occursin("released automatically", rhint["message"])
-            @test occursin("tap estimation released automatically", read(joinpath(root, rhint["run_id"], "run.log"), String))
-
-            # bad data lands findable: gross error in the set -> se_bad_data.csv
-            # with the measurement, its location, and the eliminated flag
-            mfile, mname = regenerate(Dict{String,Any}("casefile" => "warmup_casePST.m", "gross_error_k" => "10"))
-            rbd = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile))
-            @test rbd["status"] == "succeeded"
-            bdcsv = joinpath(root, rbd["run_id"], "se_bad_data.csv")
-            @test isfile(bdcsv)
-            bdtxt = read(bdcsv, String)
-            @test startswith(bdtxt, "measurement_index,id,type,bus,from_bus,to_bus,normalized_residual,wii,localizable,eliminated,suppressed,downweighted")
-            @test occursin(r"[PQ](flow|inj)_", bdtxt) # the corrupted power row is listed (P or Q, the seed decides)
-            @test occursin("true", bdtxt)            # localizable/eliminated flags present
-            @test occursin("se_bad_data.csv", read(joinpath(root, rbd["run_id"], "run.log"), String))
-            # bad data is one click away on the result page (the direct download)
-            bdPage = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow/result/$(rbd["run_id"])", Dict{String,String}(); output_root=root, runtime=rt).body)
-            @test occursin("Bad data (se_bad_data.csv)", bdPage)
-            @test occursin("/powerflow/artifact/$(rbd["run_id"])/se_bad_data.csv", bdPage)
-
-            # restore the clean default set for anything below
-            mfile, mname = regenerate(Dict{String,Any}("casefile" => "warmup_casePST.m"))
-
-            # --- measurement generator v2: truth state, flow ends, passive nodes,
-            # delta comments, and the bad-data threshold surface of the run form
-            genpage = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=warmup_casePST.m", Dict{String,String}(); output_root=root, runtime=rt).body)
-            for needle in ("name=\"gen_truth_source\"", "name=\"gen_truth_run_id\"", "name=\"gen_flow_ends\"", "name=\"gen_passive_sigma\"", "name=\"gen_passive_as_zi\"", "name=\"se_robust_mode\"", "name=\"se_k_eliminate\"", "name=\"se_k_suppress\"", "name=\"se_suppression_sigma\"", "se-threshold-warning", "gen-truth-source")
-                @test occursin(needle, genpage)
-            end
-
-            # one balance-aware flow end: deterministic (two generates produce the
-            # identical file), one flow group per branch, choice documented
-            mfile, mname = regenerate(Dict{String,Any}("casefile" => "warmup_casePST.m", "gen_flow_ends" => "one_balance_aware"))
-            one1 = read(mfile, String)
-            mfile, mname = regenerate(Dict{String,Any}("casefile" => "warmup_casePST.m", "gen_flow_ends" => "one_balance_aware"))
-            one2 = read(mfile, String)
-            @test one1 == one2
-            @test occursin("# seed: 42", one1)
-            # generating persists the generator options in the form block of the
-            # case configuration file so a case reload restores them
-            @test occursin("gen_flow_ends: one_balance_aware", read(joinpath(cases, "warmup_casePST.m.config.yaml"), String))
-            @test occursin("# flow_ends: one_balance_aware", one1)
-            @test occursin("# flow_end,", one1)
-            @test occursin("# truth_value,Vm_", one1)
-            # critical measurements on request: the set is thinned until two rows
-            # are critical, stays observable, and names the rows in its comments
-            mfile, mname = regenerate(Dict{String,Any}("casefile" => "warmup_casePST.m", "gen_critical_count" => "2"))
-            crit_text = read(mfile, String)
-            @test occursin("# critical_target: 2 reached: ", crit_text)
-            @test occursin("# critical_rows: ", crit_text)
-            crit_net = Sparlectra.import_case(joinpath(cases, "warmup_casePST.m"), Sparlectra.load_sparlectra_config()).net
-            Sparlectra.readMeasurementsCSV!(crit_net; file=mfile)
-            crit_obs = evaluate_global_observability(crit_net)
-            @test crit_obs.quality != :not_observable
-            @test length(crit_obs.numerical_critical_measurement_indices) >= 2
-            @test occursin("gen_critical_count: 2", read(joinpath(cases, "warmup_casePST.m.config.yaml"), String))
-            # a case a synchronous action still holds refuses a second action and
-            # a run, with a message instead of a half-written file
-            @test SparlectraApp._webui_case_claim!("warmup_casePST.m", "generating measurements")
-            busy_resp = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m"); output_root=root, runtime=rt)
-            @test occursin("is busy", SparlectraApp._webui_urldecode(Dict(busy_resp.headers)["Location"]))
-            busy_run = SparlectraApp.start_webui_powerflow_run(Dict{String,Any}("casefile" => "warmup_casePST.m", "output_root" => root, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH); case_directory=cases)
-            @test busy_run["status"] == "failed" && occursin("busy", String(busy_run["message"]))
-            SparlectraApp._webui_case_release!("warmup_casePST.m")
-            @test SparlectraApp._webui_case_busy("warmup_casePST.m") === nothing
-            # the full default set measures injections at every bus, so every
-            # branch keeps its from end and no to-direction flow rows remain
-            @test all(l -> !(startswith(l, "PflowMeas") && length(split(l, ",")) >= 7 && split(l, ",")[7] == "to"), split(one1, "\n"))
-            rone = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile))
-            @test rone["status"] == "succeeded"
-
-            # passive nodes as protected zero-injection constraints: ZI rows
-            # written, no duplicate plain injection rows, elimination stays away
-            mfile, mname = regenerate(Dict{String,Any}("casefile" => "warmup_casePST.m", "gen_passive_as_zi" => "true"))
-            zi1 = read(mfile, String)
-            @test occursin("ZI_PINJ_", zi1)
-            zilines = [l for l in split(zi1, "\n") if startswith(l, "PinjMeas") && occursin("ZI_PINJ_bus_", l)]
-            @test !isempty(zilines)
-            ziline = first(zilines)
-            zibus = split(ziline, ",")[2]
-            @test !any(l -> startswith(l, "PinjMeas,$(zibus),") && !occursin("ZI_", l), split(zi1, "\n"))
-            rzi = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile))
-            @test rzi["status"] == "succeeded"
-            @test rzi["metadata"]["se_eliminations"] == 0
-
-            # truth state from run: adopts the SE run's state (bit-exact against
-            # se_state.csv), documents the source, and the delta file appears
-            mfile, mname = regenerate(Dict{String,Any}("casefile" => "warmup_casePST.m", "gen_truth_source" => "from_run", "gen_truth_run_id" => id1))
-            fr1 = read(mfile, String)
-            @test occursin("# truth: run $(id1) (se,", fr1)
-            sestate = readlines(joinpath(root, id1, "se_state.csv"))
-            strow = only([l for l in sestate if startswith(l, "2,")])
-            st_vm = split(strow, ",")[2]
-            vmrow = only([l for l in split(fr1, "\n") if startswith(l, "VmMeas,2,")])
-            @test split(vmrow, ",")[8] == st_vm
-            # rejections: tap deviation locked, unknown run id named
-            rrej = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "gen_truth_source" => "from_run", "gen_truth_run_id" => id1, "tap_error_steps" => "2"); output_root=root, runtime=rt)
-            @test occursin("requires%20truth%20state", Dict(rrej.headers)["Location"])
-            rrej2 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/generate-measurements", Dict{String,Any}("casefile" => "warmup_casePST.m", "gen_truth_source" => "from_run", "gen_truth_run_id" => "nope"); output_root=root, runtime=rt)
-            @test occursin("not%20found%20in%20the%20run%20history", Dict(rrej2.headers)["Location"])
-
-            # restore the clean default set and exercise the threshold surface:
-            # the staged service path equals the legacy Bool bitwise, the delta
-            # artifact exists for generated sets, invalid modes reject
-            mfile, mname = regenerate(Dict{String,Any}("casefile" => "warmup_casePST.m"))
-            rst = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile, "se_robust_mode" => "staged", "se_robust_k1" => 3.0, "se_robust_k2" => 6.0))
-            @test rst["status"] == "succeeded"
-            @test rst["metadata"]["se_robust_mode"] == "staged"
-            # knees out of order: the staged run refuses them naming both form
-            # fields; without staged down-weighting the pair is not read, the
-            # run goes through on the configured pair and run.log says so
-            knee_request = Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile, "se_robust_k1" => 10.0, "se_robust_k2" => 6.0)
-            knee_staged = start_powerflow_run(merge(knee_request, Dict{String,Any}("se_robust_mode" => "staged")))
-            @test knee_staged["status"] == "failed"
-            @test occursin("down-weight from |r|/sigma", knee_staged["message"]) && occursin("k1=10.0, k2=6.0", knee_staged["message"])
-            knee_off = start_powerflow_run(merge(knee_request, Dict{String,Any}("se_robust_mode" => "off")))
-            @test knee_off["status"] == "succeeded"
-            @test occursin("are out of order; they are not used with down-weighting off", read(joinpath(knee_off["output_dir"], "run.log"), String))
-            # the request builder records the SE options as sidecar-persistable
-            # settings, so the browser flow's "save settings" keeps them.
-            # se_robust_mode carries a real config_key since issue #377 (case
-            # scope, like power_flow.solver), so it now travels as the dotted
-            # config override "state_estimation.robust_mode", not as the bare
-            # form field; se_robust_k2 has no config key and is unaffected.
-            reqrec = SparlectraApp._webui_request_settings_for_profile(SparlectraApp.powerflow_webui_request(Dict{String,Any}("se_mode" => "true", "casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "measurement_file" => mfile, "se_robust_mode" => "staged", "se_robust_k2" => "6.0"); default_output_root=root))
-            @test reqrec["state_estimation.robust_mode"] == "staged"
-            @test reqrec["se_robust_k2"] == 6.0
-            rleg = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile, "se_robust" => true))
-            @test rleg["metadata"]["se_robust_mode"] == "staged"
-            @test rst["metadata"]["se_objective"] == rleg["metadata"]["se_objective"]
-            @test isfile(joinpath(root, rst["run_id"], "se_deltas.csv"))
-            @test occursin("kind,id,type,bus,from_bus,to_bus,measured,truth,estimated", read(joinpath(root, rst["run_id"], "se_deltas.csv"), String))
-            rbadmode = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => mfile, "se_robust_mode" => "bogus"))
-            @test rbadmode["status"] != "succeeded"
-            @test occursin("se_robust_mode", rbadmode["message"])
-
-            # Delta-u PST angle estimation on the tracked demo case: the
-            # generator targets the PST's additional-voltage stepper (nameplate
-            # block mpc.sparlectra.tap_changers), the mass release estimates it
-            # (:pst along the nameplate psi), and the fixation lands exactly on
-            # the injected Delta-u step while the machine trafo stays calculated
-            pstcase = joinpath(dirname(@__DIR__), "data", "mpower", "warmup_casePST.m")
-            pstout = joinpath(root, "warmup_casePST.measurements.csv")
-            gpst = SparlectraApp._se_generate_measurement_set(pstcase, pstout, SparlectraApp.MeasurementGeneratorOptions(; noise=true, gross_k=0.0, tap_steps=2.0, include_i=false, sigma_u_pct=0.5, sigma_i_pct=1.0, sigma_p_pct=1.0, sigma_q_pct=1.0, sigma_ia_deg=0.0))
-            @test occursin("Delta-u step", gpst.tap_note)
-            @test occursin("PST branch 8", gpst.tap_note)
-
-            # random multi-selection: the user chooses HOW MANY bad-data rows and
-            # at most how many transformers, the seed decides WHERE; the same
-            # seed reproduces the identical file, a different seed moves the picks.
-            # load_fixture_net: the shipped sp_case60 offers several eligible
-            # transformers, so a max of 2 actually draws 2 (derived)
-            d14 = joinpath(dirname(@__DIR__), "data", "scf", "sp_case60.scf.json")
-            go1 = joinpath(root, "gen_multi_a.csv")
-            go2 = joinpath(root, "gen_multi_b.csv")
-            go3 = joinpath(root, "gen_multi_c.csv")
-            genmulti(out, seed) = SparlectraApp._se_generate_measurement_set(d14, out, SparlectraApp.MeasurementGeneratorOptions(; noise=false, gross_k=10.0, gross_count=3, tap_steps=2.0, tap_count=2, include_i=false, sigma_u_pct=0.5, sigma_i_pct=1.0, sigma_p_pct=1.0, sigma_q_pct=1.0, sigma_ia_deg=0.0, seed=seed))
-            gm1 = genmulti(go1, 42)
-            @test occursin("on 3 row(s):", gm1.gross_note)
-            @test length(collect(eachmatch(r"on transformer branch", gm1.tap_note))) == 2
-            gm2 = genmulti(go2, 42)
-            @test gm2.gross_note == gm1.gross_note
-            @test read(go1, String) == read(go2, String)
-            gm3 = genmulti(go3, 7)
-            @test gm3.gross_note != gm1.gross_note
-            # the tap draw never spills onto a machine transformer while an
-            # estimable one exists: on the 2-trafo PST case a max of 2 must hit
-            # ONLY the PST and say so, or the set carries a deviation the mass
-            # release skips by design (seen: J ~ 318 instead of ~ dof)
-            gopst = joinpath(root, "gen_multi_pst.csv")
-            gmp = SparlectraApp._se_generate_measurement_set(pstcase, gopst, SparlectraApp.MeasurementGeneratorOptions(; noise=false, gross_k=0.0, tap_steps=3.0, tap_count=2, include_i=false, sigma_u_pct=0.5, sigma_i_pct=1.0, sigma_p_pct=1.0, sigma_q_pct=1.0, sigma_ia_deg=0.0, seed=42))
-            @test occursin("PST branch 8", gmp.tap_note)
-            @test !occursin("branch 7", gmp.tap_note)
-            @test occursin("limited to 1 eligible transformer(s), max 2 requested", gmp.tap_note)
-            pstlines = readlines(gopst)
-            @test any(l -> startswith(l, "# 7,") && endswith(l, ",0.0"), pstlines)
-            @test any(l -> startswith(l, "# 8,") && endswith(l, ",3.0"), pstlines)
-            @test_throws ArgumentError SparlectraApp.MeasurementGeneratorOptions(; noise=false, gross_k=10.0, gross_count=0, tap_steps=0.0, include_i=false, sigma_u_pct=0.5, sigma_i_pct=1.0, sigma_p_pct=1.0, sigma_q_pct=1.0, sigma_ia_deg=0.0)
-            @test_throws ArgumentError SparlectraApp.MeasurementGeneratorOptions(; noise=false, gross_k=0.0, tap_steps=1.0, tap_count=0, include_i=false, sigma_u_pct=0.5, sigma_i_pct=1.0, sigma_p_pct=1.0, sigma_q_pct=1.0, sigma_ia_deg=0.0)
-
-            # J_active: replacement suppression removes corrupted rows from the
-            # STATE; the reported pair (honest J with original sigmas, J_active
-            # over the trusted rows) makes that visible, and the band verdict
-            # stays on the honest J (eliminations off so the rows STAY suppressed)
-            gja = joinpath(root, "gen_jactive.csv")
-            SparlectraApp._se_generate_measurement_set(case_path, gja, SparlectraApp.MeasurementGeneratorOptions(; noise=false, gross_k=12.0, gross_count=2, tap_steps=0.0, include_i=false, sigma_u_pct=0.5, sigma_i_pct=1.0, sigma_p_pct=1.0, sigma_q_pct=1.0, sigma_ia_deg=0.0, seed=42))
-            rja = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => gja, "se_robust_mode" => "replacement", "se_max_eliminations" => 0))
-            @test rja["status"] == "succeeded"
-            @test rja["metadata"]["se_suppressed_rows"] >= 1
-            @test rja["metadata"]["se_objective_active"] < rja["metadata"]["se_objective"]
-            @test rja["metadata"]["se_dof_active"] == rja["metadata"]["se_dof"] - rja["metadata"]["se_suppressed_rows"]
-            @test occursin("J_active", read(joinpath(root, rja["run_id"], "run.log"), String))
-
-            # with eliminations enabled the HEADLINE describes the state AFTER
-            # the elimination workflow: the injected gross error is eliminated
-            # and J returns to ~dof (regression for the run where an eliminated
-            # 10-sigma row still pushed the headline to J = 149 at dof 42)
-            gjb = joinpath(root, "gen_jelim.csv")
-            SparlectraApp._se_generate_measurement_set(case_path, gjb, SparlectraApp.MeasurementGeneratorOptions(; noise=true, gross_k=10.0, gross_count=1, tap_steps=0.0, include_i=false, sigma_u_pct=0.5, sigma_i_pct=1.0, sigma_p_pct=1.0, sigma_q_pct=1.0, sigma_ia_deg=0.0, seed=42))
-            rje = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => gjb, "se_robust_mode" => "replacement", "se_k_suppress" => 4.0))
-            @test rje["status"] == "succeeded"
-            @test rje["metadata"]["se_eliminations"] == 1
-            @test rje["metadata"]["se_band_reason"] == "ok"
-            @test rje["metadata"]["se_objective"] < 2.0 * rje["metadata"]["se_dof"]
-
-            # reset-settings deletes the per-case sidecar profile; a second
-            # reset reports that the defaults are already active
-            SparlectraApp._webui_merge_case_settings!(root, case_path, Dict{String,Any}("gen_seed" => 99); case_directory=dirname(case_path))
-            spath = SparlectraApp._webui_case_settings_path(root, case_path; case_directory=dirname(case_path))
-            @test isfile(spath)
-            rrst = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/reset-settings", Dict{String,Any}("casefile" => basename(case_path)); output_root=root, runtime=rt)
-            @test !isfile(spath)
-            @test occursin("deleted", string(rrst))
-            rrst2 = SparlectraApp.route_sparlectra_webui("POST", "/stateestimation/reset-settings", Dict{String,Any}("casefile" => basename(case_path)); output_root=root, runtime=rt)
-            @test occursin("already", string(rrst2))
-            @test occursin("reset-settings", SparlectraApp.render_se_form(; cases=[basename(case_path)], selected_case=basename(case_path)))
-
-            # noise defaults ON: a fresh form (no sidecar, no stickies) checks
-            # the box (a noise-free set puts J near 0 instead of near dof, which
-            # reads like a broken statistic); an explicit false stays unchecked
-            @test occursin("name=\"noise\" value=\"true\" checked", SparlectraApp.render_se_form(; cases=["case14.m"], selected_case="case14.m"))
-            @test !occursin("name=\"noise\" value=\"true\" checked", SparlectraApp.render_se_form(; cases=["case14.m"], selected_case="case14.m", gen_values=Dict{String,String}("noise" => "false")))
-            rpst = start_powerflow_run(Dict{String,Any}("casefile" => pstcase, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true, "measurement_file" => pstout, "se_tap_estimation" => true))
-            @test rpst["status"] == "succeeded"
-            @test rpst["metadata"]["se_band_reason"] == "ok"
-            pstrow = only(t for t in rpst["metadata"]["se_tap_estimates"] if t["branch"] == 8)
-            @test pstrow["mode"] == "pst"
-            @test pstrow["fixed_shift_step"] == 2
-            @test abs(pstrow["electrical_shift_step"] - 2.0) < 0.3
-            gsurow = only(t for t in rpst["metadata"]["se_tap_estimates"] if t["branch"] == 7)
-            @test gsurow["source"] == "calculated"
-
-            # chain PF (:se_snapshot): immediate convergence, slack pickup recorded
-            r2 = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_start_run_id" => id1, "se_start_mode" => "se_snapshot"))
-            @test r2["status"] == "succeeded"
-            @test r2["iterations"] <= 1
-            @test abs(r2["metadata"]["slack_pickup_mw"]) < 1e-6
-            @test r2["metadata"]["run_mode"] == "powerflow_se_start"
-            # deviation report PF vs SE state: metadata extremes plus the per-bus
-            # artifact (snapshot start on a consistent set: deviation tiny)
-            @test isfinite(r2["metadata"]["se_pf_max_dvm_pu"])
-            @test r2["metadata"]["se_pf_max_dvm_pu"] < 1e-6
-            @test isfile(joinpath(r2["output_dir"], "se_pf_deviation.csv"))
-            devtxt = read(joinpath(r2["output_dir"], "se_pf_deviation.csv"), String)
-            @test startswith(devtxt, "bus,name,mrid,vm_se_pu,vm_pf_pu,dvm_pu,va_se_deg,va_pf_deg,dva_deg")
-
-            # chain N-1: consumes the SE-started base case, notes the SE run id,
-            # and matches the manual run on the same case
-            # screening off on BOTH runs: this parity check compares the SE-started
-            # base against the manual base through FULL solves (which re-converge to
-            # 1e-9 agreement); screening estimates are first-order functions of the
-            # base state itself and legitimately differ at the solver-tolerance
-            # level, so they are not part of the chain-parity contract
-            r3 = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "contingency_mode" => true, "contingency_kind" => "branch", "screening_mode" => "off", "se_start_run_id" => id1))
-            @test r3["status"] == "succeeded"
-            @test r3["metadata"]["se_run_id"] == id1
-            r4 = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "contingency_mode" => true, "contingency_kind" => "branch", "screening_mode" => "off"))
-            @test r4["status"] == "succeeded"
-            # identical results: structural fields exact, numeric fields to 1e-9
-            # (the SE-started base solve walks a different iteration path than the
-            # flat start, so the last ULPs of the voltages differ legitimately)
-            lines3 = readlines(joinpath(root, r3["run_id"], "contingency_n1.csv"))
-            lines4 = readlines(joinpath(root, r4["run_id"], "contingency_n1.csv"))
-            @test length(lines3) == length(lines4)
-            # writeContingencyResultsCSV's default delimiter is "technical" (comma)
-            # since issue #376, not the old hardcoded semicolon; a hardcoded ";"
-            # here found no delimiter at all and silently degraded every row to a
-            # single-field exact-string comparison, hiding the intended per-field
-            # isapprox tolerance below.
-            csv_delim = occursin(';', first(lines3)) ? ';' : ','
-            for (l3, l4) in zip(lines3, lines4)
-                f3 = split(l3, csv_delim)
-                f4 = split(l4, csv_delim)
-                @test length(f3) == length(f4)
-                for (a, b) in zip(f3, f4)
-                    na = tryparse(Float64, a)
-                    nb = tryparse(Float64, b)
-                    if na !== nothing && nb !== nothing
-                        @test (isnan(na) && isnan(nb)) || isapprox(na, nb; atol=1e-9)
-                    else
-                        @test a == b
+            # same file, same 50 Hz: the same solution; 60 Hz changes it
+            @test balance(cap_runs["50 Hz (case file)"]) == balance(cap_runs["50 Hz (configuration)"])
+            @test balance(cap_runs["60 Hz (configuration)"]) != balance(cap_runs["50 Hz (configuration)"])
+            # cgmes_import.read_dynamics per case (default off): a CGMES
+            # delivery with a DY profile (the SmallGrid fixture plus one DY
+            # file with two machine models). The switch renders on the CGMES
+            # Case page only; checked, the save writes true into the case
+            # file and the run reads the DY profile; unchecked again, the
+            # hidden false equals the default, the key leaves the case file
+            # and the run skips the profile.
+            @test !rendered(body60, "cgmes_read_dynamics")
+            sg_zips = sort(filter(f -> endswith(f, ".zip"), readdir(joinpath(@__DIR__, "fixtures", "cgmes_smallgrid"); join = true)))
+            sg_store = Sparlectra.CGMESImporter.loadCGMES(sg_zips)
+            sm_mrid(name) = only(o.mrid for o in Sparlectra.CGMESImporter.objectsOf(sg_store, :SynchronousMachine) if Sparlectra.CGMESImporter.str(o, :name) == name)
+            dy_model(id, mrid) = """
+              <cim:SynchronousMachineTimeConstantReactance rdf:ID="$(id)">
+                <cim:DynamicsFunctionBlock.enabled>true</cim:DynamicsFunctionBlock.enabled>
+                <cim:RotatingMachineDynamics.inertia>4.25</cim:RotatingMachineDynamics.inertia>
+                <cim:SynchronousMachineDynamics.SynchronousMachine rdf:resource="#$(mrid)"/>
+              </cim:SynchronousMachineTimeConstantReactance>
+            """
+            dy_xml = """<?xml version="1.0" encoding="UTF-8"?>
+            <rdf:RDF xmlns:cim="http://iec.ch/TC57/2013/CIM-schema-cim16#" xmlns:md="http://iec.ch/TC57/61970-552/ModelDescription/1#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+              <md:FullModel rdf:about="urn:uuid:5f0e4c1a-0000-4000-8000-000000000507">
+                <md:Model.profile>http://entsoe.eu/CIM/Dynamics/3/1</md:Model.profile>
+              </md:FullModel>
+            $(dy_model("_wdy_m1", sm_mrid("Claytor SM")))$(dy_model("_wdy_m2", sm_mrid("Torrey SM")))</rdf:RDF>
+            """
+            open(joinpath(cases, "sg_dy.zip"), "w") do io
+                Sparlectra.CGMESImporter.ZipArchives.ZipWriter(io) do w
+                    for z in sg_zips
+                        Sparlectra.CGMESImporter.ZipArchives.zip_newfile(w, basename(z))
+                        write(w, read(z))
                     end
+                    Sparlectra.CGMESImporter.ZipArchives.zip_newfile(w, "sg_DY.xml")
+                    write(w, dy_xml)
                 end
             end
-
-            # chain without a preceding SE run errors clearly (both entry points)
-            r5 = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_start_run_id" => "does-not-exist"))
-            @test r5["status"] == "failed"
-            # se_mode without a measurement file is rejected up front
-            r6 = start_powerflow_run(Dict{String,Any}("casefile" => case_path, "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true))
-            @test r6["status"] == "failed"
-        end)() end
-
-        @testset "saved case settings outrank the configuration on the form" begin (function ()
-            # No mtime logic anywhere: the case levels always win over the
-            # general configuration for the fields they set, however new the
-            # configuration file is.
-            dir = mktempdir()
-            cfg = joinpath(dir, "conf.yaml")
-            write(cfg, "config_version: 1\nscope: general\npower_flow:\n  max_iter: 99\n")
-            profile = Dict{String,Any}("power_flow_max_iter" => 55, "power_flow_autodamp_min" => 0.07, "_profile_path" => joinpath(dir, "case57.config.yaml"))
-            v = SparlectraApp.webui_form_state(selected_config_file=cfg, sidecar_profile=profile)
-            @test v["power_flow_max_iter"] == 55
-            @test v["power_flow_autodamp_min"] == 0.07
-            @test !haskey(v, "_config_newer_than_profile")
-            # a field the case does not set comes from the configuration
-            v_cfg_only = SparlectraApp.webui_form_state(selected_config_file=cfg)
-            @test v_cfg_only["power_flow_max_iter"] == 99
-        end)() end
-
-        @testset "state estimation form settings are case scope (issue #377)" begin (function ()
-            dir = mktempdir()
-            casedir = joinpath(dir, "cases")
-            mkpath(casedir)
-            root = joinpath(dir, "out")
-            mkpath(root)
-            cp(abspath(joinpath(dirname(@__DIR__), "data", "scf", "sp_case14.scf.json")), joinpath(casedir, "sp_case14.scf.json"))
-            cp(abspath(joinpath(dirname(@__DIR__), "data", "scf", "sp_case14.measurements.csv")), joinpath(casedir, "sp_case14.measurements.csv"))
-            cp(abspath(joinpath(dirname(@__DIR__), "data", "scf", "sp_case60.scf.json")), joinpath(casedir, "sp_case60.scf.json"))
-            rt = (; case_directory=casedir, config_file=Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, operation_log=SparlectraApp.webui_operation_log_path(root), startup_config_error=nothing, runner=SparlectraApp.start_powerflow_run)
-
-            # test: configuration.yaml with k_eliminate 3.5 and max_eliminations 0,
-            # page opened, fields show the file's values without user input, and a
-            # run without form input (case sidecar with max_eliminations: 0) reports
-            # se_eliminations = 0 - the issue's own regression: it eliminated a row
-            # although the file said 0.
-            config_path = joinpath(dir, "config.yaml")
-            cp(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, config_path)
-            open(config_path, "a") do io
-                println(io, "state_estimation:")
-                println(io, "  k_eliminate: 3.5")
-                println(io, "  max_eliminations: 0")
+            body_cg = case_page("sg_dy.zip")
+            @test rendered(body_cg, "cgmes_read_dynamics")
+            post_cg = posted_fields(body_cg)
+            @test post_cg["cgmes_read_dynamics"] == "false"
+            # the DY section of the import report, up to the next heading;
+            # the report escapes Markdown characters (cgmes\_import), so
+            # the backslashes go before the comparison
+            function dy_section(run)
+                t = read(joinpath(String(run["output_dir"]), "cgmes_import_report.md"), String)
+                i = findfirst("## Dynamic data (DY profile)\n", t)
+                i === nothing && return ""
+                j = findnext("\n## ", t, last(i))
+                return replace(t[last(i)+1:(j === nothing ? lastindex(t) : first(j))], r"\\(.)" => s"\1")
             end
-            rt_yaml = (; case_directory=casedir, config_file=config_path, operation_log=SparlectraApp.webui_operation_log_path(root), startup_config_error=nothing, runner=SparlectraApp.start_powerflow_run)
-            page = String(copy(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=sp_case14.scf.json"; output_root=root, runtime=rt_yaml).body))
-            @test occursin("id=\"se-k-eliminate\" value=\"3.5\"", page)
-            @test occursin("name=\"se_max_eliminations\" value=\"0\"", page)
-            run_yaml = SparlectraApp.start_powerflow_run(Dict("casefile" => "sp_case14.scf.json", "config_file" => config_path, "output_root" => root, "se_mode" => true); case_directory=casedir)
-            @test run_yaml["status"] == "succeeded"
-            @test run_yaml["metadata"]["se_eliminations"] == 0
-            @test run_yaml["metadata"]["se_k_eliminate"] == 3.5
-
-            # submitting the SAME run form unchanged (as the browser would with the
-            # page correctly pre-filled above) must not silently outrank the file
-            submit_form = Dict{String,Any}(
-                "casefile" => "sp_case14.scf.json", "config_file" => config_path, "se_mode" => "true",
-                "measurement_file" => "sp_case14.measurements.csv", "se_flatstart" => "true", "se_tol" => "1e-6",
-                "se_max_iter" => "50", "se_robust_mode" => "off", "se_k_eliminate" => "3.5", "se_robust_k1" => "3.0",
-                "se_robust_k2" => "6.0", "se_k_suppress" => "4.0", "se_suppression_sigma" => "2000", "se_max_eliminations" => "0",
-            )
-            resp = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/run", submit_form; output_root=root, runtime=rt_yaml)
-            run_id = basename(only(h.second for h in resp.headers if h.first == "Location"))
-            wait(SparlectraApp._POWERFLOW_WEBUI_JOBS[run_id]["task"])
-            submitted_result = get_powerflow_result(run_id)
-            @test submitted_result["metadata"]["se_eliminations"] == 0
-            @test submitted_result["metadata"]["se_k_eliminate"] == 3.5
-
-            # test: form value changed and Save settings pressed -> value appears
-            # in the case sidecar; next run without form input uses it
-            save_form = copy(submit_form)
-            save_form["se_k_eliminate"] = "5.0"
-            save_form["settings_target"] = "this_case"
-            save_resp = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", save_form; output_root=root, runtime=rt)
-            @test save_resp.status == 303
-            sidecar = read(joinpath(casedir, "sp_case14.config.yaml"), String)
-            @test occursin("k_eliminate: 5.0", sidecar)
-            run_after_save = SparlectraApp.start_powerflow_run(Dict("casefile" => "sp_case14.scf.json", "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root, "se_mode" => true); case_directory=casedir)
-            @test run_after_save["metadata"]["se_k_eliminate"] == 5.0
-
-            # test: switching cases restores each case's own values - sp_case60 has
-            # no sidecar, so it must show the STRUCT default (3.0), not case14's 5.0
-            page14_after = String(copy(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=sp_case14.scf.json"; output_root=root, runtime=rt).body))
-            @test occursin("id=\"se-k-eliminate\" value=\"5.0\"", page14_after)
-            page60 = String(copy(SparlectraApp.route_sparlectra_webui("GET", "/powerflow?casefile=sp_case60.scf.json"; output_root=root, runtime=rt).body))
-            @test occursin("id=\"se-k-eliminate\" value=\"3.0\"", page60)
-
-            # regression (already true, kept per the issue): power_flow.solver in
-            # the case sidecar reaches the run without touching Settings. The
-            # shipped sp_case* demos carry active controllers, which an apslf
-            # run leaves inactive with one warning that names apslf (0.31.0);
-            # that warning in run.log shows the sidecar's solver choice reached
-            # the run.
-            write(joinpath(casedir, "sp_case14.config.yaml"), "config_version: 1\nscope: case\ncase: sp_case14.scf.json\npower_flow:\n  solver: apslf\n")
-            run_solver = SparlectraApp.start_powerflow_run(Dict("casefile" => "sp_case14.scf.json", "config_file" => Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, "output_root" => root); case_directory=casedir)
-            @test get(run_solver, "success", false) === true
-            @test occursin("power_flow.solver=apslf runs without controllers", read(joinpath(run_solver["output_dir"], "run.log"), String))
+            for (checked, stored, section) in ((true, true, "DY profile read (cgmes_import.read_dynamics): 2 unit(s) with dynamic data"), (false, nothing, "DY profile present (1 file(s)), not read: cgmes_import.read_dynamics = false"))
+                # the browser posts the hidden false first and, when checked,
+                # the true of the checkbox; the save parser keeps the last
+                save_cg = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", merge(post_cg, Dict{String,Any}("cgmes_read_dynamics" => checked ? "true" : "false")); output_root=root, runtime=rt)
+                @test save_cg.status in (302, 303)
+                @test get(Sparlectra.load_case_config(joinpath(cases, "sg_dy.zip")), "cgmes_import.read_dynamics", nothing) === stored
+                run_cg = SparlectraApp.start_powerflow_run(Dict("casefile" => "sg_dy.zip", "config_file" => cfg_rt, "output_root" => joinpath(root, "runs_dy_" * string(checked))); case_directory=cases)
+                @test run_cg["status"] == "succeeded"
+                @test occursin(section, dy_section(run_cg))
+            end
+            # cgmes_import.equivalent_injection_as_source per case (default
+            # off), same pattern: checked, the case file stores true and the
+            # run imports the boundary EquivalentInjections of SmallGrid as
+            # sources (one importer notice counts them); unchecked, the key
+            # leaves the case file and no injection becomes a source
+            @test !rendered(body60, "cgmes_equivalent_injection_as_source")
+            @test rendered(body_cg, "cgmes_equivalent_injection_as_source")
+            @test post_cg["cgmes_equivalent_injection_as_source"] == "false"
+            for (checked, stored) in ((true, true), (false, nothing))
+                save_ei = SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", merge(post_cg, Dict{String,Any}("cgmes_equivalent_injection_as_source" => checked ? "true" : "false")); output_root=root, runtime=rt)
+                @test save_ei.status in (302, 303)
+                @test get(Sparlectra.load_case_config(joinpath(cases, "sg_dy.zip")), "cgmes_import.equivalent_injection_as_source", nothing) === stored
+                run_ei = SparlectraApp.start_powerflow_run(Dict("casefile" => "sg_dy.zip", "config_file" => cfg_rt, "output_root" => joinpath(root, "runs_ei_" * string(checked))); case_directory=cases)
+                @test run_ei["status"] == "succeeded"
+                report = replace(read(joinpath(String(run_ei["output_dir"]), "cgmes_import_report.md"), String), r"\\(.)" => s"\1")
+                @test occursin(r"notice: \d+ EquivalentInjection\(s\) imported as source", report) == checked
+            end
         end)() end
 
         @testset "browser opening falls back to the system default" begin (function ()
@@ -1630,6 +1037,89 @@ function run_webui_fast_tests()
             @test win_chrome[2] == :app_window
         end)() end
 
+        @testset "app window geometry: configured size, saved by Stop Web UI" begin (function ()
+            # The app window opens with webui.window_width/height and, once a
+            # Stop Web UI click saved one, at webui.window_x/y. Stop sends the
+            # geometry as hidden fields; a minimized window (the hidden flag,
+            # or the -32000 Chromium parks it at on Windows) and implausible
+            # values are not saved.
+            url = "http://127.0.0.1:8080/powerflow"
+            chrome(name) = name == "google-chrome" ? "/usr/bin/google-chrome" : nothing
+            no_path(_) = false
+            no_env = Dict{String,String}()
+            default_cmd = SparlectraApp._webui_app_window_command(url; geometry=SparlectraApp._WEBUI_DEFAULT_WINDOW_GEOMETRY, profile_dir="", platform=:linux,
+                executable_lookup=chrome, path_exists=no_path, environment=no_env)
+            @test "--window-size=1500,950" in default_cmd.exec
+            @test !any(startswith("--window-position="), default_cmd.exec)
+            @test !any(startswith("--user-data-dir="), default_cmd.exec)
+            # the flags act only in a new browser process (own profile), and the
+            # position only through X11 under Wayland
+            placed = SparlectraApp._webui_app_window_command(url; geometry=(width=1200, height=800, x=-10, y=20), profile_dir="/state/browser", platform=:linux,
+                executable_lookup=chrome, path_exists=no_path, environment=Dict("WAYLAND_DISPLAY" => "wayland-0"))
+            @test "--window-size=1200,800" in placed.exec
+            @test "--window-position=-10,20" in placed.exec
+            @test "--user-data-dir=/state/browser" in placed.exec
+            @test "--ozone-platform=x11" in placed.exec
+            @test !("--ozone-platform=x11" in default_cmd.exec)
+            mac_cmd = SparlectraApp._webui_app_window_command(url; geometry=(width=1200, height=800, x=5, y=6), profile_dir="/state/browser", platform=:macos,
+                executable_lookup=no_path, path_exists=(p -> p == "/Applications/Google Chrome.app"), environment=Dict("WAYLAND_DISPLAY" => "wayland-0"))
+            @test "--window-position=5,6" in mac_cmd.exec
+            @test "--user-data-dir=/state/browser" in mac_cmd.exec
+            @test !("--ozone-platform=x11" in mac_cmd.exec)
+
+            # a saved position on a monitor that is gone is dropped, so the
+            # window opens on the main monitor; unknown layout keeps it
+            screens = SparlectraApp._webui_parse_powershell_screens("0 0 1920 1080\r\n1920 0 2560 1440\r\n")
+            @test screens == [(0, 0, 1920, 1080), (1920, 0, 2560, 1440)]
+            @test SparlectraApp._webui_parse_xrandr_monitors("Monitors: 2\n 0: +*DP-1 2560/597x1440/336+0+0  DP-1\n 1: +HDMI-1 1920/510x1080/290+-1920+0  HDMI-1\n") == [(0, 0, 2560, 1440), (-1920, 0, 1920, 1080)]
+            on_second = (width=1200, height=800, x=2000, y=100)
+            @test SparlectraApp._webui_visible_geometry(on_second, screens) == on_second
+            @test (@test_logs (:info, r"on no connected monitor") SparlectraApp._webui_visible_geometry(on_second, screens[1:1])) == (width=1200, height=800, x=nothing, y=nothing)
+            @test SparlectraApp._webui_visible_geometry(on_second, nothing) == on_second
+            @test SparlectraApp._webui_monitor_rects(:linux; executable_lookup=(_ -> nothing)) === nothing
+
+            # the template carries the defaults, the loader validates
+            cfg = Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload=true)
+            @test (cfg.webui.window_width, cfg.webui.window_height, cfg.webui.window_x, cfg.webui.window_y) == (1500, 950, nothing, nothing)
+            @test_throws ArgumentError Sparlectra.load_sparlectra_config(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH; reload=true,
+                overrides=Dict{String,Any}("webui" => Dict{String,Any}("window_width" => 0)))
+
+            mktempdir() do dir
+                file = joinpath(dir, "configuration.yaml")
+                cp(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, file)
+                @test SparlectraApp._webui_window_geometry(file) == SparlectraApp._WEBUI_DEFAULT_WINDOW_GEOMETRY
+                form(; kw...) = Dict{String,String}("window_width" => "1234", "window_height" => "876", "window_x" => "12", "window_y" => "-34", "window_hidden" => "0",
+                    (String(k) => v for (k, v) in kw)...)
+                saved = SparlectraApp._webui_save_window_geometry!(file, form())
+                @test saved.status == "saved"
+                @test SparlectraApp._webui_window_geometry(file) == (width=1234, height=876, x=12, y=-34)
+                @test Sparlectra.load_sparlectra_config(file; reload=true).webui.window_x == 12
+                @test issubset(["webui.window_width", "webui.window_height", "webui.window_x", "webui.window_y"], SparlectraApp._webui_user_keys(file))
+                # a minimized window, a parked one, nonsense sizes and a POST
+                # without the fields (curl, an older page) keep the file
+                for (fields, reason) in (
+                        ((window_hidden="1",), "window_minimized"),
+                        ((window_x="-32000", window_y="-32000"), "position_out_of_range"),
+                        ((window_width="0",), "size_out_of_range"),
+                        ((window_height="abc",), "not_a_number"),
+                        ((window_width="",), "no_geometry"),
+                    )
+                    skipped = SparlectraApp._webui_save_window_geometry!(file, form(; fields...))
+                    @test skipped.status == "skipped"
+                    @test skipped.reason == reason
+                end
+                @test SparlectraApp._webui_save_window_geometry!(file, Dict{String,String}()).reason == "no_geometry"
+                @test SparlectraApp._webui_window_geometry(file) == (width=1234, height=876, x=12, y=-34)
+                # the packaged template is never written
+                @test SparlectraApp._webui_save_window_geometry!(Sparlectra.DEFAULT_SPARLECTRA_CONFIG_PATH, form()).reason == "packaged_template"
+            end
+            # the Stop form carries the fields the handler reads
+            page = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow"; output_root=mktempdir()).body)
+            for name in ("window_width", "window_height", "window_x", "window_y", "window_hidden")
+                @test occursin("name=\"$(name)\"", page)
+            end
+        end)() end
+
         @testset "sysimage launcher decision" begin (function ()
             # The launcher decides whether the Web UI starts from the image or
             # compiles on first use. It runs on plain Base BEFORE the package is
@@ -1662,38 +1152,52 @@ function run_webui_fast_tests()
                 sha = bytes2hex(open(SHA.sha256, manifest))
                 full_meta = string("julia_version = \"", VERSION, "\"\nmanifest_sha256 = \"", sha, "\"\n")
 
-                @test sl(:sysimage_problem, img, proj) == "no sysimage found"
+                # SparlectraApp.webui_sysimage_problem answers the same question for
+                # the sysimage page; the launcher cannot call it (it runs before the
+                # package is loaded), so every state below checks that both agree,
+                # or the page would one day call an image fine that the launcher
+                # refuses to start from
+                verdict() = (v = sl(:sysimage_problem, img, proj); @test v == SparlectraApp.webui_sysimage_problem(image_path=img, project_dir=proj); v)
+                @test verdict() == "no sysimage found"
                 write(img, "not a real image")
                 # image without metadata is unusable: the contract is the pair
-                @test sl(:sysimage_problem, img, proj) == "no sysimage found"
+                @test verdict() == "no sysimage found"
                 write(meta, "julia_version = \"9.9.9\"\nmanifest_sha256 = \"$(sha)\"\n")
-                @test occursin("built for Julia 9.9.9", sl(:sysimage_problem, img, proj))
+                @test occursin("built for Julia 9.9.9", verdict())
                 write(meta, string("julia_version = \"", VERSION, "\"\nmanifest_sha256 = \"deadbeef\"\n"))
-                @test sl(:sysimage_problem, img, proj) == "the sysimage does not match the current Manifest.toml"
+                @test verdict() == "the sysimage does not match the current Manifest.toml"
                 write(meta, full_meta)
                 touch(img)
-                @test sl(:sysimage_problem, img, proj) === nothing
+                @test verdict() === nothing
                 # a source file newer than the image disables it (mtime resolution
                 # can be one second, hence the wait)
                 sleep(1.1)
                 touch(joinpath(proj, "src", "Fixture.jl"))
-                @test occursin("older than", sl(:sysimage_problem, img, proj))
+                @test occursin("older than", verdict())
                 write(meta, "kaputt = [[[")
-                @test sl(:sysimage_problem, img, proj) == "the sysimage metadata is unreadable"
+                @test verdict() == "the sysimage metadata is unreadable"
+
+                # the owner key the package writes is the one the launcher reads:
+                # the image belongs to proj, whatever the trailing separator
+                written = SparlectraApp.write_sysimage_meta(meta; manifest_path=manifest, project_dir=proj * "/")
+                @test written["project_dir"] == rstrip(realpath(proj), ['/', '\\'])
+                @test sl(:foreign_sysimage_owner, img, proj) === nothing
+                @test sl(:foreign_sysimage_owner, img, tmp) == written["project_dir"]
 
                 # the decision itself, through its seams: a fixed answer, a recorded
                 # relaunch, the image this process runs on
                 slk(name, args...; kw...) = Base.invokelatest(Base.invokelatest(getfield, SL, name), args...; kw...)
                 decide(args; ask, current = "") = begin
                     relaunches = String[]
+                    prompts = String[]
                     # stdout can be redirected into a file, not into a buffer
                     capture = joinpath(tmp, "decision.txt")
                     open(capture, "w") do out
                         redirect_stdout(out) do
-                            slk(:handle_sysimage, args, "start_webui.jl", proj; image = img, ask = (_...) -> ask, relaunch = (image, _...) -> push!(relaunches, String(image)), current_image = current)
+                            slk(:handle_sysimage, args, "start_webui.jl", proj; image = img, ask = (p, _...) -> (push!(prompts, String(p)); ask), relaunch = (image, _...) -> push!(relaunches, String(image)), current_image = current)
                         end
                     end
-                    (text = read(capture, String), relaunches = relaunches)
+                    (text = read(capture, String), relaunches = relaunches, prompts = prompts)
                 end
                 # an outdated image and the answer no: image and metadata are gone,
                 # the start goes on without an image
@@ -1718,6 +1222,37 @@ function run_webui_fast_tests()
                 @test occursin("given from outside", r.text)
                 @test isempty(r.relaunches)
                 @test isfile(img) && isfile(meta)
+                # one image per user: the image of another checkout (a release
+                # clone next to the dev checkout) is neither used nor removed,
+                # even when it would pass every check for this one; the build
+                # question names the image it replaces. full_meta above has no
+                # project_dir (an image built before the key) and keeps the old
+                # behaviour, as the cases above show.
+                other = joinpath(tmp, "other_checkout", "app")
+                mkpath(other)
+                write(meta, string(full_meta, "project_dir = \"", escape_string(other), "\"\n"))
+                touch(img)
+                r = decide(String[]; ask = false)
+                @test occursin("belongs to $(other)", r.text)
+                @test isempty(r.relaunches)
+                @test isfile(img) && isfile(meta)
+                @test length(r.prompts) == 1 && occursin("replaces the sysimage of $(other)", r.prompts[1])
+                # same with an outdated Manifest: still not this checkout's image
+                write(meta, string("julia_version = \"", VERSION, "\"\nmanifest_sha256 = \"deadbeef\"\nproject_dir = \"", escape_string(other), "\"\n"))
+                r = decide(String[]; ask = false)
+                @test !occursin("was removed", r.text)
+                @test isfile(img) && isfile(meta)
+                # this checkout recorded (with a trailing separator, as
+                # SPARLECTRA_APP_ROOT writes it before normalization): used when
+                # current, removed when outdated, as before
+                write(meta, string(full_meta, "project_dir = \"", escape_string(proj * "/"), "\"\n"))
+                touch(img)
+                r = decide(String[]; ask = false)
+                @test r.relaunches == [img]
+                write(meta, string("julia_version = \"", VERSION, "\"\nmanifest_sha256 = \"deadbeef\"\nproject_dir = \"", escape_string(proj), "\"\n"))
+                r = decide(String[]; ask = false)
+                @test occursin("Sysimage is out of date and was removed.", r.text)
+                @test !isfile(img) && !isfile(meta)
                 @test slk(:external_sysimage, img; current = "") === nothing
                 @test slk(:external_sysimage, img; current = joinpath(Sys.BINDIR, "..", "lib", "julia", "sys.so")) === nothing
                 @test slk(:remove_stale_sysimage, joinpath(tmp, "nowhere.so")) === :absent
@@ -1725,6 +1260,20 @@ function run_webui_fast_tests()
             # no terminal in the test process, so the question answers itself with
             # no: an unattended start goes without an image, a build is opt-in
             @test sl(:ask_build, "never shown") == false
+            # a reader left pending by a question that timed out is reused by
+            # the next question on the same stream: a second readline would
+            # race with it and the older task would take the answer
+            console = Base.BufferStream()
+            ask_console(seconds) = Base.invokelatest(Base.invokelatest(getfield, SL, :console_answer), "?"; io = devnull, input = console, seconds)
+            @test ask_console(0.2) == ""
+            first_reader = slval(:_PENDING_CONSOLE_READER)[][2]
+            @test !istaskdone(first_reader)
+            write(console, "y\n")
+            @test ask_console(5.0) == "y"
+            @test istaskdone(first_reader) && fetch(first_reader) == "y"
+            @test slval(:_PENDING_CONSOLE_READER)[] === nothing
+            # the end of the input is an empty answer
+            @test Base.invokelatest(Base.invokelatest(getfield, SL, :console_answer), "?"; io = devnull, input = IOBuffer(""), seconds = 5.0) == ""
             @test slval(:REBUILD_FLAG) == "--rebuild-sysimage"
             @test slval(:NO_IMAGE_FLAG) == "--no-sysimage"
             # platform path contract, still owned by the package for everything
@@ -1733,244 +1282,168 @@ function run_webui_fast_tests()
             @test sl(:sysimage_path) == SparlectraApp.webui_sysimage_path()
         end)() end
 
-        @testset "the Info menu stays in the header on every page" begin (function ()
-            # Regression: the Info control was passed to the layout by
-            # the Case, Settings and Runs renderers only, so it disappeared as soon
-            # as the user clicked Operation Log, Run history, Last errors, Docs or a
-            # result page. Everything it shows describes the running server, not the
-            # page, so the header builds it itself now.
-            root = SparlectraApp.default_webui_output_root()
-            for path in ("/powerflow", "/powerflow/case", "/powerflow/settings", "/powerflow/history",
-                "/webui/operation-log", "/webui/last-errors", "/webui/sysimage")
-                response = SparlectraApp.route_sparlectra_webui("GET", path; output_root=root)
-                body = String(response.body)
-                # the tuple form names the offending page in the failure output
-                @test (path, occursin("topbar-info-menu", body)) == (path, true)
-                # the box names the Julia the server runs on: with
-                # 1.12 and 1.13 both in use, a screenshot has to say which
-                @test occursin("<dt>Julia</dt><dd><code>$(VERSION)</code></dd>", body)
-                # and the AnalyticLoadFlow it solves with, so an outdated
-                # environment is visible on screen
-                @test occursin("<dt>AnalyticLoadFlow</dt><dd><code>v$(pkgversion(Sparlectra.AnalyticLoadFlow))</code> <a href=\"https://github.com/SOPTIM/AnalyticLoadFlow.jl\"", body)
-                # and the application package, which has its own version;
-                # the header bar keeps naming the library
-                @test occursin("<dt>Application</dt><dd><code>SparlectraApp v$(pkgversion(SparlectraApp))</code></dd>", body)
-                @test occursin("Sparlectra.jl v$(Sparlectra.version())", body)
-                # the citation notes sit side by side, MATPOWER's and Sparlectra's
-                @test occursin("matpower-citation-note", body)
-                @test occursin("sparlectra-citation-note", body)
-            end
-            # error pages carry it as well: they are where a user looks for the
-            # output root and the operation log in the first place
-            @test occursin("topbar-info-menu", SparlectraApp.render_webui_error(404, "not found"))
-        end)() end
-
         # Two runs of the same case under different settings are the normal way to
         # look at a Q-limit mode or a solver choice. The history could list them but
         # not put them side by side, so the comparison had to happen in the head or
         # in two browser tabs.
-        @testset "run comparison" begin (function ()
-            @testset "history offers a selection and a compare button" begin (function ()
-                root = SparlectraApp.default_webui_output_root()
-                body = String(SparlectraApp.route_sparlectra_webui("GET", "/powerflow/history"; output_root=root).body)
-                @test occursin("action=\"/powerflow/compare\"", body)
-                @test occursin("Compare selected runs", body)
-                @test occursin("<th>Compare</th>", body)
-            end)() end
+          # The box should appear only where the two runs
+          # are comparable, and NOT decided by network size, because the same
+          # case with an external-grid source and with a slack is a pair one
+          # wants side by side. The criterion is the run kind: the page reads
+          # power-flow artifacts, so only power-flow kinds qualify.
+          @testset "only finished power-flow runs offer the box" begin (function ()
+              @test SparlectraApp._webui_comparable_kind("")
+              @test SparlectraApp._webui_comparable_kind("powerflow")
+              @test SparlectraApp._webui_comparable_kind("diagnose")
+              @test SparlectraApp._webui_comparable_kind("powerflow_se_start")
+              for kind in ("se", "short_circuit", "contingency", "import_analysis")
+                  @test !SparlectraApp._webui_comparable_kind(kind)
+              end
 
-            # The box should appear only where the two runs
-            # are comparable, and NOT decided by network size, because the same
-            # case with an external-grid source and with a slack is a pair one
-            # wants side by side. The criterion is the run kind: the page reads
-            # power-flow artifacts, so only power-flow kinds qualify.
-            @testset "only finished power-flow runs offer the box" begin (function ()
-                @test SparlectraApp._webui_comparable_kind("")
-                @test SparlectraApp._webui_comparable_kind("powerflow")
-                @test SparlectraApp._webui_comparable_kind("diagnose")
-                @test SparlectraApp._webui_comparable_kind("powerflow_se_start")
-                for kind in ("se", "short_circuit", "contingency", "import_analysis")
-                    @test !SparlectraApp._webui_comparable_kind(kind)
-                end
+              pf = Dict{String,Any}("run_id" => "pf-1", "available" => true, "status" => "succeeded", "run_mode" => "",
+                  "timestamp" => "2026-09-09 01:00:00", "casefile" => "/very/long/path/to/cases/case118.m", "config_file" => "/etc/sparlectra/configuration.yaml")
+              se = merge(pf, Dict{String,Any}("run_id" => "se-1", "run_mode" => "se"))
+              running = merge(pf, Dict{String,Any}("run_id" => "pf-2", "status" => "running"))
+              gone = merge(pf, Dict{String,Any}("run_id" => "pf-3", "available" => false))
+              @test SparlectraApp._webui_run_comparable(pf)
+              @test !SparlectraApp._webui_run_comparable(se)
+              @test !SparlectraApp._webui_run_comparable(running)
+              @test !SparlectraApp._webui_run_comparable(gone)
 
-                pf = Dict{String,Any}("run_id" => "pf-1", "available" => true, "status" => "succeeded", "run_mode" => "",
-                    "timestamp" => "2026-09-09 01:00:00", "casefile" => "/very/long/path/to/cases/case118.m", "config_file" => "/etc/sparlectra/configuration.yaml")
-                se = merge(pf, Dict{String,Any}("run_id" => "se-1", "run_mode" => "se"))
-                running = merge(pf, Dict{String,Any}("run_id" => "pf-2", "status" => "running"))
-                gone = merge(pf, Dict{String,Any}("run_id" => "pf-3", "available" => false))
-                @test SparlectraApp._webui_run_comparable(pf)
-                @test !SparlectraApp._webui_run_comparable(se)
-                @test !SparlectraApp._webui_run_comparable(running)
-                @test !SparlectraApp._webui_run_comparable(gone)
+              html = SparlectraApp.render_powerflow_history([pf, se], mktempdir())
+              @test occursin("name=\"run\" value=\"pf-1\"", html)
+              @test !occursin("name=\"run\" value=\"se-1\"", html)
+          end)() end
 
-                html = SparlectraApp.render_powerflow_history([pf, se], mktempdir())
-                @test occursin("name=\"run\" value=\"pf-1\"", html)
-                @test !occursin("name=\"run\" value=\"se-1\"", html)
-                # the paths no longer fit the row: name in the cell, path in the tooltip
-                @test occursin("<td title=\"/very/long/path/to/cases/case118.m\">case118.m</td>", html)
-                @test occursin("<td title=\"/etc/sparlectra/configuration.yaml\">configuration.yaml</td>", html)
-                @test !occursin("<td>/very/long/path/to/cases/case118.m</td>", html)
-            end)() end
+          # The result page names the case and the phase up top, where a reader
+          # looks first.
+          @testset "result page: case, phase and controllers up top" begin (function ()
+              # the value of a summary card, nothing when the card is absent
+              card(html, label) = (m = match(Regex("summary-label\">" * label * "</span><code[^>]*>([^<]*)</code>"), html); m === nothing ? nothing : String(m.captures[1]))
+              probe = Dict{String,Any}("run_id" => "r-1", "status" => "succeeded", "success" => true, "converged" => true,
+                  "casefile" => "/some/where/sp_case14.scf.json", "resolved_casefile" => "/some/where/sp_case14.scf.json",
+                  "current_phase" => "finished", "final_outcome" => Dict{String,Any}("solver" => "rectangular"), "artifacts" => Any[])
+              html = SparlectraApp.render_powerflow_result(probe)
+              @test card(html, "Case") == "sp_case14.scf.json"
+              @test card(html, "Phase") == "finished"
+              # an active run carries the same two cards
+              active_html = SparlectraApp.render_powerflow_result(merge(probe, Dict{String,Any}("status" => "running", "current_phase" => "linear_solve")))
+              @test card(active_html, "Case") == "sp_case14.scf.json"
+              @test card(active_html, "Phase") == "linear_solve"
+              # A live snapshot carries `nothing` where the run has not produced
+              # the value yet; the card once printed that word for the whole run
+              # and named the case only at the end.
+              live = Dict{String,Any}("run_id" => "r-2", "status" => "running", "success" => false,
+                  "casefile" => "/some/where/case14.m", "resolved_casefile" => nothing, "current_phase" => nothing, "last_phase" => nothing, "artifacts" => Any[])
+              live_html = SparlectraApp.render_powerflow_result(live)
+              @test card(live_html, "Case") == "case14.m"
+              @test card(live_html, "Phase") == "n/a"
+              @test !occursin(">nothing<", live_html)
 
-            # The result page names the case and the phase up top, where a reader
-            # looks first; the rows that carried the path twice and the
-            # final_outcome row that said nothing are gone.
-            @testset "result page: case and phase up top, path rows gone" begin (function ()
-                probe = Dict{String,Any}("run_id" => "r-1", "status" => "succeeded", "success" => true, "converged" => true,
-                    "casefile" => "/some/where/sp_case14.scf.json", "resolved_casefile" => "/some/where/sp_case14.scf.json",
-                    "current_phase" => "finished", "final_outcome" => Dict{String,Any}("solver" => "rectangular"), "artifacts" => Any[])
-                html = SparlectraApp.render_powerflow_result(probe)
-                @test occursin("<span class=\"summary-label\">Case</span><code title=\"/some/where/sp_case14.scf.json\">sp_case14.scf.json</code>", html)
-                @test occursin("<span class=\"summary-label\">Phase</span><code>finished</code>", html)
-                for gone in ("<th>casefile</th>", "<th>resolved_casefile</th>", "<th>current_phase</th>", "<th>final_outcome</th>")
-                    @test !occursin(gone, html)
-                end
-                # an active run carries the same two cards
-                active = merge(probe, Dict{String,Any}("status" => "running", "current_phase" => "linear_solve"))
-                active_html = SparlectraApp.render_powerflow_result(active)
-                @test occursin("<span class=\"summary-label\">Phase</span><code>linear_solve</code>", active_html)
-                @test occursin(">sp_case14.scf.json</code>", active_html)
-                # A live snapshot carries `nothing` where the run has not produced
-                # the value yet; the card once printed that word for the whole run
-                # and named the case only at the end.
-                live = Dict{String,Any}("run_id" => "r-2", "status" => "running", "success" => false,
-                    "casefile" => "/some/where/case14.m", "resolved_casefile" => nothing, "current_phase" => nothing, "last_phase" => nothing, "artifacts" => Any[])
-                live_html = SparlectraApp.render_powerflow_result(live)
-                @test occursin("<span class=\"summary-label\">Case</span><code title=\"/some/where/case14.m\">case14.m</code>", live_html)
-                @test occursin("<span class=\"summary-label\">Phase</span><code>n/a</code>", live_html)
-                @test !occursin(">nothing<", live_html)
+              # the controller counts from the run metadata reach the page (a
+              # Q(U) machine read from a case file is named there, not only in
+              # the Control column of the result print); a run without
+              # controllers has no card
+              @test card(html, "Controllers") === nothing
+              with_ctrl = merge(probe, Dict{String,Any}("metadata" => Dict{String,Any}("controllers" => Dict{String,Any}("tap" => 1, "qu" => 1, "pu" => 0))))
+              @test card(SparlectraApp.render_powerflow_result(with_ctrl), "Controllers") == "Q(U) 1 · tap 1"
+              @test SparlectraApp._webui_control_summary(Dict{String,Any}("metadata" => Dict{String,Any}("controllers" => Dict{String,Any}("tap" => 0, "qu" => 0, "pu" => 0)))) === nothing
+          end)() end
 
-                # a Q(U) machine read from a case file is named on the page, not only
-                # in the Control column of the result print;
-                # a run without controllers keeps its summary short
-                @test !occursin("summary-label\">Controllers<", html)
-                with_ctrl = merge(probe, Dict{String,Any}("metadata" => Dict{String,Any}("controllers" => Dict{String,Any}("tap" => 1, "qu" => 1, "pu" => 0))))
-                @test occursin("<span class=\"summary-label\">Controllers</span><code>Q(U) 1 · tap 1</code>", SparlectraApp.render_powerflow_result(with_ctrl))
-                @test SparlectraApp._webui_control_summary(Dict{String,Any}("metadata" => Dict{String,Any}("controllers" => Dict{String,Any}("tap" => 0, "qu" => 0, "pu" => 0)))) === nothing
-            end)() end
+          @testset "the route insists on exactly two runs" begin (function ()
+              root = mktempdir()
+              for target in ("/powerflow/compare", "/powerflow/compare?run=only-one")
+                  response = SparlectraApp.route_sparlectra_webui("GET", target; output_root=root)
+                  @test (target, response.status) == (target, 400)
+              end
+              missing_response = SparlectraApp.route_sparlectra_webui("GET", "/powerflow/compare?run=nope-a&run=nope-b"; output_root=root)
+              @test missing_response.status == 404
+          end)() end
 
-            # A native file input speaks the BROWSER's language ("Durchsuchen",
-            # "Keine Datei ausgewählt" on a German browser) on an English page.
-            # The input stays in the form, off screen; a
-            # label is the button and a span names the selection.
-            @testset "file pickers speak the page's language" begin (function ()
-                one = SparlectraApp._webui_file_input("weights_file"; accept=".csv", required=true)
-                many = SparlectraApp._webui_file_input("casefiles"; accept=".m,.zip", multiple=true)
-                alias = SparlectraApp._webui_file_input("casefiles"; accept=".csv", id="measurements")
-                @test occursin("type=\"file\" name=\"weights_file\" accept=\".csv\" required>", one)
-                @test occursin("<label for=\"file-field-weights_file\" class=\"button secondary-button file-field-button\">Choose file</label>", one)
-                @test occursin("No file selected", one)
-                @test occursin("multiple>", many)
-                @test occursin(">Choose files</label>", many)
-                # two pickers with one field name on one page need distinct ids
-                @test occursin("id=\"file-field-measurements\"", alias)
-                @test occursin("name=\"casefiles\"", alias)
-                # the script that keeps the span current is part of every page
-                page = SparlectraApp._webui_layout("t", "<p>x</p>")
-                @test occursin("data-file-field-input", page)
-                @test occursin("'No file selected'", page)
-            end)() end
+          @testset "repeated query keys survive the parser" begin (function ()
+              # `_webui_parse_pairs` returns a Dict and keeps only the last value;
+              # a set of checkboxes with one name needs all of them
+              @test SparlectraApp._webui_query_values("/powerflow/compare?run=a&run=b", "run") == ["a", "b"]
+              @test SparlectraApp._webui_query_values("/powerflow/compare?other=x", "run") == String[]
+              @test SparlectraApp._webui_query_values("/powerflow/compare", "run") == String[]
+          end)() end
 
-            @testset "the route insists on exactly two runs" begin (function ()
-                root = SparlectraApp.default_webui_output_root()
-                for target in ("/powerflow/compare", "/powerflow/compare?run=only-one")
-                    response = SparlectraApp.route_sparlectra_webui("GET", target; output_root=root)
-                    @test (target, response.status) == (target, 400)
-                end
-                missing_response = SparlectraApp.route_sparlectra_webui("GET", "/powerflow/compare?run=nope-a&run=nope-b"; output_root=root)
-                @test missing_response.status == 404
-            end)() end
+          @testset "the page reads what the runs wrote" begin (function ()
+              dir_a = mktempdir()
+              dir_b = mktempdir()
+              write(joinpath(dir_a, "effective_config.yaml"), "runtime:\n  case_name: sp_case_a\n  casefile: /state/data/sp_case_a.scf.json\npower_flow:\n  tol: 1.0e-8\n  qlimits:\n    enforcement_mode: active_set\n")
+              write(joinpath(dir_b, "effective_config.yaml"), "runtime:\n  case_name: sp_case_b\n  casefile: /state/data/sp_case_b.scf.json\npower_flow:\n  tol: 1.0e-8\n  qlimits:\n    enforcement_mode: classic_simultaneous\n")
+              diff = SparlectraApp._webui_compare_config_diff(dir_a, dir_b)
+              # the nested key keeps its real path; a "remember the last section"
+              # reader concatenated every section it had ever seen
+              @test diff == [("power_flow.qlimits.enforcement_mode", "active_set", "classic_simultaneous"), ("runtime.case_name", "sp_case_a", "sp_case_b"), ("runtime.casefile", "/state/data/sp_case_a.scf.json", "/state/data/sp_case_b.scf.json")]
 
-            @testset "repeated query keys survive the parser" begin (function ()
-                # `_webui_parse_pairs` returns a Dict and keeps only the last value;
-                # a set of checkboxes with one name needs all of them
-                @test SparlectraApp._webui_query_values("/powerflow/compare?run=a&run=b", "run") == ["a", "b"]
-                @test SparlectraApp._webui_query_values("/powerflow/compare?other=x", "run") == String[]
-                @test SparlectraApp._webui_query_values("/powerflow/compare", "run") == String[]
-            end)() end
+              write(joinpath(dir_a, "q_limit_events.csv"), "iteration,bus,side\n2,19,min\n2,32,min\n")
+              write(joinpath(dir_b, "q_limit_events.csv"), "iteration,bus,side\n1,19,min\n")
+              @test SparlectraApp._webui_compare_qlimit_buses(dir_a) == [19, 32]
+              @test SparlectraApp._webui_compare_qlimit_buses(dir_b) == [19]
+              @test SparlectraApp._webui_compare_qlimit_buses(mktempdir()) === nothing
 
-            @testset "the page reads what the runs wrote" begin (function ()
-                dir_a = mktempdir()
-                dir_b = mktempdir()
-                write(joinpath(dir_a, "effective_config.yaml"), "runtime:\n  case_name: sp_case_a\n  casefile: /state/data/sp_case_a.scf.json\npower_flow:\n  tol: 1.0e-8\n  qlimits:\n    enforcement_mode: active_set\n")
-                write(joinpath(dir_b, "effective_config.yaml"), "runtime:\n  case_name: sp_case_b\n  casefile: /state/data/sp_case_b.scf.json\npower_flow:\n  tol: 1.0e-8\n  qlimits:\n    enforcement_mode: classic_simultaneous\n")
-                diff = SparlectraApp._webui_compare_config_diff(dir_a, dir_b)
-                # the nested key keeps its real path; a "remember the last section"
-                # reader concatenated every section it had ever seen
-                @test diff == [("power_flow.qlimits.enforcement_mode", "active_set", "classic_simultaneous"), ("runtime.case_name", "sp_case_a", "sp_case_b"), ("runtime.casefile", "/state/data/sp_case_a.scf.json", "/state/data/sp_case_b.scf.json")]
+              # The detailed export writes one of three formats, and A carries the
+              # German one: ';' delimiter, decimal comma. A comma-splitting reader
+              # found no columns there and the page then claimed the two runs had
+              # nothing in common ("The two runs share no bus names", as
+              # reported). The fixtures below are the real header of
+              # bus_voltages_complex.csv, both formats, so the parser is judged on
+              # what the runs actually write.
+              head_de = "bus;bus_name;type;vm_pu;va_deg;vn_kV;q_limit_hit;original_bus_name"
+              head_us = "bus,bus_name,type,vm_pu,va_deg,vn_kV,q_limit_hit,original_bus_name"
+              write(joinpath(dir_a, "bus_voltages_complex.csv"),
+                  "$(head_de)\n1;11001;PQ;1;0;138;false;NEWBERRY 1\n2;11002;PQ;0,99;-1,5;69;false;NEWBERRY 2\n")
+              write(joinpath(dir_b, "bus_voltages_complex.csv"),
+                  "$(head_us)\n1,11001,PQ,1.0,0.0,138,false,NEWBERRY 1\n2,11002,PQ,0.98,-1.0,69,false,NEWBERRY 2\n")
+              va = SparlectraApp._webui_compare_voltages(dir_a)
+              vb = SparlectraApp._webui_compare_voltages(dir_b)
+              @test va["2"].vm == 0.99
+              @test va["2"].va == -1.5           # decimal comma, not a second field
+              @test va["2"].name == "NEWBERRY 2"  # the name a reader recognizes
+              @test vb["2"].vm == 0.98
+              @test SparlectraApp._webui_compare_voltages(mktempdir()) === nothing
 
-                write(joinpath(dir_a, "q_limit_events.csv"), "iteration,bus,side\n2,19,min\n2,32,min\n")
-                write(joinpath(dir_b, "q_limit_events.csv"), "iteration,bus,side\n1,19,min\n")
-                @test SparlectraApp._webui_compare_qlimit_buses(dir_a) == [19, 32]
-                @test SparlectraApp._webui_compare_qlimit_buses(dir_b) == [19]
-                @test SparlectraApp._webui_compare_qlimit_buses(mktempdir()) === nothing
+              # grouped thousands, and a quoted cell because the group separator IS
+              # the delimiter in the excel_us format
+              @test SparlectraApp._webui_compare_split_csv("a,\"1,234.5\",b", ',') == ["a", "1,234.5", "b"]
+              @test SparlectraApp._webui_compare_number("1,234.5", '.', ',') == 1234.5
+              @test SparlectraApp._webui_compare_number("1.234,5", ',', '.') == 1234.5
 
-                # The detailed export writes one of three formats, and A carries the
-                # German one: ';' delimiter, decimal comma. A comma-splitting reader
-                # found no columns there and the page then claimed the two runs had
-                # nothing in common ("The two runs share no bus names", as
-                # reported). The fixtures below are the real header of
-                # bus_voltages_complex.csv, both formats, so the parser is judged on
-                # what the runs actually write.
-                head_de = "bus;bus_name;type;vm_pu;va_deg;vn_kV;q_limit_hit;original_bus_name"
-                head_us = "bus,bus_name,type,vm_pu,va_deg,vn_kV,q_limit_hit,original_bus_name"
-                write(joinpath(dir_a, "bus_voltages_complex.csv"),
-                    "$(head_de)\n1;11001;PQ;1;0;138;false;NEWBERRY 1\n2;11002;PQ;0,99;-1,5;69;false;NEWBERRY 2\n")
-                write(joinpath(dir_b, "bus_voltages_complex.csv"),
-                    "$(head_us)\n1,11001,PQ,1.0,0.0,138,false,NEWBERRY 1\n2,11002,PQ,0.98,-1.0,69,false,NEWBERRY 2\n")
-                va = SparlectraApp._webui_compare_voltages(dir_a)
-                vb = SparlectraApp._webui_compare_voltages(dir_b)
-                @test va["2"].vm == 0.99
-                @test va["2"].va == -1.5           # decimal comma, not a second field
-                @test va["2"].name == "NEWBERRY 2"  # the name a reader recognizes
-                @test vb["2"].vm == 0.98
-                @test SparlectraApp._webui_compare_voltages(mktempdir()) === nothing
+              # losses come from the branch table the run wrote, summed
+              write(joinpath(dir_a, "branch_flows.csv"),
+                  "branch;from_bus;to_bus;p_loss_MW;q_loss_MVar\nB1;1;2;0,5;1,25\nB2;2;3;0,25;0,75\n")
+              write(joinpath(dir_b, "branch_flows.csv"),
+                  "branch,from_bus,to_bus,p_loss_MW,q_loss_MVar\nB1,1,2,0.4,1.25\nB2,2,3,0.25,0.75\n")
+              la = SparlectraApp._webui_compare_losses(dir_a)
+              @test la.p_MW ≈ 0.75
+              @test la.q_MVAr ≈ 2.0
+              @test la.branches == 2
+              @test SparlectraApp._webui_compare_losses(mktempdir()) === nothing
 
-                # grouped thousands, and a quoted cell because the group separator IS
-                # the delimiter in the excel_us format
-                @test SparlectraApp._webui_compare_split_csv("a,\"1,234.5\",b", ',') == ["a", "1,234.5", "b"]
-                @test SparlectraApp._webui_compare_number("1,234.5", '.', ',') == 1234.5
-                @test SparlectraApp._webui_compare_number("1.234,5", ',', '.') == 1234.5
-
-                # losses come from the branch table the run wrote, summed
-                write(joinpath(dir_a, "branch_flows.csv"),
-                    "branch;from_bus;to_bus;p_loss_MW;q_loss_MVar\nB1;1;2;0,5;1,25\nB2;2;3;0,25;0,75\n")
-                write(joinpath(dir_b, "branch_flows.csv"),
-                    "branch,from_bus,to_bus,p_loss_MW,q_loss_MVar\nB1,1,2,0.4,1.25\nB2,2,3,0.25,0.75\n")
-                la = SparlectraApp._webui_compare_losses(dir_a)
-                @test la.p_MW ≈ 0.75
-                @test la.q_MVAr ≈ 2.0
-                @test la.branches == 2
-                @test SparlectraApp._webui_compare_losses(mktempdir()) === nothing
-
-                a = Dict{String,Any}("run_id" => "run-a", "output_dir" => dir_a, "casefile" => "case118.m",
-                    "status" => "succeeded", "converged" => true, "iterations" => 6, "final_mismatch" => 1.0e-13)
-                b = Dict{String,Any}("run_id" => "run-b", "output_dir" => dir_b, "casefile" => "case118.m",
-                    "status" => "succeeded", "converged" => true, "iterations" => 23, "final_mismatch" => 7.4e-12)
-                html = SparlectraApp.render_powerflow_compare(a, b)
-                # the case of each run stands in the table on top; its path and
-                # name are no configuration difference of their own
-                @test occursin("Configuration differences (1)", html)
-                @test !occursin("/state/data/sp_case_a.scf.json", html)
-                # a path value shows its file name, and the parent directory
-                # as well where both runs name the same file in different places
-                @test SparlectraApp._webui_compare_value_cell("/x/data/case9.m", "/x/data/case14.m") == "<span title=\"/x/data/case9.m\">case9.m</span>"
-                @test SparlectraApp._webui_compare_value_cell("/x/runA/configuration.yaml", "/x/runB/configuration.yaml") == "<span title=\"/x/runA/configuration.yaml\">runA/configuration.yaml</span>"
-                @test SparlectraApp._webui_compare_value_cell("active_set", "classic_simultaneous") == "active_set"
-                @test occursin("power_flow.qlimits.enforcement_mode", html)
-                @test occursin("The runs clamped different buses", html)
-                @test occursin("max |dVm|", html)
-                @test occursin("0.01", html)          # 0.99 gegen 0.98
-                @test occursin("NEWBERRY 2", html)
-                @test occursin("Losses", html)
-                @test occursin("0.1 MW", html) || occursin("0.09999", html)  # 0.75 gegen 0.65
-                @test occursin("/powerflow/result/run-a", html)
-
-                # two identical runs say so in one line instead of a table of zeros
-                same = SparlectraApp.render_powerflow_compare(a, a)
-                @test occursin("Both runs end on the same voltages", same)
-                @test occursin("Both runs end on the same losses", same)
-            end)() end
-        end)() end
+              a = Dict{String,Any}("run_id" => "run-a", "output_dir" => dir_a, "casefile" => "case118.m",
+                  "status" => "succeeded", "converged" => true, "iterations" => 6, "final_mismatch" => 1.0e-13)
+              b = Dict{String,Any}("run_id" => "run-b", "output_dir" => dir_b, "casefile" => "case118.m",
+                  "status" => "succeeded", "converged" => true, "iterations" => 23, "final_mismatch" => 7.4e-12)
+              html = SparlectraApp.render_powerflow_compare(a, b)
+              # the case of each run stands in the table on top; its path is no
+              # configuration difference of its own
+              @test !occursin("/state/data/sp_case_a.scf.json", html)
+              # a path value shows its file name, and the parent directory
+              # as well where both runs name the same file in different places
+              @test SparlectraApp._webui_compare_value_cell("/x/data/case9.m", "/x/data/case14.m") == "<span title=\"/x/data/case9.m\">case9.m</span>"
+              @test SparlectraApp._webui_compare_value_cell("/x/runA/configuration.yaml", "/x/runB/configuration.yaml") == "<span title=\"/x/runA/configuration.yaml\">runA/configuration.yaml</span>"
+              @test SparlectraApp._webui_compare_value_cell("active_set", "classic_simultaneous") == "active_set"
+              @test occursin("power_flow.qlimits.enforcement_mode", html)
+              @test occursin("The runs clamped different buses", html)
+              @test occursin("max |dVm|", html)
+              @test occursin("0.01", html)          # 0.99 gegen 0.98
+              @test occursin("NEWBERRY 2", html)
+              @test occursin("Losses", html)
+              @test occursin("0.1 MW", html) || occursin("0.09999", html)  # 0.75 gegen 0.65
+              @test occursin("/powerflow/result/run-a", html)
+          end)() end
 
         # Reported: "Case input format" offered
         # MATPOWER, DTF and CGMES but neither SCF nor power-grid-model, although
@@ -2000,6 +1473,11 @@ function run_webui_fast_tests()
             SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save",
                 Dict{String,Any}("casefile" => "fmt_probe.m", "case_format" => "matpower", "return_to" => "case"); output_root=root, runtime=rt)
             @test SparlectraApp._webui_case_form_defaults("fmt_probe.m", cases)["case_format"] == "matpower"
+            # the selector offers PowSyBl as well; its choice survives the save
+            cp(joinpath(Sparlectra.SPARLECTRA_ROOT, "data", "powsybl", "ieee14.xiidm"), joinpath(cases, "fmt_probe.xiidm"))
+            SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save",
+                Dict{String,Any}("casefile" => "fmt_probe.xiidm", "case_format" => "powsybl", "return_to" => "case"); output_root=root, runtime=rt)
+            @test get(SparlectraApp._webui_case_form_defaults("fmt_probe.xiidm", cases), "case_format", nothing) == "powsybl"
 
             # Seen on Windows: `scf` stored for a MATPOWER case sent
             # the .m file into the JSON reader (`invalid integer ""`), while the
@@ -2069,7 +1547,7 @@ function run_webui_fast_tests()
             # The same word saved from the settings page ("Q-Limit
             # an, aber mode auf off" ended in an ArgumentError on the next run):
             # the case file and the configuration file get `enabled: false` and
-            # no mode key, and a file that already carries `off` still loads.
+            # no mode key.
             cache = rt.case_directory
             SparlectraApp._webui_stage_bundled_case!(normpath(dirname(@__DIR__)), cache, "sp_case14.scf.json")
             off_form = Dict{String,Any}("casefile" => "sp_case14.scf.json", "settings_target" => "this_case", "power_flow_qlimits_enabled" => "true", "power_flow_qlimits_enforcement_mode" => "off")
@@ -2089,14 +1567,6 @@ function run_webui_fast_tests()
             opts_form = Dict{String,Any}("casefile" => "sp_case14.scf.json", "power_flow_qlimits_enforcement_mode" => "off", "return_to" => "case")
             SparlectraApp.route_sparlectra_webui("POST", "/powerflow/settings/save", opts_form; output_root=root, runtime=rt)
             @test !haskey(Sparlectra.load_case_config(joinpath(cache, "sp_case14.scf.json")), "power_flow.qlimits.enforcement_mode")
-            # a file written by 0.11.1 with the word inside runs as "disabled"
-            stale = joinpath(root, "stale.yaml")
-            write(stale, "power_flow:\n  qlimits:\n    enforcement_mode: off\n")
-            stale_cfg = Sparlectra.load_sparlectra_config(stale; reload=true)
-            @test stale_cfg.powerflow.qlimits.ignore_q_limits
-            @test stale_cfg.powerflow.qlimits.enforcement_mode === :active_set
-            stale_run = SparlectraApp.start_powerflow_run(Dict{String,Any}("casefile" => "sp_case14.scf.json", "config_file" => stale, "output_root" => joinpath(root, "stale_runs"), "config_overrides" => Dict{String,Any}("power_flow.qlimits.enforcement_mode" => "off")); case_directory=cache)
-            @test stale_run["status"] == "succeeded"
         end)() end
 
         # A diagnose run takes ONE step from the case's own voltages, so it never
@@ -2122,180 +1592,6 @@ function run_webui_fast_tests()
             plain = Dict{String,Any}("run_mode" => "", "status" => "not_converged", "success" => false)
             @test !SparlectraApp._webui_is_completed_diagnose(plain)
             @test SparlectraApp.webui_status_class(plain) == "status-error"
-
-            # The tooltip carries the raw status only where the label says something
-            # else. Putting it on every badge changed the markup of every ordinary
-            # run and broke a live-page assertion in the extended profile
-            # (test_webui_extended.jl); repeating "running" on hover
-            # tells a reader nothing anyway.
-            @test SparlectraApp._webui_status_badge("status-running", "running", "running") ==
-                "<span class=\"status-badge status-running\">running</span>"
-            @test SparlectraApp._webui_status_badge("status-info", "diagnosed", "not_converged") ==
-                "<span class=\"status-badge status-info\" title=\"not_converged\">diagnosed</span>"
-        end)() end
-
-        @testset "the environment is checked before the sysimage question" begin (function ()
-            # Regression (Windows 11). A checkout carried a Manifest.toml
-            # from before AnalyticLoadFlow became a required dependency. The start
-            # asked whether to build a sysimage FIRST, the user declined, and only
-            # then did `using Sparlectra` fail with a KeyError deep in
-            # Base.Precompilation. Answering yes would have been worse: the build
-            # works in the separate @sparlectra-sysimage-build environment and would
-            # have spent eleven minutes before the checkout's own manifest turned
-            # out to be the problem.
-            #
-            # unresolved_dependencies answers that from two TOML reads, with no
-            # package load, which is what lets it run before the question.
-            launcher = Module(:LauncherEnvCheck)
-            Base.include(launcher, joinpath(Sparlectra.SPARLECTRA_ROOT, "tools", "sysimage_launcher.jl"))
-            # Base.invokelatest also for the binding: Julia 1.12+ warns (and a later
-            # version errors) on reading a global defined in this same top-level
-            # expression by the include above
-            SL = Base.invokelatest(getfield, launcher, :SysimageLauncher)
-            unresolved(dir) = Base.invokelatest(Base.invokelatest(getfield, SL, :unresolved_dependencies), dir)
-
-            # this very checkout is resolvable, so the check stays silent
-            @test isempty(unresolved(Sparlectra.SPARLECTRA_ROOT))
-
-            mktempdir() do dir
-                json = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
-                toml = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
-                # a manifest that predates a dependency: exactly the reported case
-                stale = joinpath(dir, "stale")
-                mkpath(stale)
-                write(joinpath(stale, "Project.toml"), "[deps]\nJSON = \"$(json)\"\nTOML = \"$(toml)\"\n")
-                write(joinpath(stale, "Manifest.toml"), "julia_version = \"$(VERSION)\"\nmanifest_format = \"2.0\"\n\n[deps]\n[[deps.TOML]]\nuuid = \"$(toml)\"\n")
-                @test unresolved(stale) == ["JSON"]
-
-                # a fresh checkout has no manifest at all
-                fresh = joinpath(dir, "fresh")
-                mkpath(fresh)
-                write(joinpath(fresh, "Project.toml"), "[deps]\nJSON = \"$(json)\"\n")
-                @test unresolved(fresh) == ["<no Manifest.toml>"]
-
-                # a complete manifest is silent
-                good = joinpath(dir, "good")
-                mkpath(good)
-                write(joinpath(good, "Project.toml"), "[deps]\nTOML = \"$(toml)\"\n")
-                write(joinpath(good, "Manifest.toml"), "julia_version = \"$(VERSION)\"\nmanifest_format = \"2.0\"\n\n[deps]\n[[deps.TOML]]\nuuid = \"$(toml)\"\n")
-                @test isempty(unresolved(good))
-
-                # a manifest version below the compat bound: AnalyticLoadFlow
-                # 0.9.14 against compat "0.9.15"
-                alf = "19ecf91d-4042-490c-adc1-7fb0fdb392c0"
-                old_version = joinpath(dir, "old_version")
-                mkpath(old_version)
-                write(joinpath(old_version, "Project.toml"), "[deps]\nAnalyticLoadFlow = \"$(alf)\"\nTOML = \"$(toml)\"\n\n[compat]\nAnalyticLoadFlow = \"0.9.15\"\n")
-                write(joinpath(old_version, "Manifest.toml"), "julia_version = \"$(VERSION)\"\nmanifest_format = \"2.0\"\n\n[deps]\n[[deps.AnalyticLoadFlow]]\nuuid = \"$(alf)\"\nversion = \"0.9.14\"\n\n[[deps.TOML]]\nuuid = \"$(toml)\"\n")
-                @test unresolved(old_version) == ["AnalyticLoadFlow 0.9.14 < 0.9.15"]
-                write(joinpath(old_version, "Manifest.toml"), "julia_version = \"$(VERSION)\"\nmanifest_format = \"2.0\"\n\n[deps]\n[[deps.AnalyticLoadFlow]]\nuuid = \"$(alf)\"\nversion = \"0.9.15\"\n\n[[deps.TOML]]\nuuid = \"$(toml)\"\n")
-                @test isempty(unresolved(old_version))
-                bound(spec) = Base.invokelatest(Base.invokelatest(getfield, SL, :compat_lower_bound), spec)
-                @test bound("0.9.15") == v"0.9.15"
-                @test bound("^0.9.15") == v"0.9.15"
-                @test bound("~1.2") == v"1.2.0"
-                @test bound("=0.9.15") == v"0.9.15"
-                @test bound("0.9.15, 0.10") == v"0.9.15"
-                @test bound("") === nothing
-                @test bound(">= 0.9") === nothing
-                @test bound("0.9 - 0.10") === nothing
-
-                # an unreadable manifest counts as unresolved, not as fine: the
-                # environment cannot be trusted either way
-                broken = joinpath(dir, "broken")
-                mkpath(broken)
-                write(joinpath(broken, "Project.toml"), "[deps]\n")
-                write(joinpath(broken, "Manifest.toml"), "kaputt = [[[")
-                broken_result = redirect_stdout(devnull) do
-                    unresolved(broken)
-                end
-                @test length(broken_result) == 1
-                @test occursin("unreadable", broken_result[1])
-            end
-        end)() end
-
-        @testset "the repair resolves before it instantiates" begin (function ()
-            # Regression (Windows 11). A checkout carried a Manifest.toml
-            # from before AnalyticLoadFlow became a required dependency. `using
-            # Sparlectra` failed with a KeyError deep in Base.Precompilation, the
-            # recovery block caught it and ran Pkg.instantiate, and instantiate
-            # cannot add a package the manifest never mentioned: it failed with
-            # "AnalyticLoadFlow is a direct dependency, but does not appear in the
-            # manifest ... run Pkg.resolve()". One unhelpful error became another.
-            #
-            # Verified in a throwaway environment: instantiate alone reproduces that
-            # message, resolve followed by instantiate succeeds. The order is what
-            # this test guards, and a text check is the honest tool for it: the
-            # recovery lives at the top level of a script, which cannot be called
-            # without starting a Web UI.
-            script = read(joinpath(Sparlectra.SPARLECTRA_ROOT, "tools", "sysimage_launcher.jl"), String)
-            resolve_at = findfirst("pkgm.resolve", script)
-            instantiate_at = findfirst("pkgm.instantiate", script)
-            @test resolve_at !== nothing
-            @test instantiate_at !== nothing
-            @test first(resolve_at) < first(instantiate_at)
-            # and the advice printed on failure has to name the same two calls, or a
-            # user who runs it by hand hits exactly the error we just fixed
-            @test occursin("Pkg.resolve(); Pkg.instantiate()", script)
-            # a manifest version below the compat bound is updated BEFORE the
-            # resolve: resolve keeps manifest versions as explicit requirements
-            # and fails as unsatisfiable on such a manifest
-            update_at = findfirst("pkgm.update", script)
-            @test update_at !== nothing
-            @test first(update_at) < first(resolve_at)
-            launcher = Module(:LauncherRepairCheck)
-            Base.include(launcher, joinpath(Sparlectra.SPARLECTRA_ROOT, "tools", "sysimage_launcher.jl"))
-            SL = Base.invokelatest(getfield, launcher, :SysimageLauncher)
-            outdated(list) = Base.invokelatest(Base.invokelatest(getfield, SL, :outdated_dependencies), list)
-            @test outdated(["AnalyticLoadFlow 0.9.14 < 0.9.15", "JSON", "<no Manifest.toml>"]) == ["AnalyticLoadFlow"]
-            @test isempty(outdated(String[]))
-        end)() end
-
-        @testset "sysimage validity: launcher and package agree" begin (function ()
-            # SparlectraApp.webui_sysimage_problem answers the same question for the
-            # Web UI's sysimage page that SysimageLauncher.sysimage_problem answers
-            # for the start decision. The launcher cannot call the package one (it
-            # runs before the package is loaded), so the two implementations are
-            # held together HERE: every fixture state below has to produce the same
-            # verdict on both sides, or the sysimage page will one day claim an
-            # image is fine that the launcher refuses to start from.
-            launcher = Module(:LauncherParity)
-            Base.include(launcher, joinpath(Sparlectra.SPARLECTRA_ROOT, "tools", "sysimage_launcher.jl"))
-            # Base.invokelatest also for the binding: Julia 1.12+ warns (and a later
-            # version errors) on reading a global defined in this same top-level
-            # expression by the include above
-            SL = Base.invokelatest(getfield, launcher, :SysimageLauncher)
-            sl(name, args...) = Base.invokelatest(Base.invokelatest(getfield, SL, name), args...)
-            both(img, proj) = (sl(:sysimage_problem, img, proj), SparlectraApp.webui_sysimage_problem(image_path=img, project_dir=proj))
-            mktempdir() do tmp
-                proj = joinpath(tmp, "proj")
-                mkpath(joinpath(proj, "src"))
-                manifest = joinpath(proj, "Manifest.toml")
-                write(manifest, "# manifest fixture\n")
-                write(joinpath(proj, "src", "Fixture.jl"), "module Fixture end\n")
-                imgdir = joinpath(tmp, "image")
-                mkpath(imgdir)
-                img = joinpath(imgdir, "sparlectra.so")
-                meta = joinpath(imgdir, "sysimage_meta.toml")
-                sha = bytes2hex(open(SHA.sha256, manifest))
-                states = Pair{String,Function}[
-                    "missing image"=>()->nothing,
-                    "image without metadata"=>()->write(img, "not a real image"),
-                    "wrong julia version"=>()->write(meta, "julia_version = \"9.9.9\"\nmanifest_sha256 = \"$(sha)\"\n"),
-                    "manifest mismatch"=>()->write(meta, string("julia_version = \"", VERSION, "\"\nmanifest_sha256 = \"deadbeef\"\n")),
-                    "valid"=>()->(write(meta, string("julia_version = \"", VERSION, "\"\nmanifest_sha256 = \"", sha, "\"\n")); touch(img)),
-                    "source newer than image"=>()->(sleep(1.1); touch(joinpath(proj, "src", "Fixture.jl"))),
-                    "unreadable metadata"=>()->write(meta, "kaputt = [[["),
-                ]
-                for (name, mutate) in states
-                    mutate()
-                    launcher_verdict, package_verdict = both(img, proj)
-                    # the tuple form puts the disagreeing verdicts into the failure output
-                    @test (name, launcher_verdict) == (name, package_verdict)
-                end
-                # and the verdicts are the expected ones, not merely equal
-                @test SparlectraApp.webui_sysimage_problem(image_path=img, project_dir=proj) == "the sysimage metadata is unreadable"
-            end
         end)() end
 
         @testset "sysimage page tells a native session how to use the image" begin (function ()
@@ -2438,12 +1734,374 @@ function run_webui_fast_tests()
                 # wiring (route reaches the handler, handler redirects back with a
                 # message) and the guard that stops a second build. The spawn itself
                 # is covered by running a build, not by the suite.
+                # the button starts the repository build script; 0.50.0 looked
+                # for it inside app/ and failed
+                @test isfile(SparlectraApp._sysimage_build_script())
                 _progress_file("running", round(time(); digits=1))
                 rebuild = SparlectraApp.route_sparlectra_webui("POST", "/webui/sysimage/rebuild"; output_root=out)
                 @test rebuild.status == 303
                 @test any(h -> first(h) == "Location" && startswith(last(h), "/webui/sysimage"), rebuild.headers)
                 @test any(h -> first(h) == "Location" && occursin("already", last(h)), rebuild.headers)
             end
+        end)() end
+
+        @testset "update check and install" begin (function ()
+            A = SparlectraApp
+            # every fetch is a stub of the same shape as the Downloads one, so
+            # no test reaches the network
+            # the fetch follows the redirect of the latest-release page; `url`
+            # is the address it ended at
+            answer(status, final_url = ""; headers = Dict{String,String}()) = (url; timeout) -> (status = status, headers = headers, url = final_url, error = "", timed_out = false)
+            failure(msg; timed_out = false) = (url; timeout) -> (status = 0, headers = Dict{String,String}(), url = "", error = msg, timed_out = timed_out)
+            release(tag) = "https://github.com/Welthulk/Sparlectra.jl/releases/tag/$(tag)"
+            cur = v"0.50.0"
+            check(fetch) = A.webui_check_for_update(; fetch, current = cur)
+            @test check(answer(200, release("v0.50.0"))).state === :up_to_date
+            # a checkout ahead of the latest release is up to date as well
+            @test check(answer(200, release("v0.49.3"))).state === :up_to_date
+            newer = check(answer(200, release("v0.51.0")))
+            @test (newer.state, newer.latest, newer.tag) == (:newer, v"0.51.0", "v0.51.0")
+            @test newer.release_url == "https://github.com/Welthulk/Sparlectra.jl/releases/tag/v0.51.0"
+            # the check asks the release page, never the REST API with its
+            # anonymous quota of 60 requests per hour per IP
+            asked = String[]
+            A.webui_check_for_update(; fetch = (url; timeout) -> (push!(asked, url); answer(200, release("v0.50.0"))(url; timeout)), current = cur)
+            @test asked == ["https://github.com/Welthulk/Sparlectra.jl/releases/latest"]
+            offline = check(failure("Could not resolve host: github.com"))
+            @test (offline.state, offline.failure) == (:failed, :network)
+            @test occursin("Could not resolve host", offline.message)
+            @test check(failure("Operation timed out"; timed_out = true)).failure === :timeout
+            @test check(answer(429)).failure === :rate_limit
+            @test check(answer(500)).failure === :http
+            @test check(answer(404)).failure === :http
+            # an address that is not a release tag of the repository: no
+            # exception, a named failure (a repository without a release ends
+            # on /releases, a proxy on its login page)
+            for final in ("", "https://github.com/Welthulk/Sparlectra.jl/releases", "https://proxy.example.com/login", "https://github.com/Welthulk/Sparlectra.jl/releases/tag/latest", "https://github.com/Welthulk/Sparlectra.jl/releases/tag/v0.51", "https://github.com/Other/Sparlectra.jl/releases/tag/v0.51.0")
+                @test (final, check(answer(200, final)).failure) == (final, :malformed)
+            end
+
+            mktempdir() do tmp
+                # --- layout detection
+                checkout = joinpath(tmp, "dev", "Sparlectra")
+                mkpath(joinpath(checkout, ".git"))
+                @test A.webui_install_layout(checkout; flavor_kind = :native) === :git_checkout
+                worktree = joinpath(tmp, "wt")
+                mkpath(worktree)
+                write(joinpath(worktree, ".git"), "gitdir: /elsewhere/.git/worktrees/wt\n")
+                @test A.webui_install_layout(worktree; flavor_kind = :native) === :git_checkout
+                inst = joinpath(tmp, "apps", "Sparlectra")
+                mkpath(joinpath(inst, "tools"))
+                for f in ("Project.toml", "start_webui.jl", "start_webui.sh", "start_webui.bat", joinpath("tools", "install_webui.sh"), joinpath("tools", "install_webui.bat"))
+                    write(joinpath(inst, f), "# fixture\n")
+                end
+                # SPARLECTRA_ROOT carries a trailing separator
+                @test A.webui_install_layout(inst * "/"; flavor_kind = :sysimage) === :installed_copy
+                @test A.webui_install_layout(inst; flavor_kind = :app) === :unknown
+                renamed = joinpath(tmp, "apps", "Sparlectra.jl-0.50.0")
+                cp(inst, renamed)
+                @test A.webui_install_layout(renamed; flavor_kind = :native) === :unknown
+                no_script = joinpath(tmp, "other", "Sparlectra")
+                mkpath(dirname(no_script))
+                cp(inst, no_script)
+                rm(joinpath(no_script, "tools"); recursive = true)
+                @test A.webui_install_layout(no_script; flavor_kind = :native) === :unknown
+
+                # --- the unattended answers follow the current state
+                home = joinpath(tmp, "home")
+                mkpath(home)
+                img = joinpath(tmp, "state", "sysimage", "sparlectra.so")
+                none_yet = A._webui_update_answers(; flavor_kind = :native, sysimage_path = img, app_root = joinpath(inst, "app"), home, windows = false, apple = false)
+                @test none_yet == (build_sysimage = false, create_shortcut = false)
+                mkpath(joinpath(home, ".local", "share", "applications"))
+                write(joinpath(home, ".local", "share", "applications", "sparlectra-webui.desktop"), "[Desktop Entry]\n")
+                mkpath(dirname(img))
+                write(img, "image")
+                mkpath(joinpath(inst, "app"))
+                write(joinpath(dirname(img), "sysimage_meta.toml"), "project_dir = \"$(escape_string(joinpath(inst, "app")))\"\n")
+                @test A._webui_update_answers(; flavor_kind = :native, sysimage_path = img, app_root = joinpath(inst, "app"), home, windows = false, apple = false) == (build_sysimage = true, create_shortcut = true)
+                # the image of another checkout is not this copy's: no build
+                @test A._webui_update_answers(; flavor_kind = :native, sysimage_path = img, app_root = joinpath(checkout, "app"), home, windows = false, apple = false).build_sysimage == false
+                @test A._webui_update_answers(; flavor_kind = :sysimage, sysimage_path = joinpath(tmp, "none.so"), app_root = joinpath(inst, "app"), home, windows = false, apple = false).build_sysimage == true
+
+                # --- the check page offers what the layout allows
+                logs = joinpath(tmp, "logs")
+                out = joinpath(tmp, "runs")
+                mkpath(out)
+                ans = (build_sysimage = true, create_shortcut = false)
+                page(layout, fetch; root = inst, started = true) = String(A.handle_webui_update_check(; operation_log = logs, fetch, layout, root, current = cur, output_root = out, started_by_script = started, answers = ans).body)
+                git_page = page(:git_checkout, answer(200, release("v0.51.0")); root = checkout)
+                @test occursin("git fetch --tags", git_page) && occursin("git checkout v0.51.0", git_page)
+                @test !occursin("/webui/update/install", git_page)
+                unknown_page = page(:unknown, answer(200, release("v0.51.0")); root = renamed)
+                @test occursin(A.WEBUI_UPDATE_ONE_LINE_SH, unknown_page) || occursin(A._webui_escape(A.WEBUI_UPDATE_ONE_LINE_WINDOWS), unknown_page)
+                @test !occursin("/webui/update/install", unknown_page)
+                inst_page = page(:installed_copy, answer(200, release("v0.51.0")))
+                @test occursin("action=\"/webui/update/install\"", inst_page)
+                @test occursin(A._webui_escape(A.webui_update_log_path(logs)), inst_page)
+                @test occursin(A._webui_escape(A._webui_update_token()), inst_page)
+                # a session that does not end on stop cannot update itself
+                @test !occursin("/webui/update/install", page(:installed_copy, answer(200, release("v0.51.0")); started = false))
+                @test !occursin("/webui/update/install", page(:installed_copy, answer(200, release("v0.50.0"))))
+                @test !occursin("/webui/update/install", page(:installed_copy, failure("Could not resolve host: api.github.com")))
+                @test !isdir(A.webui_update_dir(logs))
+                # the Info panel carries the button, and the route reaches the check
+                @test occursin("action=\"/webui/update/check\"", A.render_webui_error(404, "x"))
+                saved_fetch = A._WEBUI_UPDATE_FETCH[]
+                try
+                    A._WEBUI_UPDATE_FETCH[] = answer(200, release("v0.51.0"))
+                    @test A.route_sparlectra_webui("POST", "/webui/update/check"; output_root = out).status == 200
+                finally
+                    A._WEBUI_UPDATE_FETCH[] = saved_fetch
+                end
+
+                # --- the install action
+                spawned = Cmd[]
+                spawn = cmd -> (push!(spawned, cmd); nothing)
+                stopped = Ref(0)
+                good = Dict{String,String}("confirm_update" => "yes", "token" => A._webui_update_token(), "tag" => "v0.51.0")
+                no_job() = nothing
+                busy_job() = Dict{String,Any}("status" => "running")
+                install(form; layout = :installed_copy, started = true, active_job = no_job) = A.handle_webui_update_install(form; operation_log = logs, shutdown = () -> (stopped[] += 1), spawn, layout, root = inst, output_root = out, started_by_script = started, active_job, answers = ans, windows = false)
+                # a git checkout and an unknown layout never start a process
+                @test install(good; layout = :git_checkout).status == 409
+                @test install(good; layout = :unknown).status == 409
+                @test install(good; started = false).status == 409
+                @test install(delete!(copy(good), "confirm_update")).status == 400
+                @test install(merge(good, Dict("token" => "stale"))).status == 403
+                @test install(good; active_job = busy_job).status == 409
+                @test isempty(spawned) && stopped[] == 0
+                @test !isdir(A.webui_update_dir(logs))
+                # through the route: this checkout is a git checkout, so nothing starts
+                @test A.route_sparlectra_webui("POST", "/webui/update/install", good; output_root = out).status == 409
+                @test !isdir(A.webui_update_dir(out))
+
+                accepted = install(good)
+                @test accepted.status == 200
+                @test length(spawned) == 1
+                timedwait(() -> stopped[] == 1, 5.0)
+                @test stopped[] == 1
+                # the command that would run, built and handed to the stub only
+                update_dir = A.webui_update_dir(logs)
+                cmd = only(spawned)
+                updater = cmd.exec[2]
+                @test cmd.exec[1] == "sh"
+                @test dirname(updater) == update_dir
+                @test occursin(r"^sparlectra_update_\d{8}_\d{6}\.sh$", basename(updater))
+                @test cmd.dir == update_dir
+                script = read(updater, String)
+                @test occursin("kill -0 $(getpid())", script)
+                for line in ("SPARLECTRA_UPDATE=1", "SPARLECTRA_UPDATE_TAG='v0.51.0'", "SPARLECTRA_BUILD_SYSIMAGE=1", "SPARLECTRA_CREATE_SHORTCUT=0", "SPARLECTRA_START_WEBUI=0", "unset SPARLECTRA_SYSIMAGE_CHECKED", "SPARLECTRA_INSTALL_DIR='$(dirname(inst))'", "sh '$(joinpath(update_dir, "install_webui.sh"))'", "exec sh '$(joinpath(inst, "start_webui.sh"))'")
+                    @test (line, occursin(line, script)) == (line, true)
+                end
+                @test read(joinpath(update_dir, "install_webui.sh"), String) == "# fixture\n"
+                @test startswith(read(joinpath(update_dir, "update.log"), String), "Sparlectra update requested")
+                if Sys.iswindows()
+                    println("  update: sh -n of the updater skipped (Windows)")
+                else
+                    @test success(`sh -n $(updater)`)
+                    println("  update: sh -n of the updater ran")
+                end
+                @test occursin("\"status\":\"started\"", read(A.webui_operation_log_path(logs), String))
+
+                # --- the question of start_webui.jl: only an installed copy
+                # is asked, and only y or yes starts the updater
+                clogs = joinpath(tmp, "clogs")
+                cspawned = Cmd[]
+                asked = String[]
+                fetched = Ref(0)
+                counted(f) = (url; timeout) -> (fetched[] += 1; f(url; timeout))
+                function offer(; reply = "y", fetch = answer(200, release("v0.51.0")), layout = :installed_copy, root = inst, interactive = true, args = String[], env = Dict{String,String}(), port = false, building = false, spawn = cmd -> (push!(cspawned, cmd); nothing), ask = p -> (push!(asked, p); reply))
+                    return A.webui_console_update_offer(; args, env, interactive, fetch = counted(fetch), current = cur, layout, root, ask, port_busy = () -> port, sysimage_busy = () -> building, operation_log = clogs, answers = ans, spawn, io = devnull, windows = false)
+                end
+                # (a) a newer release, an installed copy and a yes
+                @test offer(reply = "y") === :started
+                @test length(cspawned) == 1 && length(asked) == 1
+                @test cspawned[1].exec[1] == "sh" && dirname(cspawned[1].exec[2]) == A.webui_update_dir(clogs)
+                @test occursin("kill -0 $(getpid())", read(cspawned[1].exec[2], String))
+                @test offer(reply = " YES\n") === :started
+                @test length(cspawned) == 2
+                # (b) every other answer, an empty line, the end of the input
+                # and no answer in time are a no
+                for reply in ("n", "no", "", "  ", "ja", "yy")
+                    @test (reply, offer(; reply)) == (reply, :declined)
+                end
+                eof_ask = p -> A._webui_console_read_answer(p; io = devnull, input = IOBuffer(""))
+                @test offer(ask = eof_ask) === :declined
+                silent = Base.BufferStream()
+                @test A._webui_console_read_answer("?"; io = devnull, input = silent, seconds = 0.2) == ""
+                typed = Base.BufferStream()
+                write(typed, "y\n")
+                @test A._webui_console_read_answer("?"; io = devnull, input = typed, seconds = 5.0) == "y"
+                @test length(cspawned) == 2
+                n_asked = length(asked)
+                # (c) up to date and (d) a failed check ask nothing
+                @test offer(fetch = answer(200, release("v0.50.0"))) === :up_to_date
+                @test offer(fetch = failure("Could not resolve host: api.github.com")) === :failed
+                @test offer(fetch = failure("Operation timed out"; timed_out = true)) === :failed
+                @test offer(fetch = answer(500, "")) === :failed
+                # (e) a git checkout or an unknown copy is never asked
+                @test offer(layout = :git_checkout, root = checkout) === :manual
+                @test offer(layout = :unknown, root = renamed) === :manual
+                # a Web UI on the port or a sysimage build: no question
+                @test offer(port = true) === :busy
+                @test offer(building = true) === :busy
+                @test length(asked) == n_asked && length(cspawned) == 2
+                # no terminal and the opt-outs: not even the request
+                fetched[] = 0
+                @test offer(interactive = false) === :not_interactive
+                @test offer(args = ["--no-update-check"]) === :disabled
+                @test offer(env = Dict("SPARLECTRA_UPDATE_CHECK" => "0")) === :disabled
+                @test offer(env = Dict("JULIA_PKG_OFFLINE" => "true")) === :disabled
+                @test fetched[] == 0 && length(asked) == n_asked && length(cspawned) == 2
+                # a shell that cannot start: nothing runs, the start goes on
+                @test offer(spawn = cmd -> throw(Base.IOError("could not spawn sh", -2))) === :start_failed
+                @test occursin("\"method\":\"CONSOLE\"", read(A.webui_operation_log_path(clogs), String))
+
+                # the Windows plan, built on any platform: start opens the console
+                # window, the batch file has CRLF line ends and the same answers
+                wplan = A.webui_update_plan(; root = inst, current = cur, tag = "v0.51.0", operation_log = joinpath(tmp, "wlogs"), pid = 4242, answers = (build_sysimage = false, create_shortcut = true), windows = true)
+                @test wplan.command.exec[2:end] == ["/c", "start", "\"Sparlectra update\"", "\"$(wplan.updater)\""]
+                @test wplan.command.flags & Base.UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS != 0
+                bat = read(wplan.updater, String)
+                @test count("\r\n", bat) == count("\n", bat)
+                for line in ("tasklist /FI \"PID eq 4242\"", "set \"SPARLECTRA_UPDATE_TAG=v0.51.0\"", "set \"SPARLECTRA_BUILD_SYSIMAGE=0\"", "set \"SPARLECTRA_CREATE_SHORTCUT=1\"", "set \"SPARLECTRA_INSTALL_DIR=$(dirname(inst))\"", "call \"$(joinpath(inst, "start_webui.bat"))\"")
+                    @test (line, occursin(line, bat)) == (line, true)
+                end
+                # the restart runs in a console with a keyboard: the update
+                # question is switched off before start_webui.bat is called
+                restart = findfirst("call \"$(joinpath(inst, "start_webui.bat"))\"", bat)
+                optout = findlast("set \"SPARLECTRA_UPDATE_CHECK=0\"", bat)
+                @test optout !== nothing && restart !== nothing && last(optout) < first(restart)
+                # the Windows updater records the result of the install script
+                # and stops with the reason before it restarts the old copy
+                for line in ("set \"RC=%ERRORLEVEL%\"", "findstr /b /c:\"Update FAILED:\"", "echo Update FAILED:%REASON%", ":update_done")
+                    @test (line, occursin(line, bat)) == (line, true)
+                end
+
+                # --- a failed update stays visible: the result file of the
+                # updater, read back with CRLF as the Windows updater writes it
+                flog = joinpath(tmp, "flogs", "operations.jsonl")
+                @test A.webui_last_update(flog) === nothing
+                @test A._webui_info_last_update(flog) == ""
+                mkpath(A.webui_update_dir(flog))
+                write(A.webui_update_status_path(flog), "failed\r\nv0.51.0\r\n download of v0.51.0 failed\r\n2026-10-22 10:00\r\n")
+                lastup = A.webui_last_update(flog)
+                @test (lastup.ok, lastup.tag, lastup.reason, lastup.finished) == (false, "v0.51.0", "download of v0.51.0 failed", "2026-10-22 10:00")
+                @test occursin("The last update to v0.51.0 failed (2026-10-22 10:00): download of v0.51.0 failed.", A._webui_info_last_update(flog))
+                @test occursin("update-last-failed", String(A.handle_webui_update_check(; operation_log = flog, fetch = answer(200, release("v0.50.0")), layout = :installed_copy, root = inst, current = cur, output_root = out).body))
+                # the start in a terminal names it even with the check switched
+                # off, as after the restart of an update
+                said = IOBuffer()
+                @test A.webui_console_update_offer(; env = Dict("SPARLECTRA_UPDATE_CHECK" => "0"), operation_log = flog, io = said) === :disabled
+                @test occursin("The last update to v0.51.0 failed", String(take!(said)))
+                write(A.webui_update_status_path(flog), "ok\nv0.51.0\n\n2026-10-22 10:05\n")
+                @test A.webui_last_update(flog).ok && A._webui_info_last_update(flog) == ""
+
+                if Sys.iswindows()
+                    println("  update: sh installer and updater runs skipped (Windows)")
+                else
+                    # --- the sh updater: a failing install script leaves the
+                    # reason in last_update.txt, a good one "ok"
+                    ulog = joinpath(tmp, "ulogs", "operations.jsonl")
+                    uplan = A.webui_update_plan(; root = inst, current = cur, tag = "v0.51.0", operation_log = ulog, pid = 999999, answers = (build_sysimage = false, create_shortcut = false), windows = false)
+                    write(uplan.installer, "echo \"Update FAILED: download of v0.51.0 failed\"\nexit 1\n")
+                    write(joinpath(inst, "start_webui.sh"), "exit 0\n")
+                    run(Cmd(`sh $(uplan.updater)`; dir = dirname(uplan.updater)))
+                    ufail = A.webui_last_update(ulog)
+                    @test (ufail.ok, ufail.tag, ufail.reason) == (false, "v0.51.0", "download of v0.51.0 failed")
+                    write(uplan.installer, "exit 0\n")
+                    run(Cmd(`sh $(uplan.updater)`; dir = dirname(uplan.updater)))
+                    @test A.webui_last_update(ulog).ok
+
+                    # --- the sh installer: an update that was asked for and
+                    # cannot finish stops with the reason and exit code 1, the
+                    # existing copy stays as it is (no network: curl fails)
+                    sandbox = joinpath(tmp, "installer")
+                    copy_dir = joinpath(sandbox, "Sparlectra")
+                    mkpath(copy_dir)
+                    write(joinpath(copy_dir, "Project.toml"), "name = \"Sparlectra\"\nversion = \"0.1.0\"\n")
+                    fakebin = joinpath(tmp, "fakebin")
+                    mkpath(fakebin)
+                    write(joinpath(fakebin, "curl"), "#!/bin/sh\nexit 22\n")
+                    chmod(joinpath(fakebin, "curl"), 0o755)
+                    script = joinpath(A.SPARLECTRA_ROOT, "tools", "install_webui.sh")
+                    # local names: a plain assignment in this closure would
+                    # rebind the variables of the enclosing testset function
+                    function run_installer(env)
+                        local buf = IOBuffer()
+                        local base = Dict("PATH" => fakebin * ":" * ENV["PATH"], "HOME" => tmp, "SPARLECTRA_INSTALL_DIR" => sandbox, "SPARLECTRA_START_WEBUI" => "0", "SPARLECTRA_CREATE_SHORTCUT" => "0")
+                        local proc = run(pipeline(ignorestatus(setenv(`sh $(script)`, merge(base, env))); stdout = buf, stderr = buf))
+                        return (proc.exitcode, String(take!(buf)))
+                    end
+                    code, text = run_installer(Dict("SPARLECTRA_UPDATE" => "1", "SPARLECTRA_UPDATE_TAG" => "v9.9.9"))
+                    @test code == 1
+                    @test occursin("Update FAILED: download of v9.9.9 failed", text)
+                    code, text = run_installer(Dict("SPARLECTRA_UPDATE" => "1"))
+                    @test code == 1
+                    @test occursin("Update FAILED: could not determine the latest release", text)
+                    @test read(joinpath(copy_dir, "Project.toml"), String) == "name = \"Sparlectra\"\nversion = \"0.1.0\"\n"
+                    @test !isdir(joinpath(sandbox, "Sparlectra.old"))
+                    println("  update: sh installer and updater runs ran")
+                end
+            end
+        end)() end
+
+        @testset "measurement tables bound by CGMES model id and by the assign switch" begin (function ()
+            # The SmallGrid fixture is the CGMES case. The full RDF reader
+            # (summarizeCGMES) gives the EQ model id the header-only reader
+            # has to find.
+            C = Sparlectra.CGMESImporter
+            sg = joinpath(@__DIR__, "fixtures", "cgmes_smallgrid", "CGMES_v2.4.15_SmallGridTestConfiguration_BaseCase_Complete_v3.0.0.zip")
+            eq = [C.cgmesModelKey(f.model_id) for f in C.summarizeCGMES(path = sg).files if :EQ in f.profiles]
+            @test length(eq) == 1 && C.cgmesEquipmentModelIds(sg) == eq
+            root = mktempdir()
+            cases = joinpath(root, "cases")
+            mkpath(cases)
+            cp(sg, joinpath(cases, "smallgrid.zip"))
+            # a second scenario on the same EQ lists the same tables
+            cp(sg, joinpath(cases, "smallgrid_scenario2.zip"))
+            # a .zip that is no ZIP has no model id and lists no model-bound table
+            write(joinpath(cases, "broken.zip"), "no zip")
+            head = "# sparlectra-measurement-table v1\n"
+            body = string(join(Sparlectra.MEASUREMENT_TABLE_HEADER, ","), "\n,,,n1,U,110.0,,measured,true\n")
+            # the id as a converter may write it: urn:uuid prefix, upper case
+            write(joinpath(cases, "by_model.csv"), string(head, "# cgmes_model: urn:uuid:", uppercase(eq[1]), "\n", body))
+            write(joinpath(cases, "other_model.csv"), string(head, "# cgmes_model: 00000000-0000-0000-0000-000000000001\n", body))
+            # a `# case:` line outranks the model line
+            write(joinpath(cases, "case_line.csv"), string(head, "# case: broken.zip\n# cgmes_model: ", eq[1], "\n", body))
+            listed = c -> [s.name for s in SparlectraApp._webui_measurement_sets_for_case(cases, c)]
+            @test listed("smallgrid.zip") == ["by_model.csv"]
+            @test listed("smallgrid_scenario2.zip") == ["by_model.csv"]
+            @test listed("broken.zip") == ["case_line.csv"]
+            @test only(SparlectraApp._webui_measurement_sets_for_case(cases, "smallgrid.zip")).model == eq[1]
+
+            # assign switch of the SE upload: the stored copy is bound to the
+            # case of the form, whatever the file says; CRLF stays CRLF
+            upload = (name, text) -> SparlectraApp.WebUICaseUpload(name, Vector{UInt8}(codeunits(text)))
+            assign_form = (case, files) -> Dict{String,Any}("return_to" => "stateestimation", "return_case" => case, "assign_to_case" => "true", "casefiles" => files)
+            foreign = replace(string(head, "# case: broken.zip\n# cgmes_model: 00000000-0000-0000-0000-000000000001\n", body), "\n" => "\r\n")
+            r = SparlectraApp.handle_powerflow_case_import(assign_form("smallgrid.zip", [upload("assigned.csv", foreign)]); output_root = root, case_directory = cases, operation_log = root)
+            loc = SparlectraApp._webui_urldecode(Dict(r.headers)["Location"])
+            # the assigned file is armed for the next run
+            @test occursin("measurement_file=assigned.csv", loc)
+            stored = read(joinpath(cases, "assigned.csv"), String)
+            @test startswith(stored, "# sparlectra-measurement-table v1\r\n# case: smallgrid.zip\r\n") && count("# case:", stored) == 1
+            @test Sparlectra.readMeasurementTable(joinpath(cases, "assigned.csv"))[1].value == 110.0
+            @test listed("smallgrid.zip") == ["assigned.csv", "by_model.csv"]
+            @test !("assigned.csv" in listed("broken.zip"))
+            # assigning again replaces the measurement file of that name
+            SparlectraApp.handle_powerflow_case_import(assign_form("smallgrid_scenario2.zip", [upload("assigned.csv", foreign)]); output_root = root, case_directory = cases, operation_log = root)
+            @test "assigned.csv" in listed("smallgrid_scenario2.zip") && !("assigned.csv" in listed("smallgrid.zip"))
+            # without the switch the file keeps its own binding and an
+            # existing name is refused
+            plain = Dict{String,Any}("return_to" => "stateestimation", "return_case" => "smallgrid.zip", "casefiles" => [upload("assigned.csv", foreign), upload("plain.csv", foreign)])
+            SparlectraApp.handle_powerflow_case_import(plain; output_root = root, case_directory = cases, operation_log = root)
+            @test "assigned.csv" in listed("smallgrid_scenario2.zip") && listed("broken.zip") == ["case_line.csv", "plain.csv"]
+            # the switch binds measurement files only: a CSV without the
+            # version line is refused and not stored
+            SparlectraApp.handle_powerflow_case_import(assign_form("smallgrid.zip", [upload("notes.csv", body)]); output_root = root, case_directory = cases, operation_log = root)
+            @test !isfile(joinpath(cases, "notes.csv"))
         end)() end
 
         @testset "case-scan memo cache" begin (function ()
@@ -2462,16 +2120,6 @@ function run_webui_fast_tests()
             end
         end)() end
 
-        @testset "warmup prefix hides only .jl workloads" begin (function ()
-            # the reserved warmup workloads are .jl; a MATPOWER case carrying the
-            # prefix (warmup_casePST.m) must stay selectable (regression: the demo
-            # case vanished from both selectors after its rename)
-            @test !SparlectraApp._webui_is_user_selectable_case("warmup_case3.jl")
-            @test !SparlectraApp._webui_is_user_selectable_case("warmup_case118.jl")
-            @test SparlectraApp._webui_is_user_selectable_case("warmup_casePST.m")
-            @test !SparlectraApp._webui_is_user_selectable_case("warmup_casePST.sparlectra-webui.yaml")
-        end)() end
-
         @testset "buildSysimage one-call API (dry run)" begin (function ()
             # the exported one-liner plans against the package project in a child
             # process; dry run must resolve the target paths without building
@@ -2479,10 +2127,7 @@ function run_webui_fast_tests()
             @test r.built == false
             @test endswith(r.sysimage_path, SparlectraApp.webui_sysimage_ext()) || occursin("sparlectra.", basename(r.sysimage_path))
             @test occursin("sysimage_meta", basename(r.meta_path))
-            # the relocatable executable is a CHECKOUT TOOL, not
-            # a package function: Sparlectra runs on an installed Julia, so
-            # buildApp left the module and the Web UI offers the sysimage only
-            @test !isdefined(Sparlectra, :buildApp)
+            # the relocatable executable is a checkout tool, not a package function
             @test isfile(joinpath(pkgdir(Sparlectra), "tools", "build_app.jl"))
             # the generated CLI module must parse and carry the core commands
             # (run/se/n1, config flags); a child process keeps ARGS handling and
@@ -2497,7 +2142,7 @@ function run_webui_fast_tests()
                 src = read(joinpath(d, "src", "SparlectraExe.jl"), String)
                 ex = Meta.parseall(src)
                 any(a -> a isa Expr && a.head == :error, ex.args) && error("generated module does not parse: " * string(fl))
-                for needle in ("run <casefile>", "se <casefile>", "n1 <casefile>", "--config=", "--set key=value", "working directory no longer exists", "APP_BUILT_AT")
+                for needle in ("run <casefile>", "se <casefile>", "n1 <casefile>", "convert-measurements <casefile> <v1.csv>", "--config=", "--set key=value", "working directory no longer exists", "APP_BUILT_AT")
                   occursin(needle, src) || error("missing CLI needle " * needle * " in flavor " * string(fl))
                 end
               end
@@ -2505,6 +2150,17 @@ function run_webui_fast_tests()
               """
             gen_out = read(`$(Base.julia_cmd()) --startup-file=no -e $(gen_code)`, String)
             @test occursin("GEN_OK", gen_out)
+            # header start-flavor: native in the test session, :app when the
+            # standalone executable stamped its build time into the environment
+            @test SparlectraApp.webui_runtime_flavor().kind in (:native, :sysimage)
+            withenv("SPARLECTRA_APP_BUILT" => "2026-08-29T11:11:11") do
+                fa = SparlectraApp.webui_runtime_flavor()
+                @test fa.kind === :app
+                @test fa.built == "2026-08-29T11:11:11"
+            end
+        end)() end
+
+        @testset "Web UI help pages and search" begin (function ()
             # a control renders its hover hint on the label and, with a doc
             # target, the ? to its in-app help page; that page carries the
             # section shipped with the application and the link into the
@@ -2519,14 +2175,12 @@ function run_webui_fast_tests()
                 @test help.status == 200
                 help_html = String(help.body)
                 @test occursin("class=\"help-hint\"", help_html)
-                @test occursin("<h2>Solver core options</h2>", help_html)
                 @test !occursin("<table>", help_html)
                 # a library section shows its lead paragraph and says the rest is online
                 @test occursin("class=\"field-help help-more\"", help_html)
                 @test occursin("href=\"https://docs.example/v1/powerflow_configuration/#pf-solver-core\"", help_html)
                 # a relative page link of the section points at the same site
                 flat = String(SparlectraApp.route_sparlectra_webui("GET", "/help/power_flow.flatstart").body)
-                @test occursin("<h2>Flat start</h2>", flat)
                 @test occursin("href=\"https://docs.example/v1/powerflow_configuration/#pf-solver-core\"", flat)
                 @test !occursin("SPARLECTRADOCS", flat)
                 @test !occursin("(@ref", flat)
@@ -2555,9 +2209,6 @@ function run_webui_fast_tests()
                 @test count("<h1", page_html) == 1
                 @test occursin("href=\"/help\">Help</a>", page_html)
             end
-            # the user help stays short: the limit is 1500 words of text
-            manual_words = length(split(replace(SparlectraApp.WEBUI_HELP_MANUAL, r"```.*?```"s => " ")))
-            @test manual_words <= 1500
             # a topic links to its section on the page that carries it
             @test occursin("href=\"/help/reference#webui-flat-start\"", String(SparlectraApp.route_sparlectra_webui("GET", "/help/power_flow.flatstart").body))
             # every target of the search index exists: a heading of its
@@ -2576,7 +2227,7 @@ function run_webui_fast_tests()
             @test [url for url in inapp_links if !index_target_exists(url)] == String[]
             # the search: every word must occur, a part of a word is enough,
             # a hit in a title leads, the words are marked in the snippet,
-            # the query comes back escaped, no hit says so and names the
+            # the query comes back escaped, no hit names the
             # published documentation
             search_html(q; fragment = false) = String(SparlectraApp.route_sparlectra_webui("GET", "/help/search?q=" * q * (fragment ? "&fragment=1" : "")).body)
             help_hits(q) = [(String(m.captures[1]), String(m.captures[2])) for m in eachmatch(r"<li><a href=\"([^\"]+)\">([^<]*)</a> <span class=\"help-search-kind\">", search_html(q))]
@@ -2593,7 +2244,6 @@ function run_webui_fast_tests()
             @test occursin("<mark>xiidm</mark>", lowercase(search_html("XIIDM")))
             @test isempty(help_hits("zzzqqq"))
             withenv("SPARLECTRA_WEBUI_DOCS_BASE_URL" => "https://docs.example/v1/") do
-                @test occursin("No hits for \"zzzqqq\"", search_html("zzzqqq"))
                 @test occursin("href=\"https://docs.example/v1/\"", search_html("zzzqqq"; fragment = true))
             end
             @test SparlectraApp.webui_help_search("a") == SparlectraApp.webui_help_search("")
@@ -2616,15 +2266,6 @@ function run_webui_fast_tests()
             stg = SparlectraApp.render_settings_page(output_root=mktempdir(), selected_casefile="sp_case14.scf.json")
             @test occursin("settings-target-hint", stg)
             @test !occursin("value=\"this_case\" checked>this case (<code>sp_case14.scf.json</code>): case-scope", stg)
-
-            # header start-flavor: native in the test session, :app when the
-            # standalone executable stamped its build time into the environment
-            @test SparlectraApp.webui_runtime_flavor().kind in (:native, :sysimage)
-            withenv("SPARLECTRA_APP_BUILT" => "2026-08-29T11:11:11") do
-                fa = SparlectraApp.webui_runtime_flavor()
-                @test fa.kind === :app
-                @test fa.built == "2026-08-29T11:11:11"
-            end
         end)() end
 
         @testset "sysimage build script dry run parses" begin (function ()

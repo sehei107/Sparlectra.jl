@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -99,9 +99,33 @@ function control_max_outer_iterations(ctrl::AbstractOuterController)::Int
   return Int(getproperty(ctrl, :max_outer_iters))
 end
 
+"""
+    control_priority(ctrl) -> Int
+
+Rank of a controller in the outer loop: 0 (the default) acts first. A
+controller with a larger number acts in a pass only if no active controller
+with a smaller number moved its actuator in that pass, that is each of them
+is inside its deadband, at its limit (tap at `tap_min`/`tap_max`, bank on
+its outermost block or parked, machine at its Q limit) or blocked
+otherwise. A move along the limit does not count: a controller that was at
+its limit at the end of the previous pass and is at its limit again (a
+STATCOM following `V * S_max`) lets the larger numbers act. Controllers
+with the same number act together, so equal numbers give the loop without
+ranks. Built-in controllers carry the number in their
+`priority` field; a user-defined controller without that field ranks at 0
+unless it adds a method.
+"""
+control_priority(ctrl::AbstractOuterController)::Int = hasproperty(ctrl, :priority) ? Int(getproperty(ctrl, :priority)) : 0
+
+# the check every controller constructor runs on its priority keyword
+function _check_control_priority(priority::Int, who::AbstractString)::Int
+  priority >= 0 || throw(ArgumentError(string(who, ": priority must be 0 or larger (0 acts first), got ", priority)))
+  return priority
+end
+
 # Generic controllable-element record of one controller: what the device is,
 # which actuator it moves, which quantity it steers onto which target, and
-# within which limits — the shared vocabulary over all controller types.
+# within which limits: the shared vocabulary over all controller types.
 # Types without a descriptor stay invisible in the element view (nothing).
 control_element_descriptor(::AbstractOuterController, ::Any)::Union{Nothing,NamedTuple} = nothing
 
@@ -113,7 +137,7 @@ a uniform vocabulary: `element` (the physical device), `device` (its role
 label), `actuator` and its `[actuator_min, actuator_max]` range, the
 controlled `quantity` with `target`/`target_value`, `discrete`, `enabled`,
 and the live `status`/`converged`/`at_limit` flags. Derived on demand from
-the registered controllers — purely a reporting view, no control behavior
+the registered controllers, purely a reporting view, no control behavior
 attached.
 """
 function controllableElements(net::Any)::Vector{NamedTuple}
@@ -149,9 +173,16 @@ function _resolve_control_pf_config(pf_config)
   return pf_config
 end
 
+# The configuration the solves of a control run receive. A full
+# SparlectraConfig goes to runpf! as it is, so its runtime.parallel switches
+# reach the island fan-out; reduced to its PowerFlowConfig, the active
+# configuration would decide them instead. The controllers keep reading the
+# resolved PowerFlowConfig.
+_control_solve_config(pf_config, pf_config_resolved) = pf_config isa SparlectraConfig ? pf_config : pf_config_resolved
+
 function _run_control_baseline_pf!(net::Any, pf_config, verbose::Int, performance_profile, success_status::Symbol)
   pf_config_resolved = _resolve_control_pf_config(pf_config)
-  ite, erg = runpf!(net; config = pf_config_resolved, verbose = verbose, performance_profile = performance_profile)
+  ite, erg = runpf!(net; config = _control_solve_config(pf_config, pf_config_resolved), verbose = verbose, performance_profile = performance_profile)
   if erg == 0
     calcNetLosses!(net)
     calcLinkFlowsKCL!(net)
@@ -161,6 +192,7 @@ function _run_control_baseline_pf!(net::Any, pf_config, verbose::Int, performanc
     converged = erg == 0,
     powerflow_solves = 1,
     last_pf_iterations = ite,
+    total_pf_iterations = ite,
     last_pf_status = erg == 0 ? :ok : :failed,
   )
   net.control_result = result
@@ -172,7 +204,16 @@ end
 
 Outer-loop orchestration layer around `runpf!` for controller-based network updates.
 It does not replace `runpf!`; it coordinates built-in or user-defined controllers and
-returns a `ControlRunResult`.
+returns a `ControlRunResult`. Within a pass the controllers act by rank
+(`control_priority`): a rank waits while a smaller one still moves.
+A controller with a field `locked = true` (the dead time of a sequential
+QSTS run) stays in its rank and is evaluated but proposes nothing; outside
+its band and not at its limit it holds the larger numbers, in its band or
+at its limit it lets them act.
+A pass in which no controller moves ends the loop with status `:blocked`
+after one closing solve at the final controller state, so the net carries
+its voltages and not those of a probe solve; that solve counts in
+`powerflow_solves` and `total_pf_iterations`.
 """
 function run_control!(net::Any; controllers::Vector{<:AbstractOuterController} = collect_outer_controllers(net), pf_config = nothing, control_config::ControlConfig = ControlConfig(), verbose::Int = 0, performance_profile = nothing)
   net.control_result = nothing
@@ -194,7 +235,8 @@ function run_control!(net::Any; controllers::Vector{<:AbstractOuterController} =
   # the full output, later passes run quiet and get one summary line each
   # (control.log_iterations), unless control.verbose_passes asks for the
   # whole set on every pass.
-  pf_runner = (pass_verbose) -> runpf!(net; config = pf_config_resolved, verbose = pass_verbose, performance_profile = performance_profile)
+  solve_config = _control_solve_config(pf_config, pf_config_resolved)
+  pf_runner = (pass_verbose) -> runpf!(net; config = solve_config, verbose = pass_verbose, performance_profile = performance_profile)
   repeat_verbose = control_config.verbose_passes ? verbose : 0
   context = (pf_config = pf_config_resolved, control_config = control_config, verbose = verbose, performance_profile = performance_profile, outer_iteration = 0)
   states = AbstractControlState[control_initialize!(ctrl, net, context) for ctrl in controllers]
@@ -211,7 +253,7 @@ function run_control!(net::Any; controllers::Vector{<:AbstractOuterController} =
 
   active_ids = findall(control_enabled, controllers)
   if isempty(active_ids)
-    result = ControlRunResult(status = :no_active_controllers, converged = true, powerflow_solves = solves, last_pf_iterations = ite, last_pf_status = :ok)
+    result = ControlRunResult(status = :no_active_controllers, converged = true, powerflow_solves = solves, last_pf_iterations = ite, last_pf_status = :ok, total_pf_iterations = total_ite)
     net.control_result = result
     return result
   end
@@ -219,6 +261,21 @@ function run_control!(net::Any; controllers::Vector{<:AbstractOuterController} =
   # limits. Inner Newton/PF iteration limits stay inside pf_config/runpf!.
   controller_limit = minimum(control_max_outer_iterations(controllers[i]) for i in active_ids)
   max_outer = min(control_config.max_outer_iterations, controller_limit)
+  # one group per priority rank, smallest number first, each group in the
+  # order of `controllers`; with equal priorities (the default) there is a
+  # single group and the pass below is the loop without ranks
+  ranks = sort!(unique(control_priority(controllers[i]) for i in active_ids))
+  rank_groups = [filter(i -> control_priority(controllers[i]) == r, active_ids) for r in ranks]
+  # A locked controller (field `locked`, set by the dead time of a
+  # sequential QSTS run) stays in its rank group and is evaluated, but
+  # proposes nothing. While it stands outside its band and not at its limit
+  # it holds the larger numbers like a move would; in its band or at its
+  # limit it lets them act. With enabled = false it would drop out of the
+  # groups and free them while its voltage is still off.
+  locked = BitVector([hasproperty(c, :locked) && getproperty(c, :locked)::Bool for c in controllers])
+  # at-limit flag of every controller at the end of the previous pass, read
+  # by the rank gate below (no controller is at its limit before pass 1)
+  limited_before = falses(length(controllers))
   status = :max_outer_iterations
   trace = NamedTuple[]
   outer_iterations = 0
@@ -234,22 +291,48 @@ function run_control!(net::Any; controllers::Vector{<:AbstractOuterController} =
       break
     end
     moved = false
-    for i in active_ids
-      ctx = (pf_config = pf_config_resolved, control_config = control_config, verbose = verbose, performance_profile = performance_profile, outer_iteration = it)
-      upd = control_propose_update!(controllers[i], net, states[i], ctx)
-      moved = control_apply_update!(controllers[i], net, states[i], upd, ctx) || moved
-      if control_config.trace
-        append!(trace, control_trace_rows(controllers[i], net, states[i], ctx))
+    for group in rank_groups
+      holds = false
+      for i in group
+        if locked[i]
+          holds = holds || !(control_is_converged(controllers[i], states[i]) || control_is_blocked(controllers[i], states[i]))
+          continue
+        end
+        ctx = (pf_config = pf_config_resolved, control_config = control_config, verbose = verbose, performance_profile = performance_profile, outer_iteration = it)
+        upd = control_propose_update!(controllers[i], net, states[i], ctx)
+        moved_i = control_apply_update!(controllers[i], net, states[i], upd, ctx)
+        moved = moved_i || moved
+        # A move that only follows the limit does not hold later groups:
+        # the controller stood at its limit at the end of the previous pass
+        # and stands there again (a STATCOM tracking V * S_max as the
+        # terminal voltage moves, a tap settling onto tap_min from a ratio
+        # a rounding error above it). Every other move holds them.
+        holds = holds || (moved_i && !(limited_before[i] && control_is_blocked(controllers[i], states[i])))
+        if control_config.trace
+          append!(trace, control_trace_rows(controllers[i], net, states[i], ctx))
+        end
       end
+      # a group whose move holds lets no later group act until the next
+      # pass; a group in which nothing moved (each member inside its
+      # deadband, at its limit or parked) or that only followed its limits
+      # lets the next one act now. A controller held back proposes nothing
+      # and writes no trace row.
+      holds && break
     end
-    if !moved
-      status = :blocked
-      break
+    for i in active_ids
+      limited_before[i] = control_is_blocked(controllers[i], states[i])
     end
+    # A pass without a move ends the loop as :blocked. Its proposals may
+    # still have solved the net: a tap controller probes one step and
+    # restores the tap but not the voltages. The solve below then is the
+    # closing solve that puts the voltages of the final controller state
+    # back on the net; it counts like every other solve.
+    closing = !moved
+    closing && (status = :blocked)
     ite, erg = pf_runner(repeat_verbose)
     solves += 1
     total_ite += ite
-    verbose > 0 && control_config.log_iterations && _print_control_pass_line(net, it, max_outer, ite, erg)
+    verbose > 0 && control_config.log_iterations && _print_control_pass_line(net, it, max_outer, ite, erg; closing = closing)
     if erg != 0
       result = ControlRunResult(status = :pf_failed, converged = false, outer_iterations = it, powerflow_solves = solves, last_pf_iterations = ite, last_pf_status = :failed, trace = trace, total_pf_iterations = total_ite)
       net.control_result = result
@@ -257,6 +340,7 @@ function run_control!(net::Any; controllers::Vector{<:AbstractOuterController} =
     end
     calcNetLosses!(net)
     calcLinkFlowsKCL!(net)
+    closing && break
   end
   rows = NamedTuple[]
   for (i, ctrl) in enumerate(controllers)
@@ -270,17 +354,19 @@ end
 ## One line per control pass after the first (issue #387): convergence,
 ## mismatch and the Q-limit counters of that pass, so a change in the
 ## active set is visible without the full per-pass diagnostic blocks.
+## The closing solve after a pass without a move gets its own label.
 ## The counters come from the stored rectangular status; the DC and APSLF
 ## solvers refuse controllers, so a missing status only means the solve
 ## did not get that far.
-function _print_control_pass_line(net, it::Int, max_outer::Int, ite::Int, erg::Int)
+function _print_control_pass_line(net, it::Int, max_outer::Int, ite::Int, erg::Int; closing::Bool = false)
+  label = closing ? string("control closing solve after pass ", it, "/", max_outer) : string("control pass ", it, "/", max_outer)
   st = rectangular_pf_status(net)
   if st === nothing
-    println(stdout, "control pass ", it, "/", max_outer, ": ", erg == 0 ? "converged" : "NOT converged", " in ", ite, " iteration(s)")
+    println(stdout, label, ": ", erg == 0 ? "converged" : "NOT converged", " in ", ite, " iteration(s)")
     return nothing
   end
   changes = st.pv_pq_switching_events + st.qlimit_active_set_changes + st.qlimit_reenable_events
   change_text = changes == 0 ? "no active-set change" : string(st.pv_pq_switching_events, " PV->PQ event(s), ", st.qlimit_active_set_changes, " active-set change(s), ", st.qlimit_reenable_events, " re-enable event(s)")
-  @printf(stdout, "control pass %d/%d: %s in %d iteration(s), mismatch %.3e, %s\n", it, max_outer, st.final_converged ? "converged" : "NOT converged", ite, st.final_mismatch, change_text)
+  @printf(stdout, "%s: %s in %d iteration(s), mismatch %.3e, %s\n", label, st.final_converged ? "converged" : "NOT converged", ite, st.final_mismatch, change_text)
   return nothing
 end

@@ -21,18 +21,6 @@
 #          ADVISORY: they produce findings and warnings, they never mutate
 #          a status, a measurement, or the model.
 
-## station of a bus: the representative of its closed-link contraction
-## cluster (a bus without links is its own station). Findings and the
-## stage-2 clustering aggregate over stations, not raw buses.
-function _topology_station_map(net::Net)
-  reps = _active_link_representative_map(net)
-  members = Dict{Int,Vector{Int}}()
-  for b in eachindex(reps)
-    push!(get!(members, reps[b], Int[]), b)
-  end
-  return reps, members
-end
-
 ## human-readable location label of a station
 function _topology_station_label(net::Net, rep::Int, members::Dict{Int,Vector{Int}})
   nby = _bus_name_by_idx(net)
@@ -46,6 +34,146 @@ end
 ## dead-branch check never exceeds :warning (legitimately unloaded branches
 ## exist; the check only fires with loaded neighbours, see below).
 _topology_severity(ratio::Float64, k::Float64) = ratio >= 2.0 * k ? :strong : :warning
+
+## Check 5 of validate_topology: meshes without an active power row.
+## A mesh whose buses and branches carry no P row the estimator uses has
+## only Q, |I| and Vm information on its angle differences. Those can admit
+## a second converged WLS state with the angle differences around the mesh
+## turned over (sp_casePST with the mesh 2-3-4-5-7 stripped of P: J 15.4
+## from the flat start, J 9.3e-26 at the truth). The check is topological
+## and changes nothing in the estimation.
+##
+## Mesh definition: drop every station (closed-link cluster, the fused bus
+## of the estimator) that carries a used P injection, and every station
+## pair connected by a branch with a P flow row. Every cycle left in that
+## graph is a mesh without P measurement. Unlike a cycle basis this does not
+## depend on the spanning tree: a basis cycle can pass a measured bus while
+## another cycle of the same edges does not. The cycles left are found as
+## the non-bridge edges of the graph (one DFS, linear in buses + branches),
+## and one finding is reported per 2-edge-connected group. Parallel branches
+## count as one connection: they share one angle difference, so a mesh needs
+## at least three stations.
+##
+## "Used" follows _se_prepare: an injection row on a link cluster counts
+## only when every member of the cluster is measured (otherwise the
+## estimator drops the partial sum); a branch inside a cluster is contracted
+## away and forms no edge. Link flow rows do not count (they estimate ring
+## circulations, not angles).
+function _topology_mesh_without_p(net::Net, active::Vector{Measurement}, reps::Vector{Int}, members::Dict{Int,Vector{Int}}, busname)
+  findings = NamedTuple[]
+  iso = Set{Int}(net.isoNodes)
+  pinj_buses = Set{Int}()
+  pflow_branches = Set{Int}()
+  for m in active
+    m.linkIdx === nothing || continue
+    if m.typ == PinjMeas && m.busIdx !== nothing
+      push!(pinj_buses, Int(m.busIdx))
+    elseif m.typ == PflowMeas && m.branchIdx !== nothing
+      push!(pflow_branches, Int(m.branchIdx))
+    end
+  end
+  measured_station(r) = all(b -> b in pinj_buses, get(members, r, [r]))
+  # station pair (low, high) -> its closed branches; a pair with a P flow
+  # row on any of its branches is no edge
+  pairs = Dict{Tuple{Int,Int},Vector{Int}}()
+  dead = Set{Tuple{Int,Int}}()
+  for (k, br) in enumerate(net.branchVec)
+    _branch_terminal_state(br) == :closed || continue
+    fb = Int(br.fromBus)
+    tb = Int(br.toBus)
+    (fb in iso || tb in iso) && continue
+    a = reps[fb]
+    b = reps[tb]
+    a == b && continue
+    key = a < b ? (a, b) : (b, a)
+    push!(get!(Vector{Int}, pairs, key), k)
+    k in pflow_branches && push!(dead, key)
+  end
+  edges = Tuple{Int,Int}[]
+  for key in keys(pairs)
+    key in dead && continue
+    (measured_station(key[1]) || measured_station(key[2])) && continue
+    push!(edges, key)
+  end
+  isempty(edges) && return findings
+  sort!(edges)
+  adj = Dict{Int,Vector{Tuple{Int,Int}}}()   # station -> (neighbour, edge index)
+  for (e, (a, b)) in enumerate(edges)
+    push!(get!(Vector{Tuple{Int,Int}}, adj, a), (b, e))
+    push!(get!(Vector{Tuple{Int,Int}}, adj, b), (a, e))
+  end
+  # bridges by an iterative DFS (Tarjan low-link); recursion would overflow
+  # the stack on a large net
+  disc = Dict{Int,Int}()
+  low = Dict{Int,Int}()
+  bridge = falses(length(edges))
+  t = 0
+  for root in sort!(collect(keys(adj)))
+    haskey(disc, root) && continue
+    t += 1
+    disc[root] = t
+    low[root] = t
+    stack = [(root, 0, 1)]   # (station, edge it was entered by, next adjacency position)
+    while !isempty(stack)
+      v, pe, i = stack[end]
+      nb = adj[v]
+      if i <= length(nb)
+        stack[end] = (v, pe, i + 1)
+        w, e = nb[i]
+        e == pe && continue
+        if haskey(disc, w)
+          low[v] = min(low[v], disc[w])
+        else
+          t += 1
+          disc[w] = t
+          low[w] = t
+          push!(stack, (w, e, 1))
+        end
+      else
+        pop!(stack)
+        if !isempty(stack)
+          u = stack[end][1]
+          low[u] = min(low[u], low[v])
+          low[v] > disc[u] && (bridge[pe] = true)
+        end
+      end
+    end
+  end
+  # 2-edge-connected groups: the non-bridge edges joined by shared stations
+  parent = Dict{Int,Int}()
+  function root_of(x::Int)::Int
+    # path halving keeps the chains short on a large net
+    while get(parent, x, x) != x
+      g = get(parent, parent[x], parent[x])
+      parent[x] = g
+      x = g
+    end
+    return x
+  end
+  for (e, (a, b)) in enumerate(edges)
+    bridge[e] && continue
+    ra = root_of(a)
+    rb = root_of(b)
+    ra == rb || (parent[ra] = rb)
+  end
+  groups = Dict{Int,Vector{Int}}()
+  for (e, (a, _)) in enumerate(edges)
+    bridge[e] && continue
+    push!(get!(Vector{Int}, groups, root_of(a)), e)
+  end
+  label(k) = string(k, " (", busname(net.branchVec[k].fromBus), "-", busname(net.branchVec[k].toBus), ")")
+  for es in sort!(collect(values(groups)); by = first)
+    brs = sort!(reduce(vcat, (pairs[edges[e]] for e in es); init = Int[]))
+    shown = join((label(k) for k in first(brs, 10)), ", ")
+    length(brs) > 10 && (shown *= string(" and ", length(brs) - 10, " more"))
+    # the location does not start with "branch <k>": the stage-2 agreement
+    # and the stage-3 candidates read single elements from that prefix.
+    # `branches` carries the complete list (the location stops after ten),
+    # runse! marks the tap rows of these branches with it
+    push!(findings, (stage = :precheck, kind = :mesh_without_p_measurement, location = string("mesh of branches ", shown), evidence = "mesh without P measurement: solution may not be unique (no active power row on its branches or buses; a second converged state with turned-over angle differences is possible)", severity = :warning, branches = brs))
+  end
+  return findings
+end
 
 """
     validate_topology(net, measurements = net.measurements; kwargs...) -> NamedTuple
@@ -80,6 +208,14 @@ Checks (thresholds as sigma multiples, keywords mirror the
   flow measurement at this end) whose balance misses by more than
   `k * sqrt(sum sigma^2)`, for P and Q separately. Partially measured
   nodes and nodes inside closed-link clusters are skipped, never guessed.
+- `:mesh_without_p_measurement` (severity `:warning`): a mesh of the
+  branch graph (closed-link clusters fused as in the estimator) with no
+  active power row on its branches or buses. Q, |I| and Vm rows alone can
+  admit a second converged state with turned-over angle differences, so
+  the solution may not be unique. An injection row on a link cluster counts
+  only when every member is measured, as in the estimator. Structural, no
+  threshold; one finding per group of such meshes, naming its branches
+  (all of them in the extra field `branches`).
 """
 function validate_topology(net::Net, measurements::Vector{Measurement} = Measurement[m for m in net.measurements])
   # thresholds from the registry (state_estimation.topology_*, #381)
@@ -92,7 +228,7 @@ function validate_topology(net::Net, measurements::Vector{Measurement} = Measure
   active = [m for m in measurements if m.active]
   nby = _bus_name_by_idx(net)
   busname(b) = get(nby, Int(b), string(Int(b)))
-  reps, members = _topology_station_map(net)
+  reps, members = _station_map(net)
 
   flowTypes = (PflowMeas, QflowMeas, ImagMeas)
   isflow(m) = m.typ in flowTypes && m.branchIdx !== nothing
@@ -273,6 +409,9 @@ function validate_topology(net::Net, measurements::Vector{Measurement} = Measure
     end
   end
 
+  # 5) meshes without an active power row (uniqueness, not plausibility)
+  append!(findings, _topology_mesh_without_p(net, active, reps, members, busname))
+
   summary = isempty(findings) ? string("topology precheck: no findings (", n_checked_branches, " branches, ", n_checked_links, " links checked)") : string("topology precheck: ", length(findings), " finding(s): ", join(("$(f.kind) at $(f.location)" for f in findings), "; "))
   return (findings = findings, summary = summary, n_checked_branches = n_checked_branches, n_checked_links = n_checked_links)
 end
@@ -294,7 +433,7 @@ function _topology_auto_candidates(net::Net, measurements::Vector{Measurement}; 
   # caller's solver settings, the tight defaults would under-iterate) and
   # collect every switchable element touching a suspected station
   diag = runse_diagnostics(net, measurements)
-  reps, _ = _topology_station_map(net)
+  reps, _ = _station_map(net)
   for f in something(diag.topology_findings, NamedTuple[])
     f.kind == :topology_error_suspected_at_station || continue
     rep = f.station
@@ -343,7 +482,10 @@ function test_topology_hypotheses(net::Net, measurements::Vector{Measurement} = 
   length(cands) > max_candidates && (cands = cands[1:max_candidates])
   # baseline on an untouched working copy (the caller's net stays pristine)
   base_net = deepcopy(net)
-  base = _runse_configured!(base_net, measurements, hyp_cfg)
+  # the range check of runse! on every working copy (no log: the
+  # hypotheses are what-if runs); a toggled element can de-energize the
+  # bus of a 0 kV measurement, so it runs per copy
+  base = _runse_configured!(base_net, first(_se_range_check(base_net, measurements)), hyp_cfg)
   base_verdict = _band_test_verdict(base.objectiveJ, base.dof)
   nby = _bus_name_by_idx(net)
   busname(b) = get(nby, Int(b), string(Int(b)))
@@ -368,8 +510,10 @@ function test_topology_hypotheses(net::Net, measurements::Vector{Measurement} = 
     end
     hypothesis = current == :closed ? "actually open" : "actually closed"
     res = try
-      _runse_configured!(work, measurements, hyp_cfg)
+      _runse_configured!(work, first(_se_range_check(work, measurements)), hyp_cfg)
     catch err
+      # an abort ends the whole test, it is no inconclusive hypothesis
+      err isa PowerFlowAborted && rethrow()
       push!(rows, (element = label, kind = c.kind, idx = c.idx, current_status = current, hypothesis = hypothesis, j_before = base.objectiveJ, j_after = NaN, z_before = base_verdict.z_wh, z_after = NaN, verdict = :inconclusive, note = sprint(showerror, err), elapsed_s = (time_ns() - t0) / 1e9))
       continue
     end

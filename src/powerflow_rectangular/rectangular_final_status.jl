@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -263,7 +263,7 @@ end
 
 # The message of a run stopped by the switching cap: which setting stopped
 # it, at which value, and the buses that reached it, so the reader can raise
-# the cap or look at those machines (task 0.20.2: a stored max_switches of
+# the cap or look at those machines (0.20.2: a stored max_switches of
 # 2 was invisible in the Web UI, the old text said "max switching exceeded").
 function _max_switching_reason_text(net, switch_counts::AbstractDict, max_switches::Int)::String
   cap = max(max_switches, 1)
@@ -272,6 +272,52 @@ function _max_switching_reason_text(net, switch_counts::AbstractDict, max_switch
   bus_name = Dict{Int,String}(idx => String(name) for (name, idx) in net.busDict)
   names = String[string(get(bus_name, bus, "bus $(bus)"), " (", switch_counts[bus], "x)") for bus in hit]
   return string("Q-limit switching stopped: power_flow.qlimits.guard.max_switches = ", max_switches, " was reached by ", length(hit), " bus(es): ", join(names, ", "), ". Raise the value, or set power_flow.qlimits.guard.freeze_after_repeated_switching = false to let these buses keep switching.")
+end
+
+# The reasons of a run that used up power_flow.max_iter without converging,
+# see _max_iter_stop_reason.
+const QLIMIT_MAX_ITER_STOP_REASONS = (:iteration_limit, :type_identification_divergence, :numerical_divergence)
+
+# How many of the last iterations _max_iter_stop_reason looks at.
+const MAX_ITER_STOP_WINDOW = 3
+
+"""
+    _max_iter_stop_reason(pre_switch_mismatch, type_switched, tol; window = 3) -> Symbol
+
+The reason of a Newton run that used up `power_flow.max_iter` without
+converging, from the last `window` iterations. `pre_switch_mismatch[k]` is
+the largest mismatch of iteration `k` measured before the Q-limit handling
+of that iteration switched any bus, `type_switched[k]` whether it switched
+one (PV to PQ or back). Checked in this order:
+
+- `:type_identification_divergence`: a bus type changed in the window and
+  the smallest pre-switch mismatch there is at most `10 tol`. The equations
+  are almost solved, the PV/PQ assignment does not settle (the
+  identification divergence of Zhao, Chiang, Li, Ju, PSCC 2008);
+- `:iteration_limit`: no type change in the window, the mismatch fell
+  from each iteration to the next over the full window, and the last
+  mismatch is below the first mismatch of the run: the run was still
+  converging when the limit came;
+- `:numerical_divergence`: everything else: the mismatch did not fall,
+  types changed at a large mismatch, the run fell over the window but ends
+  above the mismatch it started with (it climbed first), or the run was
+  shorter than the window.
+
+The window and the factor 10 are fixed, there is no configuration key.
+"""
+function _max_iter_stop_reason(pre_switch_mismatch::AbstractVector{<:Real}, type_switched::AbstractVector{Bool}, tol::Real; window::Int = MAX_ITER_STOP_WINDOW)::Symbol
+  n = min(length(pre_switch_mismatch), length(type_switched))
+  n == 0 && return :numerical_divergence
+  first_k = max(n - window + 1, 1)
+  recent_switch = any(type_switched[k] for k in first_k:n)
+  recent_switch && minimum(pre_switch_mismatch[k] for k in first_k:n) <= 10 * tol && return :type_identification_divergence
+  falling = n >= window && all(pre_switch_mismatch[k] < pre_switch_mismatch[k-1] for k in (first_k+1):n)
+  # a run that climbed away from its start and falls again at the end is
+  # no run close to convergence (sp_case60 with a narrow band climbs to
+  # 1e+3 and more and then falls for a while)
+  below_start = pre_switch_mismatch[n] < pre_switch_mismatch[1]
+  !recent_switch && falling && below_start && return :iteration_limit
+  return :numerical_divergence
 end
 
 """
@@ -310,13 +356,15 @@ function _build_rectangular_final_status(
   final_q_check_skip::Symbol = :no_converged_solution;
   switch_counts::AbstractDict = Dict{Int,Int}(),
   max_switches::Int = 0,
+  pre_switch_history::AbstractVector{<:Real} = Float64[],
+  type_switched::AbstractVector{Bool} = Bool[],
 )
   final_reason = converged ? :none : rejection_reason
 
-  # Reclassify plain mismatch failures when active-set churn is clearly visible.
-  if final_reason == :nr_mismatch_not_converged && qlimit_active_set_changes >= 3
-    final_reason = :nr_mismatch_not_converged_active_set_unstable
-  end
+  # a run at max_iter carries one of QLIMIT_MAX_ITER_STOP_REASONS, set by
+  # the solver from the last iterations (_max_iter_stop_reason); the former
+  # reclassification as _active_set_unstable counted switches over the
+  # whole run, without regard to the mismatch
   if !isempty(history) && !isfinite(history[end])
     final_reason = :nr_nonfinite
   end
@@ -344,12 +392,18 @@ function _build_rectangular_final_status(
     final_q_check_buses = isnothing(final_q_check) ? "" : final_q_check.buses,
     final_pv_voltage_residual = final_pv_voltage_residual,
     final_mismatch = isempty(history) ? Inf : history[end],
+    # the largest mismatch of each iteration before its Q-limit handling
+    # switched a bus (mismatch_history holds the value after the switch,
+    # the mismatch of the equations the next Newton step solves), and the
+    # iterations in which a bus type changed
+    mismatch_history_pre_switch = collect(Float64, pre_switch_history),
+    type_switch_iterations = [k for k in eachindex(type_switched) if type_switched[k]],
     initial_mismatch = isempty(history) ? NaN : history[1],
     best_mismatch = isempty(finite_history) ? NaN : minimum(finite_history),
     nr_initial_mismatch = isempty(history) ? NaN : history[1],
     nr_final_mismatch = isempty(history) ? Inf : history[end],
     mismatch_diagnostics...,
-    pv_pq_switching_events = length(net.qLimitLog),
+    pv_pq_switching_events = qlimit_pv_to_pq_event_count(net),
     qlimit_active_set_changes = qlimit_active_set_changes,
     qlimit_reenable_events = qlimit_reenable_events,
     oscillating_buses = oscillating_buses,
@@ -390,6 +444,10 @@ end
 """
 Store final rectangular solver status and optionally print convergence summary.
 
+A wrong-branch voltage finding after a start without angles behind a phase
+shifter (`_wrong_branch_pst_start_hint`) is logged as a warning at every
+verbosity level, since the hint names the configuration key that avoids it.
+
 # Why
 Status persistence and user-visible summary should be emitted from one place to
 avoid divergence between stored diagnostics and console output.
@@ -399,5 +457,7 @@ function _store_and_print_rectangular_final_status!(net, status, verbose::Int)
   if verbose > 0
     _print_rectangular_convergence_summary(stdout, stored_status)
   end
+  hint = _wrong_branch_pst_start_hint(stored_status)
+  isempty(hint) || @warn string("Wrong-branch check: ", uppercase(String(stored_status.wrong_branch_status)), " (", stored_status.wrong_branch_reason, "). ", hint)
   return stored_status
 end

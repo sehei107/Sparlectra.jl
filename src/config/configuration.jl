@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,11 +40,17 @@ Base.@kwdef struct StartModeConfig
   measure_candidates::Bool = true
   accept_unmeasured_dc_start::Bool = false
   dc_seed_unconditional::Bool = false
-  # flat starts only (#463 / task_close_all_0302 B): the start projection
-  # also measures the flat profile with every PQ magnitude scaled by the
-  # product of the off-nominal transformer ratios on its path from the
-  # reference; see _ratio_profile_factors
+  # a candidate of the start projection on a flat seed (rescue ladder,
+  # auto mode, keyword calls): the flat profile with every PQ magnitude
+  # scaled by the product of the off-nominal transformer ratios on its path
+  # from the reference; a run-level flat start switches it off for the whole
+  # run (_flatstart_profile_config). See _ratio_profile_factors
   ratio_profile::Bool = true
+  # flat start (and a stored start without angles): a bus the reference
+  # reaches only across phase-shifting transformers starts at the slack angle
+  # plus the shift sum of a path with the fewest shifters
+  # (_flat_start_shift_angles); off, every bus starts at the slack angle
+  rotate_behind_pst::Bool = false
   reuse_import_data::Bool = true
   blend_lambdas::Vector{Float64} = [0.25, 0.5, 0.75]
   dc_angle_limit_deg::Float64 = 60.0
@@ -189,7 +195,7 @@ used when `power_flow.solver == :dc`.
 
 `angle_reference_deg` is the uniform angle offset added to every bus after
 the slack-referenced linear solve (the slack bus itself is fixed at this
-reference) — see [`solve_dc_powerflow`](@ref) for why this post-hoc shift is
+reference), see [`solve_dc_powerflow`](@ref) for why this post-hoc shift is
 exact. `ignore_out_of_service` documents that `status == 0` branches are
 always excluded from the B′ assembly (there is currently no supported way
 to include them; the field exists for forward compatibility with the YAML
@@ -200,7 +206,7 @@ Base.@kwdef struct DcPowerFlowConfig
   ignore_out_of_service::Bool = true
   # Run the standalone DC power flow when the AC solve (and the rescue
   # ladder, if enabled) did not converge. The AC status stays "not
-  # converged" — the fallback only leaves a usable DC state in the net.
+  # converged": the fallback only leaves a usable DC state in the net.
   fallback::Bool = false
 end
 
@@ -212,18 +218,18 @@ reference while the island's active-power imbalance is absorbed by a set of
 participating generators via one scalar `lambda_P` per island.
 
 # Fields
-- `enabled::Bool`: off by default — disabled reproduces the classical
+- `enabled::Bool`: off by default, disabled reproduces the classical
   single-slack behavior bit-for-bit.
-- `p_mode::Symbol`: how raw participation weights are derived —
+- `p_mode::Symbol`: how raw participation weights are derived:
   `:pg_weighted` (scheduled Pg), `:pmax_weighted` (maxP),
   `:headroom_weighted` (`max(maxP − Pg, 0)`), `:imported`
   (`ProSumer.participationFactor`, filled from MATPOWER `APF` /
   CGMES `GeneratingUnit.normalPF`), `:explicit` (the `weights` table).
-- `respect_p_limits::Bool`: diagnostic only — WARN when a participant's
+- `respect_p_limits::Bool`: diagnostic only, WARN when a participant's
   corrected P leaves `[minP, maxP]`; no re-dispatch.
 - `fallback::Symbol`: `:error` throws when an island has no valid participant;
   `:ref_only` falls back to the classical slack for that island with a warning.
-- `weights::Dict{String,Float64}`: `:explicit` mode only — bus name (or bus
+- `weights::Dict{String,Float64}`: `:explicit` mode only, bus name (or bus
   index as string) → weight.
 """
 Base.@kwdef struct DistributedSlackConfig
@@ -238,9 +244,65 @@ const DISTRIBUTED_SLACK_P_MODE_VALUES = (:pg_weighted, :pmax_weighted, :headroom
 const DISTRIBUTED_SLACK_FALLBACK_VALUES = (:error, :ref_only)
 
 """
+    ContingencyEventsConfig
+
+Correlated contingency events (`contingency.events.*`): elements that trip
+together, added to a generated N-1 list of an SCF case
+([`generateCorrelatedEvents`](@ref)).
+
+# Fields
+- `enabled::Bool`: add the events at all (default `false`).
+- `double_circuits::Bool`: branches with the same two endpoints (default
+  `true`, effective once `enabled`).
+- `busbars::Bool`: one busbar section: its branches and its closed
+  couplers (default `false`).
+- `substations::Bool`: a whole station, every branch at all its sections
+  (default `false`).
+- `links::Bool`: each closed coupler alone (default `false`).
+- `name_groups::Bool`: branches whose file names share a stem (default
+  `false`).
+- `name_stem_pattern::String`: the regular expression of the circuit
+  suffix a name group strips (default `"[ _#(-]?[0-9]{1,2}[)]?\$"`).
+- `max_members::Int`: events with more members are skipped (default `6`).
+"""
+Base.@kwdef struct ContingencyEventsConfig
+  enabled::Bool = false
+  double_circuits::Bool = true
+  busbars::Bool = false
+  substations::Bool = false
+  links::Bool = false
+  name_groups::Bool = false
+  name_stem_pattern::String = "[ _#(-]?[0-9]{1,2}[)]?\$"
+  max_members::Int = 6
+end
+
+const CONTINGENCY_PAIR_RULE_VALUES = (:all,)
+
+"""
+    ContingencyPairsConfig
+
+N-2 branch pairs (`contingency.pairs.*`) added to a generated N-1 list of an
+SCF case ([`generateBranchPairs`](@ref)).
+
+# Fields
+- `enabled::Bool`: add the pairs (default `false`).
+- `rule::Symbol`: which pairs; `:all` is every unordered pair of closed
+  branches (the full enumeration).
+- `max_pairs::Int`: a run with more pairs stops with a message before
+  anything is solved (default `50000`); there is no silent truncation.
+"""
+Base.@kwdef struct ContingencyPairsConfig
+  enabled::Bool = false
+  rule::Symbol = :all
+  max_pairs::Int = 50000
+end
+
+"""
     ContingencyConfig
 
-Configuration of the N-1 contingency batch (issue #331).
+Configuration of the contingency batch (issue #331), with the correlated
+events (`events`, a [`ContingencyEventsConfig`](@ref)) and the N-2 pairs
+(`pairs`, a [`ContingencyPairsConfig`](@ref)) of #355.
 
 # Fields
 - `max_iter::Int`: iteration limit of every outage and scenario solve
@@ -299,6 +361,8 @@ Base.@kwdef struct ContingencyConfig
   # counts
   warm_cold_check::Bool = false
   warm_cold_check_margin_pu::Float64 = 0.02
+  events::ContingencyEventsConfig = ContingencyEventsConfig()
+  pairs::ContingencyPairsConfig = ContingencyPairsConfig()
 end
 
 # the default of the cold-check margin, one source with the struct above
@@ -315,8 +379,8 @@ feeder impedance `z = Un²/Sk''`, so the connection-bus voltage reacts to
 loading instead of being held ideally stiff.
 
 # Fields
-- `enabled::Bool`: off by default — the classical ideal slack.
-- `source::Symbol`: where `Sk''`/`R/X` come from — `:auto` prefers the
+- `enabled::Bool`: off by default, the classical ideal slack.
+- `source::Symbol`: where `Sk''`/`R/X` come from: `:auto` prefers the
   values a CGMES delivery declares on the slack bus's
   `ExternalNetworkInjection` and falls back to the config numbers below
   (MATPOWER/DTF carry no such data); `:config` always uses the config
@@ -332,6 +396,27 @@ Base.@kwdef struct ExternalGridConfig
 end
 
 const EXTERNAL_GRID_SOURCE_VALUES = (:auto, :config)
+
+# power_flow.plausibility.vmin_warn: one source for the struct and the loader
+const DEFAULT_PLAUSIBILITY_VMIN_WARN_PU = 0.7
+
+"""
+    PowerFlowPlausibilityConfig
+
+Plausibility check of a numerically converged AC power-flow solution. The
+check never changes the run status; it only reports.
+
+# Fields
+- `vmin_warn::Float64`: lowest acceptable voltage magnitude in pu at an
+  energized bus, on every voltage level. A converged solution with a bus
+  below it gets a warning that names the lowest bus and its voltage, in the
+  run result (`diagnostics.plausibility_warning`) and in the log. A Newton
+  solve can converge on the low-voltage branch of a heavily loaded network;
+  this check makes such a result visible. `0` switches the check off.
+"""
+Base.@kwdef struct PowerFlowPlausibilityConfig
+  vmin_warn::Float64 = DEFAULT_PLAUSIBILITY_VMIN_WARN_PU
+end
 
 """
     ApslfConfig
@@ -478,6 +563,7 @@ Base.@kwdef struct PowerFlowConfig
   dc::DcPowerFlowConfig = DcPowerFlowConfig()
   distributed_slack::DistributedSlackConfig = DistributedSlackConfig()
   external_grid::ExternalGridConfig = ExternalGridConfig()
+  plausibility::PowerFlowPlausibilityConfig = PowerFlowPlausibilityConfig()
 end
 
 const WRONG_BRANCH_DETECTION_VALUES = [:off, :warn, :fail, :rescue]
@@ -528,6 +614,169 @@ Base.@kwdef struct ObservabilityConfig
 end
 
 """
+    BadDataConfig(; substitute_sigma_factor = 3.0)
+
+Settings of the `state_estimation.bad_data` block.
+
+`substitute_sigma_factor` (default 3.0, at least 1): a voltage measurement
+outside 0.5 to 1.5 pu (0 kV and non-finite values included) on a bus the
+switching state energizes is a gross error. Before the WLS it is replaced
+by a pseudo measurement at the imported state of the bus (the `SvVoltage`
+of a CGMES import, else 1.0 pu) whose sigma is the sigma of the row times
+this factor (reason `range_check_substituted`).
+
+Library callers set it for one call with
+`with_state_estimation_config(bad_data = Sparlectra.BadDataConfig(substitute_sigma_factor = 5.0)) do ... end`.
+"""
+Base.@kwdef struct BadDataConfig
+  # the substitute is a model value, not a reading: three times the sigma
+  # of the meter keeps it from pulling the bus harder than the meter would
+  # have, and leaves it well inside the WLS (default 3)
+  substitute_sigma_factor::Float64 = 3.0
+end
+
+"""
+    SEStartModeConfig(; rotate_behind_pst = false)
+
+Settings of the `state_estimation.start_mode` block, the start value of the
+estimator next to `state_estimation.flatstart`.
+
+`rotate_behind_pst` (default `false`): on the flat start a bus that the
+slack reaches only across phase-shifting transformers starts at the sum of
+their shifts on a path with the fewest shifters, a bus that a path without
+shifter reaches keeps the slack angle. The angles come from the same
+function as the power flow flat start under
+`power_flow.start_mode.rotate_behind_pst`. Off, every angle of the flat
+start is 0. No effect on a start from the stored state.
+
+Library callers set it for one call with
+`with_state_estimation_config(start_mode = Sparlectra.SEStartModeConfig(rotate_behind_pst = true)) do ... end`.
+"""
+Base.@kwdef struct SEStartModeConfig
+  rotate_behind_pst::Bool = false
+end
+
+"""
+    TapEstimationConfig(; enabled = true, fallback = true, impedance_correction = :auto, exclude = String[], include_machine_transformers = false)
+
+Settings of the transformer tap estimation, the
+`state_estimation.tap_estimation` block of the configuration.
+
+`enabled` (default `true`) switches the tap estimation on. With `false` no
+regulator becomes a state, even one released with `setTapEstimation!`:
+every changer keeps its transferred step, nothing is written back, and each
+released changer is reported with `status = :not_estimated`,
+`reason = :disabled`.
+
+`fallback` (default `true`): when the run with tap estimation does not
+converge (the estimation run, the fixation run, or non-finite values),
+`runse!` solves once more without tap estimation on the same measurements
+and start values, and that second run is the result
+(`tapFixation.fallback_used`, every changer `reason = :fallback_not_converged`).
+The SE service also falls back when the fixed estimate fits worse than its
+staged pre-solve (acceptance rule `worse_fit`, `reason = :fallback_worse_fit`).
+With `false` neither runs and the first run is returned as it is.
+
+`impedance_correction` (`:auto` or `:off`, see
+`STATE_ESTIMATION_TAP_IMPEDANCE_CORRECTION_VALUES`) acts on the analytic
+correction only. A transformer with per-step data (tap table rows with r
+and x, the reactance curve of a phase tap changer with `xMin`/`xMax`,
+`TapStepImpedance` factors) always moves its impedance with the step by
+these data, and the analytic correction is off for it under both values.
+A typed model follows the power flow (`resolve_winding_taps`): its
+`x_min`/`x_max` curve or x table follows the step under both values, and
+the correction factor on r next to the curve applies under `:auto` only.
+Without per-step data `:auto` applies the impedance correction of typed
+models under `model.tap_changer_model = impedance_correction`, and `:off`
+keeps the impedance of the start position. The rows of `tapEstimates` name
+the source per transformer (`reactance_source`: `:table`, `:analytic`,
+`:nominal`).
+
+`exclude` (default empty) lists transformers that never become tap states,
+by name or CGMES mRID. Such a changer keeps its transferred step and is
+reported with `status = :not_estimated`, `reason = :excluded`; its step is
+not calculated either. An entry that matches no transformer of the net gives
+a warning naming it (`runse!`, `runse_diagnostics`, the SE service).
+
+`include_machine_transformers` (default `false`): a machine (generator
+step-up) transformer is not estimated. Its step is calculated after the
+estimation from the AVR setpoint and the machine telemetry (the method of
+`calcMachineTrafoTapFromSE`, run by `runse!` with `update_net = true`),
+`status = :calculated`, `reason = :machine_transformer`; without a result it
+stays `:not_estimated` with that reason. Without a Q measurement on every
+bus of the machine node it stays `:not_estimated` with
+`reason = :q_not_measured_in_group` and its transferred step; without a P
+measurement the scheduled P is used (`note = :p_from_schedule`). `true` estimates machine
+transformers like the others. Both keys act on released changers, also on
+one released with `setTapEstimation!`, also in the run of the fallback; with
+`enabled = false` every changer says `:disabled` and nothing is calculated.
+
+Library callers set it for one call with
+`with_state_estimation_config(tap_estimation = TapEstimationConfig(impedance_correction = :off)) do ... end`.
+The keyword constructor does not validate; the configuration parser and the
+override validation refuse other values with the key named.
+"""
+Base.@kwdef struct TapEstimationConfig
+  enabled::Bool = true
+  fallback::Bool = true
+  impedance_correction::Symbol = :auto
+  exclude::Vector{String} = String[]
+  include_machine_transformers::Bool = false
+end
+
+"""
+    SESigmaLevel(; vn_kv, p_mw = nothing, q_mvar = nothing, i_a = nothing, u_kv = nothing, rel_pct = 0.0)
+
+One row of `state_estimation.sigma_by_voltage_level`: the measurement
+standard deviations of one voltage level in physical units. `vn_kv` is the
+nominal voltage of the level in kV (in a configuration file the key of the
+row), matched against the bus nominal voltage (to 1e-6 kV). `p_mw` (MW, P flows and injections), `q_mvar` (MVAr,
+Q flows, injections and shunt bays), `i_a` (A, current magnitudes) and
+`u_kv` (kV, voltage magnitudes) are the absolute sigmas; `nothing` leaves
+that measurement type on the global default. `rel_pct` (percent of the
+measured value, default 0) raises a set column to
+`max(absolute, rel_pct / 100 * |value|)`.
+
+The keyword constructor validates like the configuration parser: `vn_kv`
+and every set sigma finite and positive, at least one absolute sigma set,
+`rel_pct` finite and not negative; a violation is an `ArgumentError`. The State-Estimation
+Configuration page of the manual describes the table.
+"""
+struct SESigmaLevel
+  vn_kv::Float64
+  p_mw::Union{Nothing,Float64}
+  q_mvar::Union{Nothing,Float64}
+  i_a::Union{Nothing,Float64}
+  u_kv::Union{Nothing,Float64}
+  rel_pct::Float64
+end
+
+SESigmaLevel(; vn_kv, p_mw = nothing, q_mvar = nothing, i_a = nothing, u_kv = nothing, rel_pct = 0.0) = _parse_sigma_level_row("row", _sigma_level_vn("row", vn_kv), Dict{String,Any}("p_mw" => p_mw, "q_mvar" => q_mvar, "i_a" => i_a, "u_kv" => u_kv, "rel_pct" => rel_pct))
+
+"""
+    ZERO_INJECTION_SIGMA
+
+Default sigma of a zero-injection pseudo-measurement in MVA (MW for the
+active, Mvar for the reactive row), the unit of the injection rows.
+
+A passive bus injects nothing, so the row is a CONSTRAINT rather than a
+reading, and the sigma only says how hard it is enforced. The former 1e-6
+means a weight of 1e12, and on a large network that is not "tight", it is
+crushing: on a 25000-bus case with 27268 such rows the estimation did not
+converge in 30 iterations, reported an objective of 3.8e15 per degree of
+freedom and losses 2069 percent above the reference. The same set with 1e-3
+converges in 7 iterations to J/dof 4.97 and losses within 0.02 percent.
+
+1e-3 still binds the bus far tighter than any real transducer (the tightest
+real rows in that set carry 0.01), while leaving the normal equations
+solvable.
+
+It is the default of `state_estimation.zero_injection_sigma_mva`, the sigma
+the code that adds zero-injection rows reads. Change the default here.
+"""
+const ZERO_INJECTION_SIGMA = 1.0e-3
+
+"""
     StateEstimationConfig
 
 Typed state-estimation configuration for future SE runners and diagnostics.
@@ -566,6 +815,15 @@ Base.@kwdef struct StateEstimationConfig
   # the result, which is what made 30 look sufficient.
   max_iter::Int = 50
   flatstart::Bool = true
+  # start ladder: a WLS from the flat start that does not converge is solved
+  # once more from the voltages stored in the net (the case state of the
+  # import), when the net has such a state. Measured on case6495rte with a
+  # generated set: 50 iterations from the flat start without convergence,
+  # 3 iterations from the case voltages.
+  start_ladder::Bool = true
+  # start_mode.rotate_behind_pst: the flat start turned behind phase
+  # shifters like the power flow flat start (SEStartModeConfig)
+  start_mode::SEStartModeConfig = SEStartModeConfig()
   jac_eps::Float64 = 1.0e-6
   update_net::Bool = true
   pmu_ref_offset::Symbol = :auto
@@ -576,6 +834,28 @@ Base.@kwdef struct StateEstimationConfig
   # data; the FIXED mechanical positions reach the branch fields only on
   # explicit request and only from a converged, fixed run
   update_taps::Bool = false
+  # read measurement tables (CSV keyed by mRID or name, one set per timestamp) in the
+  # SE service; on by default since 0.50.0 (the table is the measurement
+  # format the generator writes and the shipped sets use), a table given
+  # while off is refused with this key named
+  measurement_table::Bool = true
+  # zero-injection rows (ZI) at passive buses without an injection
+  # measurement: :on adds them in every SE path (measurement generator,
+  # measurement CSV, case file, measurement table) as weighted rows,
+  # :constraint adds the same rows and solves every ZI row as an equality
+  # constraint (Lagrange), :off adds none
+  zero_injection::Symbol = :on
+  # sigma of one zero-injection row under zero_injection = on, in MVA (MW,
+  # Mvar), the unit of the injection rows. Default ZERO_INJECTION_SIGMA, the
+  # value every ZI row carried before the key existed. Read where ZI rows
+  # are made: addZeroInjectionMeasurements!, applyMeasurementSet!, the
+  # measurement generator (as its floor) and the sigma floor of a
+  # measurement table.
+  zero_injection_sigma_mva::Float64 = ZERO_INJECTION_SIGMA
+  # measurement sigmas per voltage level in physical units, keyed by the
+  # nominal voltage in the file (rows sorted by vn_kv, highest first); empty: every row without its own sigma takes the
+  # global default, as before the key existed
+  sigma_by_voltage_level::Vector{SESigmaLevel} = SESigmaLevel[]
   robust::Bool = false
   robust_start_iteration::Int = 3
   # bad-data thresholds (0.10.0, GUI-exposed). Two decisions, and
@@ -609,10 +889,12 @@ Base.@kwdef struct StateEstimationConfig
   suppression_sigma::Float64 = 2000.0
   # budget of the sequential elimination: how many rows one diagnostics run
   # may remove at most. Not a threshold but a stop condition, so it is an
-  # Int and 0 disables the elimination entirely. 3 is the historical
-  # default; a set that needs more than three removals to become plausible
-  # is usually a model or topology problem, not bad telemetry.
-  max_eliminations::Int = 3
+  # Int and 0 disables the elimination entirely. One row per round, so this
+  # is also the round limit of the elimination loop: at most 5 rounds
+  # (since the range check of the voltage measurements; the default was 3
+  # before). A set that needs more removals to become plausible is usually a
+  # model or topology problem, not bad telemetry.
+  max_eliminations::Int = 5
   rank_tol_factor::Float64 = 10.0
   takahashi_min_states::Int = 200
   # sparse LU of the WLS normal equations when the gain matrix is not
@@ -652,12 +934,14 @@ Base.@kwdef struct StateEstimationConfig
   topology_kcl_k::Float64 = 4.0
   topology_cluster_min::Int = 3
   observability::ObservabilityConfig = ObservabilityConfig()
+  tap_estimation::TapEstimationConfig = TapEstimationConfig()
+  bad_data::BadDataConfig = BadDataConfig()
 end
 
 """
     CGMESImportConfig
 
-Options of the `cgmes_import` configuration block — the ENTSO-E CGMES import
+Options of the `cgmes_import` configuration block, the ENTSO-E CGMES import
 (see `importCGMES`). `path` accepts a folder, a ZIP, or several of both
 (base case plus boundary set) separated by `;`.
 
@@ -674,6 +958,30 @@ Options of the `cgmes_import` configuration block — the ENTSO-E CGMES import
   own bus.
 - `ignore_connected::Bool`: diagnostic override that treats every terminal as
   connected, for snapshots whose SSH flags contradict their own SV state.
+- `map_energy_source::Bool`: map every in-service, connected `EnergySource`
+  as a fixed PQ injection (`p = -activePower`, `q = -reactivePower` from the
+  SSH, load sign convention). Off by default: the objects are then left out
+  and counted in one import notice.
+- `map_power_electronics::Bool`: map every in-service, connected CGMES 3.0
+  `PowerElectronicsConnection` as an injection (`p = -p`, `q = -q` from the
+  SSH, load sign convention), PV with an enabled voltage
+  `RegulatingControl`, else PQ. Off by default: the objects are then left
+  out and counted in one import notice.
+- `shunt_control::Bool`: attach a switched-bank voltage controller
+  (`ShuntVoltageControl`) to every mapped `LinearShuntCompensator` whose
+  `controlEnabled` and voltage `RegulatingControl` are set and regulate its
+  own bus. Off by default: the banks stay at their SSH sections.
+- `read_dynamics::Bool`: read the DY profile and give the machines their
+  `DynamicData` (inertia, damping, droop, governor time constant; see
+  `importCGMES`). Off by default: the DY file is skipped. No calculation
+  reads the data; the island slack choice reads the unit type.
+- `equivalent_injection_as_source::Bool`: import an `EquivalentInjection`
+  on the SV angle reference node or on a boundary node as a
+  voltage-regulating source at the SV voltage of its node (the one on the
+  SV angle reference is the slack), with the short-circuit power from its
+  `r`/`x` where the EQ states them. Off by default: the injection stays as
+  mapped (PQ at the SSH p and q, PV with `regulationStatus`, slack when it
+  holds the SV angle reference).
 - `vset_min_pu`, `vset_max_pu::Float64`: plausibility band for a voltage
   `RegulatingControl.targetValue`, in p.u. of the regulated bus's nominal
   voltage. A target outside the band is treated as a placeholder: it is ignored
@@ -681,12 +989,16 @@ Options of the `cgmes_import` configuration block — the ENTSO-E CGMES import
   a `warning:` message. Widen the band to accept a delivery's own values, or set
   `vset_min_pu = 0` and a large `vset_max_pu` to disable the check entirely.
 - `multi_slack::Bool`: give every electrical island its own SV-declared angle
-  reference (at most one per island). Required for multi-island deliveries —
+  reference (at most one per island). Required for multi-island deliveries:
   without it every island beyond the primary one has no reference and the
   island-wise power flow refuses to run. Disable only to force the legacy
   single-reference behavior.
+- `equivalent_branch_min_z_pu::Float64`: an `EquivalentBranch` whose
+  impedance (`|z12|` and `|z21|`, per unit on the base of terminal 1) lies
+  below this value builds no branch: its two buses are joined as a link,
+  with a notice, like a closed switch. Default `1e-6`; 0 switches it off.
 - `start_values::Symbol`: Newton-Raphson start state for CGMES runs. `:flat`
-  (default) uses a synthetic flat start — the solver earns the solution
+  (default) uses a synthetic flat start: the solver earns the solution
   itself; `:sv` starts from the delivery's imported `SvVoltage` state and
   force-disables the competing start-value machines for the run. On CGMES
   runs this key wins over `power_flow.flatstart` /
@@ -700,13 +1012,19 @@ Base.@kwdef struct CGMESImportConfig
   tap_control::Bool = false
   machine_control::Bool = false
   ignore_connected::Bool = false
+  map_energy_source::Bool = false
+  map_power_electronics::Bool = false
+  shunt_control::Bool = false
+  read_dynamics::Bool = false
+  equivalent_injection_as_source::Bool = false
   vset_min_pu::Float64 = 0.5
   vset_max_pu::Float64 = 1.5
   multi_slack::Bool = true
+  equivalent_branch_min_z_pu::Float64 = 1e-6
   start_values::Symbol = :auto
   placeholder_guards::Symbol = :warn_skip
   # Reconstruct missing nominal voltages (SV snap + transformer ratedU +
-  # propagation) when the BaseVoltage catalog is absent — see
+  # propagation) when the BaseVoltage catalog is absent, see
   # _inferNominalVoltages. Pair with require_boundary = false.
   infer_base_voltages::Bool = false
   # HVDC converter handling (#297 Draft B): :injections keeps the Stage-0
@@ -718,19 +1036,28 @@ end
 """
     ShortCircuitConfig
 
-Options of the `short_circuit` configuration block — the IEC 60909 balanced
+Options of the `short_circuit` configuration block, the IEC 60909 balanced
 short-circuit evaluation (`runShortCircuit!`).
 
 # Fields
 - `c_factor::Float64`: scalar override for the IEC 60909-0 voltage factor
   `c`. `0.0` (default) selects the hardcoded Table-1 values by nominal
   voltage level and case (`c_max`/`c_min`); a positive value replaces the
-  table for every bus — intended for expert/verification runs where a worked
+  table for every bus, intended for expert/verification runs where a worked
   example prescribes the factor. A configurable per-voltage-level table is
   not configurable.
+- `converter_current_factor::Float64`: fault current of a converter-connected
+  unit (`PowerElectronicsConnection` without `maxIFault`, synchronous
+  machine on a wind or solar unit), as a multiple of its rated current
+  `ratedS/(sqrt(3)*ratedU)`. `0.0` (default) is off: such a unit feeds
+  nothing and its island is flagged as a lower bound. A positive value
+  makes it a current source of that size, flagged as a substitute; a
+  stated `maxIFault` always wins. The value is a manufacturer figure to be
+  set per case; about 1.0 to 1.5 is the usual range, as orientation only.
 """
 Base.@kwdef struct ShortCircuitConfig
   c_factor::Float64 = 0.0
+  converter_current_factor::Float64 = 0.0
   # all-bus Thevenin sweep strategy: :auto picks the Takahashi selected
   # inverse for islands with at least takahashi_min_buses buses (measured
   # 34x to 264x over per-bus solves, machine-precision identical, automatic
@@ -772,10 +1099,10 @@ version-0 files are rewritten through the alias table).
 
 `tap_changer_model` selects how transformer tap changers act on the
 equivalent circuit:
-- `:ideal` — tap steps only change the complex winding ratio; the series
+- `:ideal`: tap steps only change the complex winding ratio; the series
   impedance keeps its neutral-position value (no impedance feedback;
   previous Sparlectra behavior).
-- `:impedance_correction` — tap steps additionally re-refer the transformer
+- `:impedance_correction`: tap steps additionally re-refer the transformer
   series impedance through the tapped winding (R and X scaled with
   `|1 + f·e^(jφ)|²`, implemented centrally in `src/equicircuit.jl`).
 The option applies to all transformers of an imported case and is read by
@@ -787,10 +1114,15 @@ artifact. `auto_profile_max_fit_pu` (default 0.1) is the largest power
 mismatch (pu, worst bus) at which the stored VM/VA columns still count as a
 solved state: when the best of the eight convention readings scores above
 it, the scan recommends no convention change, because a state that fits no
-reading says nothing about the file's convention. `net_cache_enabled` gates
-the binary net cache (active only while `auto_profile` is `:off`).
+reading says nothing about the file's convention.
 `preallocate_network`/`preallocate_min_buses` control container
 preallocation for large cases.
+
+`nominal_frequency_hz` (default 50.0, positive) is the system frequency of
+the network. An import sets `net.nominal_frequency_hz` from it when the case
+states no frequency (an SCF `meta.f_nom` wins); a new `Net` starts with it.
+The field turns a line capacitance into a susceptance (`addACLinePerKm!`,
+SCF/PGM `c1`); the MATPOWER conversion to SCF writes it as `f_nom`.
 """
 Base.@kwdef struct ModelConfig
   bus_shunt_model::Symbol = :admittance
@@ -798,9 +1130,9 @@ Base.@kwdef struct ModelConfig
   auto_profile::Symbol = :off
   auto_profile_log::Bool = true
   auto_profile_max_fit_pu::Float64 = 0.1
-  net_cache_enabled::Bool = false
   preallocate_network::Symbol = :auto
-  preallocate_min_buses::Int = 1000
+  preallocate_min_buses::Int = 500
+  nominal_frequency_hz::Float64 = 50.0
 end
 
 """
@@ -811,7 +1143,7 @@ Typed MATPOWER export configuration.
 `write_solution` selects whether [`writeMatpowerCasefile`](@ref) writes the
 solved AC power-flow state back into the exported case:
 - `true` (default): `mpc.bus` `VM`/`VA` reflect the solved node state and
-  `mpc.branch` gains the standard MATPOWER result columns 14–17
+  `mpc.branch` gains the standard MATPOWER result columns 14-17
   (`PF`, `QF`, `PT`, `QT`), sourced from the existing branch-flow report path.
   A `mpc.sparlectra.solution_written = 1` marker documents this. If the network
   has not been solved, the exporter warns and falls back to the 13-column
@@ -960,8 +1292,10 @@ Base.@kwdef struct OutputConfig
   # `detailed_result_csv_format`/`detailed_result_csv_semicolon` parameters;
   # those are still accepted as a per-request override (deprecated alias,
   # issue #376) and, when given, win over this config value for the whole
-  # run so existing API/Web UI callers keep working unchanged.
-  csv_format::Symbol = :technical
+  # run so existing API/Web UI callers keep working unchanged. `auto` (the
+  # default since 0.32.0) follows the regional settings of the machine at
+  # write time, see `system_csv_format`.
+  csv_format::Symbol = :auto
   logfile_diagnostics::Symbol = :compact
   logfile_performance::Symbol = :compact
   logfile_warnings::Symbol = :table
@@ -986,6 +1320,14 @@ Base.@kwdef struct WebUIConfig
   # carries no documentation of its own). Override for a local docs build,
   # the dev site or a pinned version folder. A link only, never fetched.
   docs_base_url::String = "https://welthulk.github.io/Sparlectra.jl/"
+  # Size (pixels) of the app window the Web UI opens, and its position once
+  # Stop Web UI has saved one (nothing = the browser places the window).
+  # Stop Web UI writes the current size and position here unless the window
+  # is minimized; Ctrl+C and close(server) write nothing.
+  window_width::Int = 1500
+  window_height::Int = 950
+  window_x::Union{Nothing,Int} = nothing
+  window_y::Union{Nothing,Int} = nothing
 end
 
 """
@@ -1023,6 +1365,83 @@ Base.@kwdef struct PowsyblImportConfig
 end
 
 """
+    QstsSeriesConfig
+
+Series check of CGMES snapshot deliveries (`qsts.series.*`,
+[`checkCGMESSeries`](@ref)): consecutive snapshots of one model belong to
+one series while their structure agrees.
+
+# Fields
+- `min_structural_overlap::Float64`: share of common mRIDs over the union
+  of the structural classes (lines, transformers and their ends, busbar
+  sections, breakers, disconnectors, connectivity nodes); below it a new
+  series starts (default `0.95`).
+- `max_injection_churn::Union{Nothing,Float64}`: churn (1 minus the share of
+  common injection mRIDs) above which a pair is flagged in the report; it
+  never splits a series (default `nothing`, no limit).
+- `max_gap::Union{Nothing,Float64}`: largest time step between two
+  snapshots in minutes; a larger step starts a new series (default
+  `nothing`, no limit).
+"""
+Base.@kwdef struct QstsSeriesConfig
+  min_structural_overlap::Float64 = 0.95
+  max_injection_churn::Union{Nothing,Float64} = nothing
+  max_gap::Union{Nothing,Float64} = nothing
+end
+
+"""
+    QstsConfig
+
+Quasi-static time series (`qsts.*`).
+
+# Fields
+- `mode::Symbol`: run mode of a QSTS run, `:off` (default, a run is
+  refused), `:snapshots` (every step solved on its own from the solution
+  of the base step) or `:sequential` (the steps in order, the controller
+  state carried from step to step).
+- `base_step::Int`: the step of a CGMES snapshot series whose snapshot is
+  the base case, counted from 1 (default `1`, the first snapshot);
+  `buildCGMESSeriesUnion` takes it unless its `base_step` keyword is given.
+- `snapshot_controls::Bool`: run the outer-loop controllers of the `control`
+  section in the base case and in every step of a snapshot run (default
+  `false`: taps and shunt banks stay at the values of each snapshot).
+- `sequential_start::Symbol`: start voltages of a step in a sequential
+  run, `:previous` (default, the solution of the last solved step) or
+  `:snapshot` (the solution of the same step in a snapshot run without
+  controllers).
+- `resync_every::Int`: in a sequential run, every n-th step (steps 1,
+  n + 1, 2n + 1, ...) puts the taps and banks back on the values of the
+  series instead of the carried ones; `0` (default) resyncs step 1 only.
+- `dead_time_steps::Int`: steps a controller stays locked after a counted
+  move in a sequential run (default `0`, no dead time).
+- `hunting_window::Int`: three net moves of one controller with
+  alternating sign within this many steps count as one hunting pattern
+  (default `3`, at least 3).
+- `vm_min_pu::Float64`, `vm_max_pu::Float64`: voltage band of the
+  violation metrics of a sequential run (defaults `0.9`, `1.1`).
+- `loading_max_pct::Float64`: branch loading above which a sequential run
+  counts an overload (default `100.0`).
+- `series::QstsSeriesConfig`: the series check, a
+  [`QstsSeriesConfig`](@ref).
+"""
+Base.@kwdef struct QstsConfig
+  mode::Symbol = :off
+  base_step::Int = 1
+  snapshot_controls::Bool = false
+  sequential_start::Symbol = :previous
+  resync_every::Int = 0
+  dead_time_steps::Int = 0
+  hunting_window::Int = 3
+  vm_min_pu::Float64 = 0.9
+  vm_max_pu::Float64 = 1.1
+  loading_max_pct::Float64 = 100.0
+  series::QstsSeriesConfig = QstsSeriesConfig()
+end
+
+const QSTS_MODE_VALUES = (:off, :snapshots, :sequential)
+const QSTS_SEQUENTIAL_START_VALUES = (:previous, :snapshot)
+
+"""
     SparlectraConfig
 
 Central typed configuration assembled once at application or example boundaries.
@@ -1041,6 +1460,7 @@ Base.@kwdef struct SparlectraConfig
   performance::PerformanceConfig = PerformanceConfig()
   benchmark::BenchmarkConfig = BenchmarkConfig()
   contingency::ContingencyConfig = ContingencyConfig()
+  qsts::QstsConfig = QstsConfig()
   runtime::RuntimeConfig = RuntimeConfig()
   diagnostics::DiagnosticsConfig = DiagnosticsConfig()
   output::OutputConfig = OutputConfig()
@@ -1070,7 +1490,7 @@ const POWERFLOW_START_PROFILE_SOURCE_VALUES = (:flat, :dc, :bus_metadata, :histo
 # SvVoltage state. Wins over power_flow(.start_mode).flatstart on CGMES runs.
 const CGMES_START_VALUES_VALUES = (:auto, :flat, :sv)
 # placeholder-guard behavior: warn_skip keeps completeness-set filler values
-# out of the solve with a warning; strict aborts the import instead — for
+# out of the solve with a warning; strict aborts the import instead, for
 # deliveries where silently dropping data is not acceptable
 const CGMES_PLACEHOLDER_GUARDS_VALUES = (:warn_skip, :strict)
 const CGMES_HVDC_MODE_VALUES = (:injections, :paired_control)
@@ -1079,10 +1499,6 @@ const POWSYBL_REMOTE_REGULATION_VALUES = (:hold_local, :pq, :remote)
 const TRUST_REGION_STEP_MODE_VALUES = (:scaled, :dogleg)
 const QLIMIT_START_MODE_VALUES = (:iteration, :auto, :iteration_or_auto)
 const QLIMIT_ENFORCEMENT_MODE_VALUES = (:active_set, :classic_simultaneous, :classic_one_at_a_time)
-const QLIMIT_ENFORCEMENT_MODE_LEGACY_ALIASES = Dict(
-  :matpower_simultaneous => :classic_simultaneous,
-  :matpower_one_at_a_time => :classic_one_at_a_time,
-)
 const QLIMIT_GUARD_ZERO_RANGE_MODE_VALUES = (:lock_pq,)
 const QLIMIT_GUARD_NARROW_RANGE_MODE_VALUES = (:prefer_pq, :lock_pq)
 const QLIMIT_GUARD_VIOLATION_MODE_VALUES = (:delayed_switch, :lock_pq)
@@ -1097,8 +1513,11 @@ const POWERFLOW_ISLAND_REFERENCE_POLICY_VALUES = (:matpower_like,)
 const RECTANGULAR_PREALLOCATE_WORKSPACE_VALUES = (:off, :on, :auto)
 const STATE_ESTIMATION_METHOD_VALUES = (:wls,)
 const STATE_ESTIMATION_ROBUST_MODE_VALUES = (:off, :staged, :replacement)
+const STATE_ESTIMATION_ZERO_INJECTION_VALUES = (:on, :off, :constraint)
 const STATE_ESTIMATION_PMU_REF_OFFSET_VALUES = (:auto, :off)
 const STATE_ESTIMATION_LINEAR_SOLVER_VALUES = (:umfpack, :klu)
+# no :on, see TapEstimationConfig
+const STATE_ESTIMATION_TAP_IMPEDANCE_CORRECTION_VALUES = [:auto, :off]
 const MATPOWER_PV_VOLTAGE_SOURCE_VALUES = (:gen_vg, :bus_vm, :auto, :strict_check)
 const MATPOWER_COMPARE_VOLTAGE_REFERENCE_VALUES = (:bus_vm, :gen_vg, :imported_setpoint, :hybrid)
 const MATPOWER_SHIFT_UNIT_VALUES = (:deg, :rad)
@@ -1107,18 +1526,6 @@ const MATPOWER_BUS_SHUNT_MODEL_VALUES = (:admittance, :voltage_dependent_injecti
 const MATPOWER_AUTO_PROFILE_VALUES = (:off, :recommend, :apply)
 const MATPOWER_DCLINE_MODE_VALUES = (:reject_active, :ignore_inactive, :pf_injections, :paired_control)
 
-# `reject_active` was the shipped template default of early releases, so
-# stored user/Web UI configuration files still carry it without it ever
-# having been a deliberate choice. Loading it verbatim would abort every
-# DC-line case (e.g. case_SyntheticUSA) for exactly those users — the
-# configuration surface therefore normalizes it to the current default with
-# a warning. The strict fail-fast behavior stays available programmatically:
-# createNetFromMatPowerCase(matpower_dcline_mode = :reject_active).
-function _normalize_dcline_mode(requested::Symbol)::Symbol
-  requested === :reject_active || return requested
-  @warn "matpower_import.matpower_dcline_mode: reject_active is deprecated in configuration files and loads as pf_injections (active mpc.dcline rows import as per-terminal injection pairs). Remove the key or set pf_injections to silence this warning."
-  return :pf_injections
-end
 const TRANSFORMER_TAP_CHANGER_MODEL_VALUES = (:ideal, :impedance_correction)
 const PERFORMANCE_LEVEL_VALUES = (:off, :summary, :iteration, :full)
 const OUTPUT_CONSOLE_AUTO_PROFILE_VALUES = (:off, :compact, :full)
@@ -1128,7 +1535,7 @@ const OUTPUT_LOGFILE_RESULTS_VALUES = (:off, :compact, :classic, :full)
 const OUTPUT_RESULT_TABLE_LARGE_CASE_MODE_VALUES = (:summary, :classic, :full)
 const OUTPUT_DETAILED_RESULT_CSV_WRITE_MODE_VALUES = (:auto, :buffered, :streaming)
 const OUTPUT_DETAILED_RESULT_CSV_EXPORTER_VALUES = (:auto, :report, :direct)
-const OUTPUT_CSV_FORMAT_VALUES = (:technical, :excel_de, :excel_us)
+const OUTPUT_CSV_FORMAT_VALUES = (:auto, :technical, :excel_de, :excel_us)
 const OUTPUT_LOGFILE_DIAGNOSTICS_VALUES = (:off, :compact, :full)
 const OUTPUT_LOGFILE_PERFORMANCE_VALUES = (:off, :compact, :full)
 const OUTPUT_LOGFILE_WARNINGS_VALUES = (:off, :summary, :table, :full)
@@ -1300,7 +1707,7 @@ matpower_export_config()::MatpowerExportConfig = active_sparlectra_config().matp
 
 The `model` section of the active configuration: how an imported case
 becomes a network (bus shunt model, tap changer model, auto profile,
-net cache, preallocation).
+preallocation, nominal frequency).
 """
 model_config()::ModelConfig = active_sparlectra_config().model
 """
@@ -1406,6 +1813,8 @@ function _as_auto_profile_symbol_cfg(x)::Symbol
 end
 _as_bool_cfg(x)::Bool = as_bool(x)
 _as_int_cfg(x)::Int = x isa Integer ? Int(x) : parse(Int, String(x))
+# null, an empty string or missing stays nothing (a key that is set to "unset")
+_as_optional_int_cfg(x)::Union{Nothing,Int} = (x === nothing || (x isa AbstractString && isempty(strip(x)))) ? nothing : _as_int_cfg(x)
 _as_float_cfg(x)::Float64 = x isa Real ? Float64(x) : parse(Float64, String(x))
 
 function _as_float_vector_cfg(x)::Vector{Float64}
@@ -1440,12 +1849,8 @@ function _validate_allowed_symbol(name::AbstractString, value::Symbol, allowed::
 end
 
 function _canonical_qlimit_enforcement_mode(value::Symbol)::Symbol
-  canonical = get(QLIMIT_ENFORCEMENT_MODE_LEGACY_ALIASES, value, value)
-  if canonical in QLIMIT_ENFORCEMENT_MODE_VALUES
-    return canonical
-  end
-  legacy_aliases = ["$(alias) -> $(target)" for (alias, target) in sort(collect(QLIMIT_ENFORCEMENT_MODE_LEGACY_ALIASES); by = first)]
-  throw(ArgumentError("power_flow.qlimits.enforcement_mode must be one of $(collect(QLIMIT_ENFORCEMENT_MODE_VALUES)); got $(value). Legacy aliases accepted: $(legacy_aliases)."))
+  value in QLIMIT_ENFORCEMENT_MODE_VALUES && return value
+  throw(ArgumentError("power_flow.qlimits.enforcement_mode must be one of $(collect(QLIMIT_ENFORCEMENT_MODE_VALUES)); got $(value)."))
 end
 
 ## power_flow.tol_MW: the tolerance in physical
@@ -1465,6 +1870,216 @@ function _validate_positive(name::AbstractString, value::Real)
   return value
 end
 
+function _validate_finite_positive(name::AbstractString, value::Real)
+  (isfinite(value) && value > 0) || throw(ArgumentError("$(name) must be finite and positive; got $(value)."))
+  return Float64(value)
+end
+
+## state_estimation.sigma_by_voltage_level. One row per voltage level, keyed
+## by the nominal voltage in kV:
+##   sigma_by_voltage_level:
+##     380:
+##       p_mw: 2.0
+## The YAML reader returns the key as text ("380", "10.5"; quotes around a
+## key are stripped) and reads no "- item" lists and no flow mappings. In
+## code a key may be any positive number (a Real or its text), and a vector of SESigmaLevel
+## works as well. Every problem is an ArgumentError that names the key, the
+## row (its key in a mapping, its position in a vector), a stable reason
+## word and, for a table read from a file, the file and the line of the row
+## or column.
+const _SE_SIGMA_LEVEL_KEY = "state_estimation.sigma_by_voltage_level"
+const _SE_SIGMA_LEVEL_COLUMNS = ("p_mw", "q_mvar", "i_a", "u_kv", "rel_pct")
+# two rows whose nominal voltages differ by less than this name the same
+# level, and a bus belongs to a row within the same distance
+const SE_SIGMA_LEVEL_VN_TOL_KV = 1.0e-6
+
+# `at` is the location suffix (" (file line n)"), empty for a table that
+# does not come from a file
+function _sigma_level_error(row::AbstractString, reason::AbstractString, detail::AbstractString, at::AbstractString = "")
+  throw(ArgumentError(string(_SE_SIGMA_LEVEL_KEY, isempty(row) ? "" : string(" ", row), ": ", reason, ": ", detail, at)))
+end
+
+# a value that the YAML reader returned as text because it starts with "{"
+# is a flow mapping, which the subset does not parse; it is refused with the
+# block form instead of being read as a string
+function _sigma_level_flow_error(row::AbstractString, text::AbstractString, at::AbstractString = "")
+  _sigma_level_error(row, "flow_style", string(repr(String(text)), " is a flow mapping ({...}), which Sparlectra's YAML subset does not read. Write the table in block style, one row per level keyed by the nominal voltage in kV and one column per line:\n  sigma_by_voltage_level:\n    380:\n      p_mw: 2.0\n      u_kv: 0.5"), at)
+end
+
+function _sigma_level_number(row::AbstractString, column::AbstractString, value; allow_zero::Bool = false, at::AbstractString = "")::Float64
+  (value isa Real && !(value isa Bool)) || _sigma_level_error(row, "bad_value", string(column, " = ", repr(value), " is not a number"), at)
+  v = Float64(value)
+  isfinite(v) || _sigma_level_error(row, "bad_value", string(column, " = ", v, " is not finite"), at)
+  if allow_zero
+    v >= 0.0 || _sigma_level_error(row, "bad_value", string(column, " = ", v, " must not be negative"), at)
+  else
+    v > 0.0 || _sigma_level_error(row, "bad_value", string(column, " = ", v, " must be greater than zero"), at)
+  end
+  return v
+end
+
+# The nominal voltage of a row key in kV: a positive finite number, given
+# as a Real or as its text (the YAML reader returns the key 380 as "380").
+function _sigma_level_vn(row::AbstractString, key; at::AbstractString = "")::Float64
+  v = (key isa Real && !(key isa Bool)) ? Float64(key) : key isa AbstractString ? something(tryparse(Float64, strip(key)), NaN) : NaN
+  (isfinite(v) && v > 0.0) || _sigma_level_error(row, "bad_vn_kv", string(repr(key isa AbstractString ? String(key) : key), " is not a nominal voltage; the key of a row is the nominal voltage of the level in kV, a positive number"), at)
+  return v
+end
+
+# The row key the writers use for the nominal voltage `vn`: integer kV
+# without decimals ("380", the form the YAML reader reads as a key), any
+# other value as its shortest decimal text ("10.5"), which the YAML reader
+# accepts as a key and _sigma_level_vn reads back to the same Float64.
+_sigma_level_key(vn::Real)::String = (v = Float64(vn); (isinteger(v) && abs(v) < 1.0e15) ? string(Int(v)) : string(v))
+
+# One row (a mapping or a NamedTuple of the sigma columns) of the level
+# `vn` (kV, validated) to a validated row. `at(column)` is the location
+# suffix of a column, `at("")` that of the row.
+function _parse_sigma_level_row(row::AbstractString, vn::Float64, entry; at::Function = _ -> "")::SESigmaLevel
+  entry isa NamedTuple && (entry = Dict{String,Any}(String(k) => v for (k, v) in pairs(entry)))
+  if entry isa AbstractString
+    startswith(strip(entry), "{") && _sigma_level_flow_error(row, entry, at(""))
+    _sigma_level_error(row, "not_a_row", string(repr(String(entry)), " is no row; a row is a mapping of the sigma columns below the nominal voltage key"), at(""))
+  end
+  entry isa AbstractDict || _sigma_level_error(row, "not_a_row", string(repr(entry), " is no row; a row is a mapping of the sigma columns below the nominal voltage key"), at(""))
+  cols = Dict{String,Any}(String(k) => v for (k, v) in entry)
+  unknown = sort!([k for k in keys(cols) if !(k in _SE_SIGMA_LEVEL_COLUMNS)])
+  # vn_kv was a column until the key became the nominal voltage; it is
+  # refused like any other unknown column, with that reason named
+  isempty(unknown) || _sigma_level_error(row, "unknown_column", string(join(unknown, ", "), " (the columns are ", join(_SE_SIGMA_LEVEL_COLUMNS, ", "), "; the nominal voltage is the key of the row)"), at(first(unknown)))
+  sigma(c) = get(cols, c, nothing) === nothing ? nothing : _sigma_level_number(row, c, cols[c]; at = at(c))
+  rel = get(cols, "rel_pct", nothing) === nothing ? 0.0 : _sigma_level_number(row, "rel_pct", cols["rel_pct"]; allow_zero = true, at = at("rel_pct"))
+  absolute = (sigma("p_mw"), sigma("q_mvar"), sigma("i_a"), sigma("u_kv"))
+  # a row without an absolute sigma would change nothing (rel_pct only
+  # raises a set column), so it is refused instead of read as a no-op
+  all(isnothing, absolute) && _sigma_level_error(row, "no_sigma", string(_sigma_level_key(vn), " kV sets none of p_mw, q_mvar, i_a, u_kv; rel_pct acts only together with one of them"), at(""))
+  return SESigmaLevel(vn, absolute..., rel)
+end
+
+# The line of every key below the dotted `prefix` in the YAML file `path`,
+# keyed by the dotted path after the prefix ("" for the prefix key itself,
+# "380", "380.p_mw"; a key with a dot such as 10.5 is joined as it is,
+# "10.5.p_mw"). The YAML reader returns no line numbers, so the table
+# validation finds the line of a row here, for the message only. Lines that
+# are no "key:" line are skipped; the key forms are those of the reader
+# (_yaml_mapping_key, quotes stripped). A path that appears again keeps its
+# first line; when `repeated` is a vector, every repetition is pushed to it
+# as (path, line, depth), depth counting the keys below the prefix (1 for a
+# row), since the reader keeps only the last of two equal keys.
+function _yaml_key_lines(path::AbstractString, prefix::AbstractString; repeated::Union{Nothing,Vector{Tuple{String,Int,Int}}} = nothing)::Dict{String,Int}
+  out = Dict{String,Int}()
+  isfile(path) || return out
+  stack = Tuple{Int,String}[]
+  prefix_depth = count(==('.'), prefix) + 1
+  for (lineno, line) in enumerate(eachline(path))
+    content = lstrip(line, ' ')
+    m = _yaml_mapping_key(content)
+    m === nothing && continue
+    indent = length(line) - length(content)
+    while !isempty(stack) && stack[end][1] >= indent
+      pop!(stack)
+    end
+    push!(stack, (indent, m[1]))
+    dotted = join(last.(stack), ".")
+    sub = dotted == prefix ? "" : startswith(dotted, string(prefix, ".")) ? dotted[(length(prefix) + 2):end] : nothing
+    sub === nothing && continue
+    if haskey(out, sub)
+      repeated === nothing || push!(repeated, (sub, lineno, length(stack) - prefix_depth))
+    else
+      out[sub] = lineno
+    end
+  end
+  return out
+end
+
+"""
+    _parse_sigma_by_voltage_level(raw; source = "", lines = Dict{String,Int}()) -> Vector{SESigmaLevel}
+
+The rows of `state_estimation.sigma_by_voltage_level`, validated and sorted
+by nominal voltage (highest first). `raw` is the mapping of the YAML block
+form (nominal voltage in kV => row of sigma columns; the key is a positive
+number or its text, `"380"` as the YAML reader returns it), a vector of
+`SESigmaLevel`, `nothing`, or the empty placeholder `"{}"` of the template
+(both give no rows). A key that is not a positive number is the error
+`bad_vn_kv`, two keys of the same voltage (`380` and `380.0`) the error
+`duplicate_vn_kv` naming both, a `vn_kv` column the error `unknown_column`.
+Any other text, in particular a flow mapping `{p_mw: 2.0, ...}`, is
+refused with the block form in the message, never read as a string.
+
+For a table read from a file, `source` is the file and `lines` the line of
+each key below the table (`_yaml_key_lines`); every error then ends with
+the file name and the line of the offending column, row or table key.
+"""
+function _parse_sigma_by_voltage_level(raw; source::AbstractString = "", lines::AbstractDict = Dict{String,Int}())::Vector{SESigmaLevel}
+  raw === nothing && return SESigmaLevel[]
+  # the location suffix of a dotted path below the table, falling back to
+  # the row and then to the table key when the path has no line of its own
+  at_path(paths...) = begin
+    isempty(source) && return ""
+    for p in paths
+      n = get(lines, p, 0)
+      n > 0 && return string(" (", basename(String(source)), " line ", n, ")")
+    end
+    return ""
+  end
+  if raw isa AbstractString
+    s = strip(raw)
+    (isempty(s) || s == "{}") && return SESigmaLevel[]
+    startswith(s, "{") && _sigma_level_flow_error("", s, at_path(""))
+    _sigma_level_error("", "not_a_table", string(repr(String(s)), " is no table; write one row per level in block style, keyed by the nominal voltage in kV"), at_path(""))
+  end
+  rows = SESigmaLevel[]
+  names = String[]
+  add!(r, name, where) = begin
+    k = findfirst(x -> abs(x.vn_kv - r.vn_kv) < SE_SIGMA_LEVEL_VN_TOL_KV, rows)
+    k === nothing || _sigma_level_error(name, "duplicate_vn_kv", string(_sigma_level_key(r.vn_kv), " kV is already the level of ", names[k]), where)
+    push!(rows, r)
+    push!(names, string(name, where))
+  end
+  if raw isa AbstractDict
+    # file order where the lines are known (the duplicate names the later
+    # row), otherwise the order of the key text
+    for k in sort!(collect(keys(raw)); by = k -> (get(lines, string(k), 0), string(k)))
+      key = string(k)
+      name = string("row ", key)
+      at(c) = isempty(c) ? at_path(key, "") : at_path(string(key, ".", c), key, "")
+      vn = _sigma_level_vn(name, k; at = at(""))
+      add!(_parse_sigma_level_row(name, vn, raw[k]; at = at), name, at(""))
+    end
+  elseif raw isa AbstractVector
+    for (i, v) in enumerate(raw)
+      name = string("row ", i)
+      v isa SESigmaLevel || _sigma_level_error(name, "not_a_row", string(repr(v), " is no SESigmaLevel; a vector holds SESigmaLevel rows, a configuration table is a mapping keyed by the nominal voltage in kV"))
+      # validated again: the positional constructor does not check
+      cols = Dict{String,Any}("p_mw" => v.p_mw, "q_mvar" => v.q_mvar, "i_a" => v.i_a, "u_kv" => v.u_kv, "rel_pct" => v.rel_pct)
+      add!(_parse_sigma_level_row(name, _sigma_level_vn(name, v.vn_kv), cols), name, "")
+    end
+  else
+    _sigma_level_error("", "not_a_table", string(repr(raw), " is no table; write one row per level in block style, keyed by the nominal voltage in kV"), at_path(""))
+  end
+  return sort!(rows; by = r -> -r.vn_kv)
+end
+
+# Validate the table of one configuration file as soon as the file is
+# read, so an error names the file and the line (the merged configuration
+# no longer knows where a value came from). Nothing when the file does not
+# set the key. A row key written twice is refused here: the YAML reader
+# keeps only the second row, so the first would vanish without a word.
+function _check_sigma_levels_in_file(raw::AbstractDict, path::AbstractString)::Nothing
+  se = get(raw, "state_estimation", nothing)
+  (se isa AbstractDict && haskey(se, "sigma_by_voltage_level")) || return nothing
+  repeated = Tuple{String,Int,Int}[]
+  lines = _yaml_key_lines(path, _SE_SIGMA_LEVEL_KEY; repeated = repeated)
+  for (sub, n, depth) in repeated
+    # a row key is one level below the table; a repeated column of a row
+    # is left to the reader (10.5 is a row key, 10.5.p_mw a column)
+    depth == 1 || continue
+    _sigma_level_error(string("row ", sub), "duplicate_vn_kv", string("the key ", sub, " appears again; it is already the level of row ", sub, " (", basename(String(path)), " line ", lines[sub], ")"), string(" (", basename(String(path)), " line ", n, ")"))
+  end
+  _parse_sigma_by_voltage_level(se["sigma_by_voltage_level"]; source = path, lines = lines)
+  return nothing
+end
+
 function StartModeConfig(raw::AbstractDict)
   angle_mode = _validate_allowed_symbol("power_flow.start_mode.angle_mode", _as_symbol_cfg(_raw_get(raw, "angle_mode", :dc)), POWERFLOW_START_ANGLE_MODE_VALUES)
   voltage_mode = _validate_allowed_symbol("power_flow.start_mode.voltage_mode", _as_symbol_cfg(_raw_get(raw, "voltage_mode", :profile_blend)), POWERFLOW_START_VOLTAGE_MODE_VALUES)
@@ -1482,6 +2097,7 @@ function StartModeConfig(raw::AbstractDict)
     accept_unmeasured_dc_start = _as_bool_cfg(_raw_get(raw, "accept_unmeasured_dc_start", _raw_get(raw, "start_projection_accept_unmeasured_dc_start", false))),
     dc_seed_unconditional = _as_bool_cfg(_raw_get(raw, "dc_seed_unconditional", false)),
     ratio_profile = _as_bool_cfg(_raw_get(raw, "ratio_profile", true)),
+    rotate_behind_pst = _as_bool_cfg(_raw_get(raw, "rotate_behind_pst", false)),
     reuse_import_data = _as_bool_cfg(_raw_get(raw, "reuse_import_data", _raw_get(raw, "start_projection_reuse_import_data", true))),
     blend_lambdas = _as_float_vector_cfg(_raw_get(raw, "blend_lambdas", _raw_get(raw, "start_projection_blend_lambdas", [0.25, 0.5, 0.75]))),
     dc_angle_limit_deg = _validate_positive("start_projection_dc_angle_limit_deg", _as_float_cfg(_raw_get(raw, "dc_angle_limit_deg", _raw_get(raw, "start_projection_dc_angle_limit_deg", 60.0)))),
@@ -1662,6 +2278,7 @@ function PowerFlowConfig(raw::AbstractDict)
   dc_raw = _raw_section(merged, "dc")
   distributed_slack_raw = _raw_section(merged, "distributed_slack")
   external_grid_raw = _raw_section(merged, "external_grid")
+  plausibility_raw = _raw_section(merged, "plausibility")
   solver = _validate_allowed_symbol("power_flow.solver", _as_symbol_cfg(_raw_get(merged, "solver", :rectangular)), POWERFLOW_SOLVER_VALUES)
   apslf_cfg = ApslfConfig(apslf_raw)
   apslf_start_cfg = ApslfStartConfig(apslf_start_raw)
@@ -1757,7 +2374,14 @@ function PowerFlowConfig(raw::AbstractDict)
     dc = DcPowerFlowConfig(dc_raw),
     distributed_slack = distributed_slack_cfg,
     external_grid = external_grid_cfg,
+    plausibility = PowerFlowPlausibilityConfig(plausibility_raw),
   )
+end
+
+function PowerFlowPlausibilityConfig(raw::AbstractDict)
+  vmin_warn = _as_float_cfg(_raw_get(raw, "vmin_warn", DEFAULT_PLAUSIBILITY_VMIN_WARN_PU))
+  isfinite(vmin_warn) && vmin_warn >= 0.0 || throw(ArgumentError("power_flow.plausibility.vmin_warn must be finite and non-negative (0 switches the check off); got $(vmin_warn)."))
+  return PowerFlowPlausibilityConfig(vmin_warn = vmin_warn)
 end
 
 function DcPowerFlowConfig(raw::AbstractDict)
@@ -1814,6 +2438,44 @@ function ObservabilityConfig(raw::AbstractDict)
   return ObservabilityConfig(enabled = _as_bool_cfg(_raw_get(merged, "enabled", true)))
 end
 
+# `raw` is the merged state_estimation section. A factor below 1 would make
+# the substitute of an implausible voltage more trusted than the meter.
+function BadDataConfig(raw::AbstractDict)
+  merged = _merged_section(raw, "bad_data")
+  key = "state_estimation.bad_data.substitute_sigma_factor"
+  f = Float64(_validate_positive(key, _as_float_cfg(_raw_get(merged, "substitute_sigma_factor", 3.0))))
+  (isfinite(f) && f >= 1.0) || throw(ArgumentError("$(key) must be a finite number >= 1; got $(f)."))
+  return BadDataConfig(substitute_sigma_factor = f)
+end
+
+# `raw` is the merged state_estimation section; a scalar where the block
+# belongs (`start_mode: true`) is refused with the full path
+function SEStartModeConfig(raw::AbstractDict)
+  section = _raw_get(raw, "start_mode", nothing)
+  section === nothing || section isa AbstractDict || throw(ArgumentError("state_estimation.start_mode must be a block with the key rotate_behind_pst; got $(repr(section))."))
+  merged = _merged_section(raw, "start_mode")
+  return SEStartModeConfig(rotate_behind_pst = _as_bool_cfg(_raw_get(merged, "rotate_behind_pst", false)))
+end
+
+# `raw` is the merged state_estimation section. A scalar where the block
+# belongs (`tap_estimation: true`, the shape of the Web UI checkbox) is
+# refused with the full path; `_raw_section` would name only "tap_estimation".
+function TapEstimationConfig(raw::AbstractDict)
+  section = _raw_get(raw, "tap_estimation", nothing)
+  section === nothing || section isa AbstractDict || throw(ArgumentError("state_estimation.tap_estimation must be a block with the keys enabled, fallback, impedance_correction, exclude and include_machine_transformers; got $(repr(section))."))
+  merged = _merged_section(raw, "tap_estimation")
+  key = "state_estimation.tap_estimation.impedance_correction"
+  return TapEstimationConfig(
+    enabled = _as_bool_cfg(_raw_get(merged, "enabled", true)),
+    fallback = _as_bool_cfg(_raw_get(merged, "fallback", true)),
+    impedance_correction = _validate_allowed_symbol(key, _as_symbol_cfg(_raw_get(merged, "impedance_correction", :auto)), STATE_ESTIMATION_TAP_IMPEDANCE_CORRECTION_VALUES),
+    # a YAML list, or one string with ";" between the entries (a dotted
+    # override); the same reader as powsybl_import.slack_ids
+    exclude = _powsybl_id_list(_raw_get(merged, "exclude", nothing)),
+    include_machine_transformers = _as_bool_cfg(_raw_get(merged, "include_machine_transformers", false)),
+  )
+end
+
 function StateEstimationConfig(raw::AbstractDict)
   merged = _merged_section(raw, "state_estimation")
   if haskey(merged, "sparse") || haskey(merged, :sparse)
@@ -1833,6 +2495,8 @@ function StateEstimationConfig(raw::AbstractDict)
     tol = _validate_positive("state_estimation.tol", _as_float_cfg(_raw_get(merged, "tol", 1.0e-6))),
     max_iter = _as_int_cfg(_raw_get(merged, "max_iter", 50)),
     flatstart = _as_bool_cfg(_raw_get(merged, "flatstart", true)),
+    start_ladder = _as_bool_cfg(_raw_get(merged, "start_ladder", true)),
+    start_mode = SEStartModeConfig(merged),
     jac_eps = _validate_positive("state_estimation.jac_eps", _as_float_cfg(_raw_get(merged, "jac_eps", 1.0e-6))),
     update_net = _as_bool_cfg(_raw_get(merged, "update_net", true)),
     pmu_ref_offset = _validate_allowed_symbol("state_estimation.pmu_ref_offset", _as_symbol_cfg(_raw_get(merged, "pmu_ref_offset", :auto)), STATE_ESTIMATION_PMU_REF_OFFSET_VALUES),
@@ -1840,6 +2504,10 @@ function StateEstimationConfig(raw::AbstractDict)
     report_residual_correlation = _as_bool_cfg(_raw_get(merged, "report_residual_correlation", true)),
     update_shunts = _as_bool_cfg(_raw_get(merged, "update_shunts", true)),
     update_taps = _as_bool_cfg(_raw_get(merged, "update_taps", false)),
+    measurement_table = _as_bool_cfg(_raw_get(merged, "measurement_table", true)),
+    zero_injection = _validate_allowed_symbol("state_estimation.zero_injection", _as_symbol_cfg(_raw_get(merged, "zero_injection", :on)), STATE_ESTIMATION_ZERO_INJECTION_VALUES),
+    zero_injection_sigma_mva = _validate_finite_positive("state_estimation.zero_injection_sigma_mva", _as_float_cfg(_raw_get(merged, "zero_injection_sigma_mva", ZERO_INJECTION_SIGMA))),
+    sigma_by_voltage_level = _parse_sigma_by_voltage_level(_raw_get(merged, "sigma_by_voltage_level", nothing)),
     robust = se_robust,
     robust_start_iteration = Int(_validate_positive("state_estimation.robust_start_iteration", _as_int_cfg(_raw_get(merged, "robust_start_iteration", 3)))),
     k_eliminate = Float64(_validate_positive("state_estimation.k_eliminate", _as_float_cfg(_raw_get(merged, "k_eliminate", 3.0)))),
@@ -1848,7 +2516,7 @@ function StateEstimationConfig(raw::AbstractDict)
     robust_k2 = se_robust_k2,
     k_suppress = Float64(_validate_positive("state_estimation.k_suppress", _as_float_cfg(_raw_get(merged, "k_suppress", 4.0)))),
     suppression_sigma = Float64(_validate_positive("state_estimation.suppression_sigma", _as_float_cfg(_raw_get(merged, "suppression_sigma", 2000.0)))),
-    max_eliminations = Int(_validate_nonnegative("state_estimation.max_eliminations", _as_int_cfg(_raw_get(merged, "max_eliminations", 3)))),
+    max_eliminations = Int(_validate_nonnegative("state_estimation.max_eliminations", _as_int_cfg(_raw_get(merged, "max_eliminations", 5)))),
     rank_tol_factor = Float64(_validate_positive("state_estimation.rank_tol_factor", _as_float_cfg(_raw_get(merged, "rank_tol_factor", 10.0)))),
     takahashi_min_states = Int(_validate_positive("state_estimation.takahashi_min_states", _as_int_cfg(_raw_get(merged, "takahashi_min_states", 200)))),
     linear_solver = _validate_allowed_symbol("state_estimation.linear_solver", _as_symbol_cfg(_raw_get(merged, "linear_solver", :umfpack)), STATE_ESTIMATION_LINEAR_SOLVER_VALUES),
@@ -1863,6 +2531,8 @@ function StateEstimationConfig(raw::AbstractDict)
     topology_kcl_k = Float64(_validate_positive("state_estimation.topology_kcl_k", _as_float_cfg(_raw_get(merged, "topology_kcl_k", 4.0)))),
     topology_cluster_min = Int(_validate_positive("state_estimation.topology_cluster_min", _as_int_cfg(_raw_get(merged, "topology_cluster_min", 3)))),
     observability = ObservabilityConfig(merged),
+    tap_estimation = TapEstimationConfig(merged),
+    bad_data = BadDataConfig(merged),
   )
 end
 
@@ -1875,9 +2545,15 @@ function CGMESImportConfig(raw::AbstractDict)
     tap_control = _as_bool_cfg(_raw_get(merged, "tap_control", false)),
     machine_control = _as_bool_cfg(_raw_get(merged, "machine_control", false)),
     ignore_connected = _as_bool_cfg(_raw_get(merged, "ignore_connected", false)),
+    map_energy_source = _as_bool_cfg(_raw_get(merged, "map_energy_source", false)),
+    map_power_electronics = _as_bool_cfg(_raw_get(merged, "map_power_electronics", false)),
+    shunt_control = _as_bool_cfg(_raw_get(merged, "shunt_control", false)),
+    read_dynamics = _as_bool_cfg(_raw_get(merged, "read_dynamics", false)),
+    equivalent_injection_as_source = _as_bool_cfg(_raw_get(merged, "equivalent_injection_as_source", false)),
     vset_min_pu = _validate_nonnegative("cgmes_import.vset_min_pu", _as_float_cfg(_raw_get(merged, "vset_min_pu", 0.5))),
     vset_max_pu = _validate_positive("cgmes_import.vset_max_pu", _as_float_cfg(_raw_get(merged, "vset_max_pu", 1.5))),
     multi_slack = _as_bool_cfg(_raw_get(merged, "multi_slack", true)),
+    equivalent_branch_min_z_pu = _validate_nonnegative("cgmes_import.equivalent_branch_min_z_pu", _as_float_cfg(_raw_get(merged, "equivalent_branch_min_z_pu", 1e-6))),
     start_values = _validate_allowed_symbol("cgmes_import.start_values", _as_symbol_cfg(_raw_get(merged, "start_values", :auto)), CGMES_START_VALUES_VALUES),
     placeholder_guards = _validate_allowed_symbol("cgmes_import.placeholder_guards", _as_symbol_cfg(_raw_get(merged, "placeholder_guards", :warn_skip)), CGMES_PLACEHOLDER_GUARDS_VALUES),
     infer_base_voltages = _as_bool_cfg(_raw_get(merged, "infer_base_voltages", false)),
@@ -1912,8 +2588,13 @@ function ShortCircuitConfig(raw::AbstractDict)
   # 0.0 is the "use the IEC 60909-0 Table 1 defaults" sentinel; a real
   # override must stay within the physically sensible band around 1.0.
   (c == 0.0 || (isfinite(c) && 0.5 <= c <= 1.2)) || throw(ArgumentError("short_circuit.c_factor must be 0 (automatic IEC 60909-0 Table 1) or within [0.5, 1.2]; got $(c)."))
+  # 0.0 is "off" (no converter current without maxIFault); anything else
+  # is a multiple of the rated current and must be a finite positive number
+  f = _as_float_cfg(_raw_get(merged, "converter_current_factor", 0.0))
+  (f == 0.0 || (isfinite(f) && f > 0.0)) || throw(ArgumentError("short_circuit.converter_current_factor must be 0 (off) or a positive multiple of the converter rated current; got $(f)."))
   return ShortCircuitConfig(
     c_factor = c,
+    converter_current_factor = f,
     sweep_method = _validate_allowed_symbol("short_circuit.sweep_method", _as_symbol_cfg(_raw_get(merged, "sweep_method", :auto)), SHORT_CIRCUIT_SWEEP_METHOD_VALUES),
     takahashi_min_buses = Int(_validate_positive("short_circuit.takahashi_min_buses", _as_int_cfg(_raw_get(merged, "takahashi_min_buses", 50)))),
   )
@@ -1933,7 +2614,7 @@ function MatpowerImportConfig(raw::AbstractDict)
     apply_branch_names = _as_bool_cfg(_raw_get(merged, "apply_branch_names", false)),
     apply_branch_kind = _as_bool_cfg(_raw_get(merged, "apply_branch_kind", false)),
     import_for001_contingencies = _as_bool_cfg(_raw_get(merged, "import_for001_contingencies", true)),
-    matpower_dcline_mode = _normalize_dcline_mode(_validate_allowed_symbol("matpower_import.matpower_dcline_mode", _as_symbol_cfg(_raw_get(merged, "matpower_dcline_mode", :pf_injections)), MATPOWER_DCLINE_MODE_VALUES)),
+    matpower_dcline_mode = _validate_allowed_symbol("matpower_import.matpower_dcline_mode", _as_symbol_cfg(_raw_get(merged, "matpower_dcline_mode", :pf_injections)), MATPOWER_DCLINE_MODE_VALUES),
   )
 end
 
@@ -1945,9 +2626,9 @@ function ModelConfig(raw::AbstractDict)
     auto_profile = _validate_allowed_symbol("model.auto_profile", _as_auto_profile_symbol_cfg(_raw_get(merged, "auto_profile", :off)), MATPOWER_AUTO_PROFILE_VALUES),
     auto_profile_log = _as_bool_cfg(_raw_get(merged, "auto_profile_log", true)),
     auto_profile_max_fit_pu = _validate_nonnegative("model.auto_profile_max_fit_pu", _as_float_cfg(_raw_get(merged, "auto_profile_max_fit_pu", 0.1))),
-    net_cache_enabled = _as_bool_cfg(_raw_get(merged, "net_cache_enabled", false)),
     preallocate_network = _validate_allowed_symbol("model.preallocate_network", _as_symbol_cfg(_raw_get(merged, "preallocate_network", :auto)), [:off, :on, :auto]),
-    preallocate_min_buses = _as_int_cfg(_raw_get(merged, "preallocate_min_buses", 1000)),
+    preallocate_min_buses = _as_int_cfg(_raw_get(merged, "preallocate_min_buses", 500)),
+    nominal_frequency_hz = _validate_positive("model.nominal_frequency_hz", _as_float_cfg(_raw_get(merged, "nominal_frequency_hz", 50.0))),
   )
 end
 
@@ -2055,11 +2736,87 @@ function ContingencyConfig(raw::AbstractDict)
   (isfinite(cold_margin) && cold_margin >= 0.0) || throw(ArgumentError("contingency.warm_cold_check_margin_pu must be a finite value >= 0; got $(cold_margin)."))
   max_iter = _as_int_cfg(_raw_get(merged, "max_iter", 30))
   max_iter >= 1 || throw(ArgumentError("contingency.max_iter must be >= 1; got $(max_iter)."))
-  return ContingencyConfig(rescue_ladder = ladder, max_iter = max_iter, screening_mode = mode, screening_margin_pct = margin, warm_active_set = warm, warm_cold_check = cold_check, warm_cold_check_margin_pu = cold_margin)
+  return ContingencyConfig(rescue_ladder = ladder, max_iter = max_iter, screening_mode = mode, screening_margin_pct = margin, warm_active_set = warm, warm_cold_check = cold_check, warm_cold_check_margin_pu = cold_margin,
+    events = ContingencyEventsConfig(_raw_section(merged, "events")), pairs = ContingencyPairsConfig(_raw_section(merged, "pairs")))
+end
+
+# qsts.mode is off, snapshots or sequential, qsts.base_step a step number
+# from 1 (the series length is checked where the series is known); the keys
+# of the sequential run: the start a name, resync and dead time counts from
+# 0, the hunting window at least 3 (a pattern is three moves), the band
+# finite with vm_min below vm_max, the loading limit a positive percentage;
+# qsts.series.*: overlap and churn are shares in [0, 1], the gap a positive
+# number of minutes; null keeps "no limit"
+function QstsConfig(raw::AbstractDict)
+  merged = _merged_section(raw, "qsts")
+  dq = QstsConfig()
+  mode = _validate_allowed_symbol("qsts.mode", _as_symbol_cfg(_raw_get(merged, "mode", dq.mode)), QSTS_MODE_VALUES)
+  base_step = _as_int_cfg(_raw_get(merged, "base_step", dq.base_step))
+  base_step >= 1 || throw(ArgumentError("qsts.base_step must be >= 1; got $(base_step)."))
+  snapshot_controls = _as_bool_cfg(_raw_get(merged, "snapshot_controls", dq.snapshot_controls))
+  sequential_start = _validate_allowed_symbol("qsts.sequential_start", _as_symbol_cfg(_raw_get(merged, "sequential_start", dq.sequential_start)), QSTS_SEQUENTIAL_START_VALUES)
+  resync_every = _as_int_cfg(_raw_get(merged, "resync_every", dq.resync_every))
+  resync_every >= 0 || throw(ArgumentError("qsts.resync_every must be >= 0 (0 resyncs step 1 only); got $(resync_every)."))
+  dead_time_steps = _as_int_cfg(_raw_get(merged, "dead_time_steps", dq.dead_time_steps))
+  dead_time_steps >= 0 || throw(ArgumentError("qsts.dead_time_steps must be >= 0 (0 is no dead time); got $(dead_time_steps)."))
+  hunting_window = _as_int_cfg(_raw_get(merged, "hunting_window", dq.hunting_window))
+  hunting_window >= 3 || throw(ArgumentError("qsts.hunting_window must be >= 3 (a hunting pattern is three moves); got $(hunting_window)."))
+  vm_min = Float64(_as_float_cfg(_raw_get(merged, "vm_min_pu", dq.vm_min_pu)))
+  vm_max = Float64(_as_float_cfg(_raw_get(merged, "vm_max_pu", dq.vm_max_pu)))
+  (isfinite(vm_min) && vm_min > 0.0) || throw(ArgumentError("qsts.vm_min_pu must be a finite value > 0; got $(vm_min)."))
+  (isfinite(vm_max) && vm_max > vm_min) || throw(ArgumentError("qsts.vm_max_pu must be finite and above qsts.vm_min_pu = $(vm_min); got $(vm_max)."))
+  loading_max = Float64(_as_float_cfg(_raw_get(merged, "loading_max_pct", dq.loading_max_pct)))
+  (isfinite(loading_max) && loading_max > 0.0) || throw(ArgumentError("qsts.loading_max_pct must be a finite percentage > 0; got $(loading_max)."))
+  series = _raw_section(merged, "series")
+  d = QstsSeriesConfig()
+  overlap = Float64(_as_float_cfg(_raw_get(series, "min_structural_overlap", d.min_structural_overlap)))
+  0.0 <= overlap <= 1.0 || throw(ArgumentError("qsts.series.min_structural_overlap must be in [0, 1]; got $(overlap)."))
+  churn_raw = _raw_get(series, "max_injection_churn", nothing)
+  churn = churn_raw === nothing ? nothing : Float64(_as_float_cfg(churn_raw))
+  (churn === nothing || 0.0 <= churn <= 1.0) || throw(ArgumentError("qsts.series.max_injection_churn must be in [0, 1] or null; got $(churn)."))
+  gap_raw = _raw_get(series, "max_gap", nothing)
+  gap = gap_raw === nothing ? nothing : Float64(_as_float_cfg(gap_raw))
+  (gap === nothing || (isfinite(gap) && gap > 0.0)) || throw(ArgumentError("qsts.series.max_gap must be a positive number of minutes or null; got $(gap)."))
+  return QstsConfig(mode = mode, base_step = base_step, snapshot_controls = snapshot_controls, sequential_start = sequential_start, resync_every = resync_every,
+                    dead_time_steps = dead_time_steps, hunting_window = hunting_window, vm_min_pu = vm_min, vm_max_pu = vm_max, loading_max_pct = loading_max,
+                    series = QstsSeriesConfig(min_structural_overlap = overlap, max_injection_churn = churn, max_gap = gap))
+end
+
+# contingency.events.*: the defaults live in the struct, read once here
+function ContingencyEventsConfig(raw::AbstractDict)
+  d = ContingencyEventsConfig()
+  pattern = String(_as_string_cfg(_raw_get(raw, "name_stem_pattern", d.name_stem_pattern)))
+  try
+    Regex(pattern)
+  catch err
+    # the expected failure: a pattern the regex compiler rejects
+    err isa ErrorException || rethrow()
+    throw(ArgumentError("contingency.events.name_stem_pattern is not a valid regular expression: $(sprint(showerror, err))"))
+  end
+  return ContingencyEventsConfig(
+    enabled = _as_bool_cfg(_raw_get(raw, "enabled", d.enabled)),
+    double_circuits = _as_bool_cfg(_raw_get(raw, "double_circuits", d.double_circuits)),
+    busbars = _as_bool_cfg(_raw_get(raw, "busbars", d.busbars)),
+    substations = _as_bool_cfg(_raw_get(raw, "substations", d.substations)),
+    links = _as_bool_cfg(_raw_get(raw, "links", d.links)),
+    name_groups = _as_bool_cfg(_raw_get(raw, "name_groups", d.name_groups)),
+    name_stem_pattern = pattern,
+    max_members = Int(_validate_positive("contingency.events.max_members", _as_int_cfg(_raw_get(raw, "max_members", d.max_members)))),
+  )
+end
+
+# contingency.pairs.*: the defaults live in the struct, read once here
+function ContingencyPairsConfig(raw::AbstractDict)
+  d = ContingencyPairsConfig()
+  return ContingencyPairsConfig(
+    enabled = _as_bool_cfg(_raw_get(raw, "enabled", d.enabled)),
+    rule = _validate_allowed_symbol("contingency.pairs.rule", _as_symbol_cfg(_raw_get(raw, "rule", d.rule)), CONTINGENCY_PAIR_RULE_VALUES),
+    max_pairs = Int(_validate_positive("contingency.pairs.max_pairs", _as_int_cfg(_raw_get(raw, "max_pairs", d.max_pairs)))),
+  )
 end
 
 # The deprecated diagnostics.* duplicates of output.* are warned about (and
-# ignored) once, in `_validate_known_config_keys` — see
+# ignored) once, in `_validate_known_config_keys`, see
 # `_DEPRECATED_CONFIG_KEYS`. This constructor only reads the surviving key.
 function DiagnosticsConfig(raw::AbstractDict)
   merged = _merged_section(raw, "diagnostics")
@@ -2097,7 +2854,7 @@ function OutputConfig(raw::AbstractDict)
     # working. `csv_format` wins if both are set.
     csv_format = _validate_allowed_symbol(
       "output.csv_format",
-      _as_symbol_cfg(_raw_get(merged, "csv_format", _raw_get(merged, "detailed_result_csv_format", :technical))),
+      _as_symbol_cfg(_raw_get(merged, "csv_format", _raw_get(merged, "detailed_result_csv_format", :auto))),
       OUTPUT_CSV_FORMAT_VALUES,
     ),
   )
@@ -2130,6 +2887,10 @@ function WebUIConfig(raw::AbstractDict)
     show_case_settings_notice = _as_bool_cfg(_raw_get(merged, "show_case_settings_notice", true)),
     operation_log_retention_days = Int(_validate_nonnegative("webui.operation_log_retention_days", _as_int_cfg(_raw_get(merged, "operation_log_retention_days", 10)))),
     docs_base_url = String(_as_string_cfg(_raw_get(merged, "docs_base_url", "https://welthulk.github.io/Sparlectra.jl/"))),
+    window_width = Int(_validate_positive("webui.window_width", _as_int_cfg(_raw_get(merged, "window_width", 1500)))),
+    window_height = Int(_validate_positive("webui.window_height", _as_int_cfg(_raw_get(merged, "window_height", 950)))),
+    window_x = _as_optional_int_cfg(_raw_get(merged, "window_x", nothing)),
+    window_y = _as_optional_int_cfg(_raw_get(merged, "window_y", nothing)),
   )
 end
 
@@ -2146,6 +2907,7 @@ function SparlectraConfig(raw::AbstractDict)
     performance = PerformanceConfig(raw),
     benchmark = BenchmarkConfig(raw),
     contingency = ContingencyConfig(raw),
+    qsts = QstsConfig(raw),
     runtime = RuntimeConfig(raw),
     diagnostics = DiagnosticsConfig(raw),
     output = OutputConfig(raw),
@@ -2169,14 +2931,15 @@ end
 
 _canonical_config_key(key::AbstractString)::String = key == "powerflow" ? "power_flow" : key == "matpower" ? "matpower_import" : String(key)
 
-function _merge_config_overrides(raw::Dict{String,Any}, overrides::AbstractDict)
+function _merge_config_overrides(raw::Dict{String,Any}, overrides::AbstractDict; prefix::String = "")
   merged = deepcopy(raw)
   for (key, value) in overrides
     skey = _canonical_config_key(_config_key(key))
-    if value isa AbstractDict
+    path = isempty(prefix) ? skey : string(prefix, ".", skey)
+    if value isa AbstractDict && !(path in _TABLE_VALUED_CONFIG_KEYS)
       section = get!(merged, skey, Dict{String,Any}())
       section isa AbstractDict || throw(ArgumentError("Cannot merge override section $(repr(skey)) into scalar value."))
-      merged[skey] = _merge_config_overrides(Dict{String,Any}(String(k) => v for (k, v) in section), value)
+      merged[skey] = _merge_config_overrides(Dict{String,Any}(String(k) => v for (k, v) in section), value; prefix = path)
     else
       merged[skey] = value
     end
@@ -2188,7 +2951,13 @@ end
 # configuration keys, so they are exempt from unknown-key validation. The
 # default file keeps a scalar "{}" placeholder because the minimal YAML
 # reader has no flow-mapping support.
-const _FREEFORM_MAPPING_CONFIG_KEYS = ("power_flow.distributed_slack.weights", "control.controllers")
+const _FREEFORM_MAPPING_CONFIG_KEYS = ("power_flow.distributed_slack.weights", "control.controllers", "state_estimation.sigma_by_voltage_level")
+
+# Table-valued keys: the whole mapping is ONE value. Flattening stops at the
+# key (a case configuration carries it as one case-scope key, not as one
+# key per row and column) and an override replaces the table instead of
+# merging it row by row into the template's "{}" placeholder.
+const _TABLE_VALUED_CONFIG_KEYS = ("state_estimation.sigma_by_voltage_level",)
 
 # Deprecated keys stay ACCEPTED so existing user/webui configuration files
 # keep loading (a hard "unknown key" error here would brick every stored
@@ -2206,15 +2975,6 @@ const _FREEFORM_MAPPING_CONFIG_KEYS = ("power_flow.distributed_slack.weights", "
 # IIDM reader needs no Python; the Web UI had written the key into every
 # saved configuration and case sidecar of 0.19.0.
 const _REMOVED_SILENT_CONFIG_KEYS = ("output.condition_number", "webui.warmup", "powsybl_import.python_exe")
-
-# Removed keys that are ignored WITH one line naming what replaced them
-# (the 0.20.0 rule: a removed key is a warning, never a failure).
-# power_flow.islands.mode, 0.30.2: islands run in parallel by size when
-# Julia has more than one thread; there is no mode to choose.
-const _REMOVED_NOTED_CONFIG_KEYS = Dict(
-  "power_flow.apslf.use_pade" => "AnalyticLoadFlow 0.10.0 evaluates the series with Padé approximants only (Sparlectra 0.31.0); remove the key.",
-  "power_flow.islands.mode" => "islands of one network run in parallel when Julia has more than one thread and at least two islands have power_flow.islands.parallel_min_buses buses (runtime.parallel.enabled is the master switch); remove the key.",
-)
 
 const _DEPRECATED_CONFIG_KEYS = Dict(
   "diagnostics.console_summary" => "output.console_summary",
@@ -2242,7 +3002,6 @@ const _CONFIG_ALIASES = Dict{Int,Vector{Pair{String,String}}}(
     "matpower_import.bus_shunt_model" => "model.bus_shunt_model",
     "matpower_import.auto_profile" => "model.auto_profile",
     "matpower_import.auto_profile_log" => "model.auto_profile_log",
-    "matpower_import.net_cache.enabled" => "model.net_cache_enabled",
     "matpower_import.preallocate_network" => "model.preallocate_network",
     "matpower_import.preallocate_min_buses" => "model.preallocate_min_buses",
     "transformer.tap_changer_model" => "model.tap_changer_model",
@@ -2446,14 +3205,6 @@ function _validate_known_config_keys(user::AbstractDict, defaults::AbstractDict;
       continue
     end
     current_path in _REMOVED_SILENT_CONFIG_KEYS && continue
-    if haskey(_REMOVED_NOTED_CONFIG_KEYS, current_path)
-      # once per key and process: one run loads the configuration several
-      # times, and a stored file repeated the same line on every load (the
-      # service writes the key into each run.log instead)
-      @warn "Configuration key $(current_path) is ignored: $(_REMOVED_NOTED_CONFIG_KEYS[current_path])" maxlog = 1 _id = Symbol("removed_config_key_", current_path)
-      push!(drop, key)
-      continue
-    end
     if !haskey(defaults, skey)
       strict && throw(ArgumentError("Unknown Sparlectra configuration key: $(current_path)"))
       @warn "Unknown Sparlectra configuration key $(current_path) is ignored (not a key of this Sparlectra version; check the spelling or remove it from the file)." maxlog = 1 _id = Symbol("unknown_config_key_", current_path)
@@ -2489,6 +3240,8 @@ function _load_and_validate_config(default_path::AbstractString, user_path::Abst
   if isfile(user_path)
     user_version = _config_file_version(user, user_path)
     _validate_config_scope(user, "general", user_path)
+    # the sigma table names its file and line on an error
+    _check_sigma_levels_in_file(user, user_path)
     user_version < CONFIG_VERSION_CURRENT && _apply_config_aliases!(user, user_version, user_path)
   end
   _validate_known_config_keys(user, defaults; strict = strict_keys)
@@ -2496,8 +3249,8 @@ function _load_and_validate_config(default_path::AbstractString, user_path::Abst
   _validate_known_config_keys(overrides, defaults)
   canon_user = Dict{String,Any}(String(_canonical_config_key(_config_key(k))) => v for (k, v) in user)
   if case_scope_from_defaults
-    # Runs with a case configuration file (issue #1 point 1, decided for
-    # `defaults`; format independent): the general file's CASE-scope keys
+    # Runs with a case configuration file (resolved against `defaults`,
+    # format independent): the general file's CASE-scope keys
     # do not participate, so the same case-plus-config pair reads to the
     # same numbers on every installation. A case-scope key resolves
     # case configuration -> packaged defaults; only machine-scope keys
@@ -2570,8 +3323,6 @@ function _remove_superfluous_config_keys!(user::AbstractDict, defaults::Abstract
       "deprecated and ignored; use $(_DEPRECATED_CONFIG_KEYS[current_path])"
     elseif current_path in _REMOVED_SILENT_CONFIG_KEYS
       "no longer a configuration key"
-    elseif haskey(_REMOVED_NOTED_CONFIG_KEYS, current_path)
-      _REMOVED_NOTED_CONFIG_KEYS[current_path]
     elseif !haskey(defaults, skey)
       "not a key of this Sparlectra version"
     else
@@ -2596,7 +3347,7 @@ end
 function _flatten_config_values!(out::Dict{String,Any}, raw::AbstractDict, prefix::String = "")
   for (key, value) in raw
     path = isempty(prefix) ? String(key) : string(prefix, ".", key)
-    value isa AbstractDict ? _flatten_config_values!(out, value, path) : (out[path] = value)
+    (value isa AbstractDict && !(path in _TABLE_VALUED_CONFIG_KEYS)) ? _flatten_config_values!(out, value, path) : (out[path] = value)
   end
   return out
 end
@@ -2760,17 +3511,6 @@ function _normalize_deprecated_config_aliases!(root::Dict{String,Any})::Vector{S
       push!(normalized, "power_flow.start_mode.voltage_mode")
       push!(normalized, "power_flow.start_mode.profile_source")
     end
-    qlimits = get(pf, "qlimits", nothing)
-    if qlimits isa Dict{String,Any}
-      mode = get(qlimits, "enforcement_mode", nothing)
-      if mode in ("matpower_simultaneous", :matpower_simultaneous)
-        qlimits["enforcement_mode"] = "classic_simultaneous"
-        push!(normalized, "power_flow.qlimits.enforcement_mode")
-      elseif mode in ("matpower_one_at_a_time", :matpower_one_at_a_time)
-        qlimits["enforcement_mode"] = "classic_one_at_a_time"
-        push!(normalized, "power_flow.qlimits.enforcement_mode")
-      end
-    end
   end
   # The deprecated diagnostics.* duplicates of output.* are DROPPED, not
   # migrated: they were never read, so copying their values into output.*
@@ -2789,24 +3529,13 @@ function _normalize_deprecated_config_aliases!(root::Dict{String,Any})::Vector{S
   return unique(normalized)
 end
 
-# A string is written bare only when the repository's own YAML reader
-# gives it back unchanged as a string; everything else is quoted. This is
-# the self-inverse criterion, not a maintained list: it covers the YAML
-# 1.1 boolean family (live case: the enum value "off" was written bare
-# and came back as `false`), null spellings, every number form the reader
-# knows including leading-zero integers, ":symbol" spellings,
-# inline-list lookalikes, and padded values, and it stays correct when
-# parse_yaml_scalar learns new forms.
-function _yaml_ambiguous_scalar(s::AbstractString)
-  v = parse_yaml_scalar(String(s))
-  return !(v isa AbstractString && String(v) == String(s))
-end
-
+# the scalar text of the library writer; strings follow the one quoting rule
+# of the YAML module (yaml_string_text), so writer and reader are inverse
 function _yaml_scalar_text(value)
   value === nothing && return "null"
   value isa Bool && return value ? "true" : "false"
-  value isa Symbol && return _yaml_ambiguous_scalar(String(value)) ? repr(String(value)) : String(value)
-  value isa AbstractString && return (occursin(r"[:#\[\],{}]|^$", value) || _yaml_ambiguous_scalar(value)) ? repr(String(value)) : String(value)
+  value isa Symbol && return yaml_string_text(String(value))
+  value isa AbstractString && return yaml_string_text(value)
   value isa AbstractVector && return string("[", join((_yaml_scalar_text(v) for v in value), ", "), "]")
   return string(value)
 end
@@ -2815,11 +3544,13 @@ function _write_yaml_dict(io::IO, data::Dict{String,Any}; indent::Int = 0)
   pad = repeat(" ", indent)
   for key in sort(collect(keys(data)))
     value = data[key]
+    # bare or quoted as the reader reads it back (_yaml_key_text)
+    ktext = _yaml_key_text(key)
     if value isa Dict{String,Any}
-      println(io, pad, key, ":")
+      println(io, pad, ktext, ":")
       _write_yaml_dict(io, value; indent = indent + 2)
     else
-      println(io, pad, key, ": ", _yaml_scalar_text(value))
+      println(io, pad, ktext, ": ", _yaml_scalar_text(value))
     end
   end
 end
@@ -2884,7 +3615,7 @@ function _print_config_section(io::IO, name::AbstractString, value; indent::Abst
   child_indent = string(indent, "  ")
   for field in fieldnames(typeof(value))
     field_value = getfield(value, field)
-    if field_value isa StartModeConfig || field_value isa QLimitConfig || field_value isa ObservabilityConfig
+    if field_value isa StartModeConfig || field_value isa QLimitConfig || field_value isa ObservabilityConfig || field_value isa TapEstimationConfig || field_value isa BadDataConfig
       _print_config_section(io, String(field), field_value; indent = child_indent)
     else
       println(io, child_indent, field, ": ", field_value)

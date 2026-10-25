@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -149,7 +149,7 @@ function _check_wrong_branch_solution(V::Vector{ComplexF64}, bus_types::Vector{S
 
   # Wrong-branch heuristics judge only the network's HIGHEST voltage level
   # by design: sub-transmission dips are normal
-  # operating spread, not a wrong-branch indicator — a real 6209-bus CGMES
+  # operating spread, not a wrong-branch indicator: a real 6209-bus CGMES
   # snapshot flagged healthy 45 kV feeders at 0.94 pu as SUSPECT while its
   # 380 kV level was clean. Without a net (pure vector call) or without
   # nominal-voltage data every bus stays in scope, preserving the previous
@@ -355,4 +355,26 @@ function _check_wrong_branch_solution(V::Vector{ComplexF64}, bus_types::Vector{S
     reference_branch_angle_deg = reference_branch_angle_seen_deg,
     reference_branch = reference_branch_label,
   )
+end
+
+"""
+    _wrong_branch_pst_start_hint(status) -> String
+
+Hint sentence for a wrong-branch result with a voltage finding
+(`:voltage_collapse`, `:low_voltage_magnitude`, `:low_voltage_level_share`)
+after a solve that started without angles (flat start, or a stored start
+with every bus at the slack angle) on a net with an in-service phase
+shifter while `power_flow.start_mode.rotate_behind_pst` was off (status
+field `start_without_angles_behind_pst`, set by `runpf_rectangular!`). With
+every angle at the slack angle the whole shift lies across the shifter
+impedance at the start, and Newton can end on the low-voltage root (the
+3-bus net of the pf flat-start test at 30 and 90 degrees). Returns "" in
+every other case, also for a status without the field. Read by the
+solver warning (`_store_and_print_rectangular_final_status!`) and the
+result summary line (`_print_wrong_branch_summary_line`).
+"""
+function _wrong_branch_pst_start_hint(status)::String
+  _rect_status_get(status, :start_without_angles_behind_pst, false) === true || return ""
+  _rect_status_get(status, :wrong_branch_reason, :not_checked) in (:voltage_collapse, :low_voltage_magnitude, :low_voltage_level_share) || return ""
+  return "The solve started without angles on a net with phase shifters; power_flow.start_mode.rotate_behind_pst = true starts the buses behind them at the shifted angle."
 end

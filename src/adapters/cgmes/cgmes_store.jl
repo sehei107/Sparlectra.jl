@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,14 +13,14 @@
 # limitations under the License.
 
 # file: src/adapters/cgmes/cgmes_store.jl
-# purpose: layer 3 of the CGMES importer — merged profile store with by-class
+# purpose: layer 3 of the CGMES importer, merged profile store with by-class
 # index and deliberately dumb typed accessors. No query language. The API is
 # shaped so that a later column-store swap stays invisible to layers 4/5.
 
 """
 Merged CGMES data set: all profiles of one delivery in a single object store.
 `boundary` holds the mRIDs of objects defined in boundary-profile files
-(EQ_BD/TP_BD) — needed to recognize X-nodes in assembled models.
+(EQ_BD/TP_BD), needed to recognize X-nodes in assembled models.
 """
 struct CGMESStore
   objects::Dict{String,CIMObject}
@@ -49,7 +49,9 @@ function loadCGMES(path; profile_filter::Set{Symbol} = IMPORT_PROFILE_TAGS)::CGM
   # Order: EQ-family first, then TP, then SSH/SV overlays. Classification
   # needs the header, so read it cheaply once per file up front.
   order = collect(eachindex(files))
-  rank = Dict(:EQ => 0, :EQ_OP => 0, :EQ_SC => 0, :EQ_BD => 1, :EQ_BD_OP => 1, :TP_BD => 2, :TP => 2, :SSH => 3, :SV => 4)
+  # DY last: its rdf:about entries (EnergyConsumer.LoadDynamics) overlay EQ
+  # objects, and its own objects point at EQ machines
+  rank = Dict(:EQ => 0, :EQ_OP => 0, :EQ_SC => 0, :EQ_BD => 1, :EQ_BD_OP => 1, :TP_BD => 2, :TP => 2, :SSH => 3, :SV => 4, :DY => 5)
   headers = [readCGMESHeader(f) for f in files]
   sort!(order; by = i -> minimum(get(rank, t, 9) for t in headers[i].profiles; init = 9))
 
@@ -82,7 +84,7 @@ end
     refsAll(store, obj, name) -> Vector{String}
 
 Every target mRID of the (possibly multi-valued) reference `name` on `obj`,
-in document order. `obj.refs[name]` keeps only the first value — repeated
+in document order. `obj.refs[name]` keeps only the first value: repeated
 properties (`TopologicalIsland.TopologicalNodes`, `md:Model.DependentOn`)
 overflow into `store.multirefs`. Returns an empty vector when the reference
 is absent.

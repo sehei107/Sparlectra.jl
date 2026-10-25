@@ -29,6 +29,17 @@ function _scf_controllers(net::Net)
     entry = _scf_controller_entry(ctrl)
     entry === nothing && continue
     name, payload = entry
+    # the rank is written only when set, so files without ranks keep their bytes
+    prio = control_priority(ctrl)
+    prio == 0 || (payload["priority"] = prio)
+    # The controller's own shunt has no shunt row (scf_id_map), so its
+    # state (in service, model, estimated) travels here, in the key names
+    # of a components.shunt_state row; the reader applies it after the
+    # controller has rebuilt the shunt.
+    if ctrl isa ShuntVoltageControl
+      fields = _scf_shunt_state_fields(_find_controlled_shunt(net, ctrl))
+      isempty(fields) || (payload["shunt_state"] = fields)
+    end
     key = name
     n = 1
     while haskey(out, key)
@@ -60,6 +71,9 @@ function _scf_controller_entry(ctrl)
     d["voltage_error_metric"] = String(ctrl.voltage_error_metric)
     d["max_outer_iters"] = ctrl.max_outer_iters
     d["enabled"] = ctrl.enabled
+    # the control range only when set, so files without one keep their bytes
+    ctrl.tap_min === nothing || (d["tap_min"] = ctrl.tap_min)
+    ctrl.tap_max === nothing || (d["tap_max"] = ctrl.tap_max)
     return (string("tap_", ctrl.trafo), d)
   elseif ctrl isa MachineVoltageControl
     d = Dict{String,Any}("type" => "machine_voltage", "bus" => ctrl.bus, "target_bus" => ctrl.target_bus, "target_vm_pu" => ctrl.target_vm_pu, "deadband_vm_pu" => ctrl.deadband_vm_pu, "max_outer_iters" => ctrl.max_outer_iters, "enabled" => ctrl.enabled, "name" => ctrl.name)
@@ -74,6 +88,11 @@ function _scf_controller_entry(ctrl)
   elseif ctrl isa ShuntVoltageControl
     d = Dict{String,Any}("type" => "shunt_voltage", "bus" => ctrl.bus, "target_vm_pu" => ctrl.target_vm_pu, "bs_min_mvar" => ctrl.bs_min_mvar, "bs_max_mvar" => ctrl.bs_max_mvar, "deadband_vm_pu" => ctrl.deadband_vm_pu, "max_outer_iters" => ctrl.max_outer_iters, "enabled" => ctrl.enabled, "name" => ctrl.name)
     ctrl.step_mvar === nothing || (d["step_mvar"] = ctrl.step_mvar)
+    # the controller's shunt is not written as a shunt row (scf_id_map), so
+    # its present susceptance travels as the start value; zero is the
+    # default and stays unwritten
+    bs = _shunt_start_value(ctrl.bs_mvar, ctrl.bs_min_mvar, ctrl.bs_max_mvar, ctrl.step_mvar)
+    bs == 0.0 || (d["bs_start_mvar"] = bs)
     return (ctrl.name, d)
   elseif ctrl isa SeriesReactanceControl
     d = Dict{String,Any}("type" => "series_reactance", "from_bus" => ctrl.fromBus, "to_bus" => ctrl.toBus, "p_target_mw" => ctrl.p_target_mw, "deadband_p_mw" => ctrl.deadband_p_mw, "max_outer_iters" => ctrl.max_outer_iters, "enabled" => ctrl.enabled, "name" => ctrl.name)
@@ -129,11 +148,11 @@ end
 Instantiate the case file's controllers on `net`. The entries are the
 declarative `control.controllers` schema, so they go through
 `applyConfiguredControllers!` unchanged: one construction path, one
-validation, one vocabulary. `branch_by_name` maps the file's HUMAN branch
-names (extra block) to built branch indices: the importer regenerates
-in-memory component names, so a `trafo`/`followers` reference written with
-the case's own names would otherwise not resolve. References that already
-resolve (generated names, index strings) are passed through untouched.
+validation, one vocabulary. `branch_by_name` maps the file's branch names
+(extra block) to built branch indices, so a `trafo`/`followers` reference
+resolves to the branch of that id even where several branches share the
+name. Other references (index strings, component ids) are passed through
+untouched.
 """
 function _scf_apply_controllers!(net::Net, entries::AbstractDict; branch_by_name::AbstractDict{String,Int} = Dict{String,Int}())
   isempty(entries) && return 0
@@ -144,10 +163,25 @@ function _scf_apply_controllers!(net::Net, entries::AbstractDict; branch_by_name
   # the file stores the YAML mapping form (name => entry); ControlConfig
   # holds the entry list, so the key becomes the entry's name
   list = Any[]
+  # shunt state of a shunt voltage controller's own shunt, by bus (one
+  # such controller per bus); not a controller keyword, so it is taken out
+  # before the entry goes to applyConfiguredControllers!
+  shunt_states = Pair{String,SCFShuntStateRow}[]
   for key in sort!(String[String(k) for k in keys(entries)])
     body = entries[key]
     body isa AbstractDict || throw(ArgumentError("SCF: sparlectra.components.controllers.$(key) must be an object with a type key."))
     entry = Dict{String,Any}(String(k) => v for (k, v) in body)
+    st = pop!(entry, "shunt_state", nothing)
+    if st !== nothing
+      get(entry, "type", nothing) == "shunt_voltage" || throw(ArgumentError("SCF: sparlectra.components.controllers.$(key).shunt_state is only valid for a shunt_voltage controller."))
+      st isa AbstractDict || throw(ArgumentError("SCF: sparlectra.components.controllers.$(key).shunt_state must be an object."))
+      for k in keys(st)
+        String(k) in ("status", "model", "estimate") || throw(ArgumentError("SCF: sparlectra.components.controllers.$(key).shunt_state has the unknown key $(repr(String(k))); allowed are status, model, estimate."))
+      end
+      row = Dict{String,Any}(String(k) => v for (k, v) in st)
+      row["shunt"] = 0
+      push!(shunt_states, string(get(entry, "bus", "")) => _scfcase_shunt_state(row))
+    end
     haskey(entry, "name") || (entry["name"] = key)
     haskey(entry, "trafo") && (entry["trafo"] = translate(entry["trafo"]))
     if haskey(entry, "followers") && entry["followers"] isa AbstractVector
@@ -155,5 +189,10 @@ function _scf_apply_controllers!(net::Net, entries::AbstractDict; branch_by_name
     end
     push!(list, entry)
   end
-  return applyConfiguredControllers!(net, ControlConfig(enabled = true, controllers = list))
+  n = applyConfiguredControllers!(net, ControlConfig(enabled = true, controllers = list))
+  for (bus, row) in shunt_states
+    ctrl = only(c for c in _shunt_controllers(net) if c.bus == bus)
+    _scf_apply_shunt_state!(_find_controlled_shunt(net, ctrl), row)
+  end
+  return n
 end

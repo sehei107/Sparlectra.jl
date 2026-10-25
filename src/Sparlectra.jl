@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ using AnalyticLoadFlow
 using Dates
 using DelimitedFiles
 import EzXML                      # IIDM reader of the PowSyBl adapter (the CGMES submodule imports it on its own)
+import ZipArchives                # SCF time series zips (the CGMES submodule imports it on its own)
 using LinearAlgebra
 using Logging
 using Printf
@@ -121,9 +122,14 @@ export
   # ProSumer
   ProSumer,
   GenCost,                               # MATPOWER generator cost rows of a unit, kept for the export (no OPF reads them).
+  DynamicData,                           # Optional dynamic parameters of a unit (inertia, droop, reserves); no calculation reads them.
+  DynamicUnitType,                       # Unit type of DynamicData: synchronous, grid following, grid forming.
+  SynchronousUnit,
+  GridFollowingUnit,
+  GridFormingUnit,
+  DynamicDataError,                      # Thrown when a DynamicData value breaks the rule of its field.
   AbstractVoltageDependentController,
   VoltageCharacteristic,                 # Q(U)/P(U) characteristic: points plus linear, spline or polynomial interpolation.
-  PiecewiseLinearCharacteristic,         # Former name of VoltageCharacteristic, alias for one minor release.
   QUController,
   PUController,
   VoltageAdjustConfig,
@@ -167,6 +173,8 @@ export
   # yamlparams.jl
   parse_yaml_scalar,
   load_yaml_dict,
+  yaml_quoted,                            # The one quoting rule of the YAML writers (escapes backslash and quote).
+  yaml_string_text,                       # A string scalar as the writers emit it: bare or quoted, read back unchanged.
   merge_yaml_dict!,
   as_bool,
   as_int_vector,
@@ -177,6 +185,7 @@ export
   PowerFlowConfig,
   ControlConfig,
   ObservabilityConfig,
+  TapEstimationConfig,                    # state_estimation.tap_estimation settings (enabled, fallback, impedance_correction).
   StateEstimationConfig,
   MatpowerImportConfig,
   MatpowerExportConfig,                   # MATPOWER export settings (write_solution).
@@ -188,6 +197,9 @@ export
   parallel_max_tasks,                     # Resolve max_tasks (auto = Threads.nthreads()) to a task count.
   DiagnosticsConfig,
   OutputConfig,
+  ContingencyConfig,                      # contingency.* settings (ladder, screening, warm start, events, pairs).
+  ContingencyEventsConfig,                # contingency.events.*: correlated event classes.
+  ContingencyPairsConfig,                 # contingency.pairs.*: N-2 pairs with a cap.
   SparlectraConfig,
   load_sparlectra_config,                 # Load a configuration file without activating it.
   load_sparlectra_config!,                # Load and activate a configuration file.
@@ -307,7 +319,8 @@ export
   # Network
   addBus!,                                # Add a bus to the network.
   addShunt!,                              # Add a shunt element.
-  addACLine!,                             # Add an AC line.
+  addACLine!,                             # Add an AC line from its totals in ohm and siemens.
+  addACLinePerKm!,                        # Add an AC line from values per km and its length.
   addPIModelACLine!,                      # Add an AC line as a PI model.
   add2WTrafo!,                            # Add a two-winding transformer.
   addPIModelTrafo!,                       # Add a transformer PI model.
@@ -426,6 +439,7 @@ export
   CGMESLineShortCircuit,                  # Optional per-line zero-sequence data for the CGMES export.
   cgmesLineShortCircuitData,              # Harvested zero-sequence line data as writeCGMESFiles input.
   printShortCircuitCoverage,              # Readable rendering of the coverage rows.
+  dynamicsReportLines,                    # DY section of the CGMES import report (cgmes_import.read_dynamics).
   runShortCircuit!,                       # IEC 60909 balanced Ik'' max/min per fault bus (#277).
   exportSCF,                              # Write a Net as a Sparlectra Case Format file (PGM-compatible, #342).
   net_to_scf,                             # Build the SCF root object of a Net without writing it (#342).
@@ -434,7 +448,7 @@ export
   SCFCase,                                # Typed in-memory form of one SCF document.
   read_scf_json,                          # Read a case file into its typed SCFCase form.
   write_scf_json,                         # Serialize an SCFCase to its canonical file bytes.
-  build_net,                              # The one network constructor of the run path over an SCFCase.
+  build_net,                              # The one network constructor of the run path over an SCFCase (or the base net of an SCFSeries).
   net_to_scfcase,                         # The typed case a Net exports as (same keywords as exportSCF).
   FormatAdapter,                          # Abstract input-format adapter contract.
   MatpowerAdapter,                        # MATPOWER adapter: convert_case(mpc) -> SCFCase.
@@ -461,30 +475,69 @@ export
   format_powsybl_report,                  # The console block of a PowSyBl import report.
   PatchOp,                                # One scenario patch operation on an SCF component id.
   Scenario,                               # Named, weighted, ordered patch list.
-  ScenarioSet,                            # Scenario vector plus N-1 mode and exclusions.
+  ScenarioSet,                            # Scenario vector plus N-1 mode, exclusions and event classes.
+  scenario_from_case,                     # The scenario form of a contingency case (one status op per element).
   ScenarioIndex,                          # SCF id to component class and internal index, from the typed case.
   validate_scenarios,                     # Load-time validation with scenario name and op index in every error.
-  expand_scenarios,                       # Expand the N-1 modes through the existing generators.
-  scf_case_scenarios,                     # The scenario set a typed case carries (scenarios or mapped contingencies).
+  expand_scenarios,                       # Expand the N-1 modes and event classes through the generators.
+  scf_case_scenarios,                     # The scenario set a typed case carries (the scenarios block).
   scenario_set_dict,                      # Document form of a scenario set.
   scenario_set_from_dict,                 # Read a sparlectra.scenarios block.
-  scenario_set_from_contingencies,        # Map the legacy contingencies block onto the scenario model.
   UndoLog,                                # Reversible record of one apply!.
   apply!,                                 # Apply patch operations to a working copy with an undo log.
   restore!,                               # Replay the undo log in reverse; the copy returns to the base bitwise.
   runScenarios!,                          # Evaluate a scenario set on the engine; N-1 status ops match runContingencies! exactly.
   ScenarioResult,                         # ContingencyResult surface plus screened flag and screening estimate.
+
+  # scf_series.jl (SCF time series for QSTS: base case plus one delta per step, one zip)
+  SCFSeries,                              # A series in memory: base case, series index, steps and their patch ops.
+  SCFSeriesStep,                          # One step: number, ISO 8601 UTC timestamp, axis label.
+  read_scf_series,                        # Read and check a series zip (series.json, base.scf.json, delta.csv).
+  write_scf_series,                       # Write a series zip, compressed, with deterministic entries.
+  is_scf_series,                          # Whether a file is a series zip, by content.
   scf_case_config,                        # The dotted configuration overrides a case file carries (#342).
   scf_is_case_config_key,                 # Whether a configuration key describes the case or the installation (#342).
-  scf_case_studies,                       # The contingency and short-circuit study definitions of a case file (#342).
+  scf_case_studies,                       # The short-circuit study definition of a case file (#342).
   scf_extra_names,                        # Component id to reference name, so study blocks can be resolved against a network (#342).
   scf_validate_dataset,                   # File-level validation of a parsed case file, without building the network (#342).
   scf_fault_nodes,                        # The buses a case file's PGM fault rows point at (#342).
   ShortCircuitResult,                     # Result type of runShortCircuit! (safety-flagged rows).
 
-  # contingency.jl (N-1 batch, multi-core Phase 4)
-  ContingencyCase,                        # One outage case (name, kind = :branch/:gen, element, weight).
-  ContingencyResult,                      # Outcome of one case: convergence, envelope, overloads, shed load, weight.
+  # qsts_snapshots.jl, qsts_metrics.jl, qsts_sequential.jl (QSTS: mode A every step on its own,
+  # mode B the steps in order with the controller state carried; long result format)
+  runQsts,                                # Run an SCF series or a CGMES series union (qsts.mode = snapshots), or SCF series in order (qsts.mode = sequential).
+  QstsResult,                             # Result of runQsts: base and step infos, elements, values per bus, branch, controller and step, switching, metrics, notes.
+  QstsStepInfo,                           # One solve of a snapshot run: status, controller status, iterations, frozen buses, references.
+  QstsElements,                           # Addresses, names, nominal voltages and ratings of the buses and branches, and the controllers of a sequential run.
+  QstsSVReference,                        # SV state of one snapshot, the reference of the SV comparison of a snapshot run.
+  QSTS_BUS_QUANTITIES,                    # Quantity names per bus of the long format, in array order.
+  QSTS_BRANCH_QUANTITIES,                 # Quantity names per branch of the long format, in array order.
+  QSTS_STEP_QUANTITIES,                   # Quantity names per step of the long format, in array order.
+  QSTS_CONTROLLER_QUANTITIES,             # Quantity names per tap and bank controller of a sequential run, in array order.
+  qstsSwitching,                          # Tap and bank moves of a sequential run (step, element, old, new, steps, trigger) as a column table.
+  qstsMetrics,                            # Metrics of a sequential run (switch counts, hunting, violations, loss energy) as a column table.
+  QstsEventList,                          # The events of a sequential run (step, element, open/close/in/out) with their CSV lines.
+  readQstsEvents,                         # Read an event list CSV step,element_id,action,value with the line in every error.
+  qstsEventSeries,                        # A series from an event list, on an SCF case or a CGMES union, for a sequential run.
+  CGMESEventSeries,                       # An event series on a CGMES union (template, full delta per step, event source).
+  qstsChart,                              # One quantity of one element of a QSTS result as an SVG time series chart with its band.
+  QstsChart,                              # The chart of qstsChart: values, band and the SVG text; shows as image/svg+xml.
+  qstsLongTable,                          # Long format (step, element_id, quantity, value) as a column table.
+  qstsValues,                             # One quantity of one element over all steps, NaN in gaps.
+  writeQstsResults,                       # Write values, steps and elements as CSV plus the manifest of a snapshot run.
+
+  # contingency.jl, names.jl, events.jl (N-1 batch, correlated events, N-2 pairs)
+  ContingencyCase,                        # One outage case: name, kind, the outaged elements, weight.
+  ContingencyResult,                      # Outcome of one case: kind, elements, convergence, envelope, overloads, shed load, weight.
+  ContingencyNames,                       # Display names of the outage elements (file names of an SCF case).
+  contingency_names,                      # The display-name map of a net, optionally with the file names of its SCF case.
+  generateDoubleCircuits,                 # Events: branches with the same two endpoints.
+  generateBusbarEvents,                   # Events: one busbar section with its branches and couplers.
+  generateSubstationEvents,               # Events: a whole station (buses joined by closed links).
+  generateLinkOutages,                    # One case per closed bus link (busbar coupler).
+  generateNameGroups,                     # Events: branches whose file names share a stem.
+  generateBranchPairs,                    # N-2 pairs of closed branches, with a cap.
+  generateCorrelatedEvents,               # The union of the event classes, duplicates removed.
   OverloadRecord,                         # One overloaded branch under a case (name + loading %).
   ContingencyReport,                      # Aggregate over a batch (counts, load shed, worst loading, top overloads).
   runContingencies!,                      # Evaluate a case batch on template copies, optionally threaded.
@@ -494,7 +547,7 @@ export
   applyContingencyWeights,                # Attach per-case weights (by name) to a case list.
   readContingencyWeightsCSV,              # Read case name -> outage weight from a two-column CSV.
   printContingencyResults,                # Fixed-width result table (style of printShortCircuitResult).
-  writeContingencyResultsCSV,             # Semicolon CSV writer for the result batch.
+  writeContingencyResultsCSV,             # CSV writer for the result batch (output.csv_format).
   buildContingencyReport,                 # Aggregate a result batch into a ContingencyReport.
   printContingencyReport,                 # Print the aggregate report summary block.
   NativeShortCircuitData,                 # Native SC source container on Net (filled by addExternalGrid!, #299).
@@ -545,6 +598,9 @@ export
   classify_final_q_limits,                # The final Q-limit check every enforcement mode ends with (two thresholds).
   final_q_check_line,                     # That check in one line (text report, run.log, metadata, result page).
   printQVCharacteristicCheck,             # Print that check; part of the result print and the run report.
+  qlimitStabilityReport,                  # Stability conditions (6)/(7) of Zhao et al. at every voltage-regulated bus.
+  qlimit_stability_line,                  # That check in one line (result print, run.log, metadata, result page).
+  printQLimitStabilityLine,               # Print that line; part of the result print.
   validate_q_limit_signs!,                # Validate Q-limit sign conventions.
   logQLimitHit!,
   lastQLimitIter,
@@ -565,7 +621,7 @@ export
   printACPFlowResults,                    # Print AC PF result report.
   printProsumerResults,
 
-  # powerflow_dc/ — standalone DC power flow (MATPOWER rundcpf/makeBdc equivalent).
+  # powerflow_dc/: standalone DC power flow (MATPOWER rundcpf/makeBdc equivalent).
   rundcpf!,                               # Solve standalone DC power flow; optional AC-NR seeding via seed_ac_start.
   DcPowerFlowConfig,                      # power_flow.dc.* configuration.
   DcPowerFlowReport,                      # Structured DC PF report (angles + lossless branch flows).
@@ -617,14 +673,50 @@ export
   addImagMeasurement!,                    # Add current-magnitude measurement (ampere, auxiliary): branch or shunt-bay variant (SE phases 1/2).
   addIaMeasurement!,                      # Add PMU current-phasor angle measurement (degrees, alpha-referenced like VaMeas).
   addCurrentPhasorMeasurement!,           # Add a full PMU current phasor as the ImagMeas + IaMeas pair.
-  setTapEstimation!,                      # Release transformer tap positions as SE states (cascade model).
+  setTapEstimation!,                      # Release transformer tap changers as SE states (state = electrical step).
   calcMachineTrafoTapFromSE,              # Back-calculate a machine (GSU) transformer tap after an SE (mutually exclusive with a release).
   validate_topology,                      # Stage-1 topology pre-checks (advisory: findings only, never a mutation).
   test_topology_hypotheses,               # Stage-3 status-toggle hypothesis test on working copies (recommendations only).
   addShuntQMeasurement!,                  # Add shunt-bay reactive-power measurement (MVar; SE phase 2 case A).
   deriveShuntPseudoMeasurements!,         # Derive ShuntQ pseudo-measurements from bay current plus Vm (SE phase 2 case B).
-  readMeasurementsCSV!,                   # Read a measurement CSV v1 file (atomic import; SE phase 5).
-  writeMeasurementsCSV,                   # Write net.measurements as a measurement CSV v1 file (lossless roundtrip).
+  writeMeasurementsCSV,                   # Write net.measurements in the CSV v1 layout (input of convertMeasurementsV1; the v1 reader was removed in 0.50.0).
+  # measurement table (several snapshots per file, keys resolved through a
+  # MeasurementKeyIndex: cgmesMeasurementKeys for mRIDs, nameMeasurementKeys
+  # for element names)
+  MeasurementRow,                         # One row of a measurement table, with its format problem if any.
+  MeasurementKeyIndex,                    # Resolution of terminal, node and Analog keys (mRIDs or names) to network locations.
+  MeasurementTarget,                      # Where a terminal mRID points (branch end, injection, shunt, not modelled).
+  MeasurementSet,                         # The SE measurements of one timestamp, with counts and problem rows.
+  MeasurementTableImport,                 # All sets of a table plus the rows no set could take.
+  readMeasurementTable,                   # Read a measurement table (rows with format problems are kept, not dropped).
+  readMeasurementTable!,                  # Read a measurement table into net.measurements (import plus apply of one set).
+  writeMeasurementTable,                  # Write rows as a measurement table.
+  isMeasurementTable,                     # True when a file carries the measurement-table version line and header (decided by content).
+  importMeasurementTable,                 # Resolve table rows into one MeasurementSet per timestamp.
+  applyMeasurementSet!,                   # Put a MeasurementSet into net.measurements.
+  measurementImportReport,                # Plain-text import report (counts per set and every problem row).
+  cgmesMeasurementKeys,                   # Key index of a CGMES import for importMeasurementTable.
+  nameMeasurementKeys,                    # Key index of element names (bus, <branch>:from/:to, prosumer, shunt) for a case without CGMES.
+  generateMeasurementTableFromSV,         # Synthetic measurement table from the SV profile of a CGMES delivery.
+  generateMeasurementTableFromPF,         # Synthetic measurement table (name keys) from a solved power flow of any net.
+  generatePseudoMeasurementTable,         # Pseudo rows (source pseudo;ssh) for loads and generators a measurement table does not observe.
+  convertMeasurementsV1,                  # Write the measurement table of a measurement CSV v1 file and its case (same measurements, comments carried over).
+  # QSTS series check of CGMES snapshot deliveries (qsts.series.*)
+  CGMESSeriesInput,                       # One snapshot (source, model key, time, label) for checkCGMESSeries.
+  CGMESSeriesClassDiff,                   # One class compared between two snapshots (only a, only b, common, renamed, ambiguous, drifted).
+  CGMESSeriesPair,                        # Two consecutive snapshots: overlap, churn, time step, split reason.
+  CGMESSeriesReport,                      # Snapshots, pairs and series of a series check.
+  checkCGMESSeries,                       # Group snapshots by model and time; split where the structure differs.
+  printCGMESSeriesReport,                 # Plain-text series report.
+  writeCGMESSeriesReport,                 # Series report as CSV.
+  # QSTS union network of one series: template plus one delta per snapshot
+  CGMESSeriesError,                       # A series that cannot become a union network (named reason).
+  CGMESSnapshotDelta,                     # One snapshot as patch ops against the union template.
+  CGMESSeriesUnion,                       # Union template, its index, the deltas and the node identity of a series.
+  buildCGMESSeriesUnion,                  # Build the union network and the delta of every snapshot.
+  compareSnapshotReproduction,            # Check that template plus delta reproduces the direct import of a snapshot.
+  QstsConfig,                             # Configuration block qsts.* (run mode, base step, snapshot controls, series check).
+  QstsSeriesConfig,                       # Configuration block qsts.series.*.
   runpf_from_se!,                         # Power flow starting from the last SE result (:se_state or :se_snapshot).
   takahashi_diag,                         # Diagonal of inv(A) from a UMFPACK factorization (shared Takahashi recursion).
   takahashi_selected_inverse,             # Selected inverse on the factor pattern (SE diagnostics Omega_ii).
@@ -695,12 +787,13 @@ include("component.jl")
 include("lines.jl")
 include("transformer.jl")
 include("tap_changer_kinds.jl")
+include("dynamic_data.jl")
 include("prosumer.jl")
 include("node.jl")
 include("branch.jl")
 include("link.jl")
 include("shunt.jl")
-# Native short-circuit source container (issue #299) — must precede
+# Native short-circuit source container (issue #299), must precede
 # network.jl because Net carries a typed sc_sources field.
 include("shortcircuit/native_sc_data.jl")
 # HVDC link record: must precede network.jl for the same reason (typed
@@ -774,29 +867,46 @@ include("acpflow/solver_interface.jl")
 # a weak dependency, a normal part of the module since it became a required one
 include("acpflow/apslf_solver.jl")
 include("stateestimation/measurements.jl")
+include("stateestimation/measurement_table.jl")
+include("stateestimation/measurement_convert.jl")
 include("numerics/takahashi.jl")
+include("stateestimation/tap_changer_data.jl")
 include("stateestimation/tap_estimation.jl")
 include("stateestimation/state_estimation.jl")
 include("stateestimation/topology_validation.jl")
 # IEC 60909 balanced short-circuit evaluation (issue #277). Consumes
 # Net + the CGMES short-circuit harvest; reuses the equicircuit branch
-# helpers and the AC-island decomposition — the PF solver stays untouched.
+# helpers and the AC-island decomposition, the PF solver stays untouched.
 include("shortcircuit/short_circuit.jl")
 # N-1 contingency batch API (multi-core Phase 4): needs the rectangular
 # solver, remove functions, island detection, and the parallel runtime
 # helpers included above.
+include("contingency/names.jl")
 include("contingency/contingency.jl")
+include("contingency/events.jl")
+# model flow at a branch terminal and per-island angle alignment against an
+# SV state: shared by compareWithSV and the QSTS snapshot comparison
+include("sv_compare_core.jl")
 include("scenario/patch.jl")
 include("scenario/apply.jl")
 include("scenario/engine.jl")
+include("adapters/scf/scf_series.jl")
+# QSTS mode A and the result format; before the adapters, whose series union holds the SV reference type
+include("qsts/qsts_snapshots.jl")
+# QSTS mode B: metrics, the sequential run and the event list
+include("qsts/qsts_metrics.jl")
+include("qsts/qsts_sequential.jl")
+include("qsts/qsts_events.jl")
+include("qsts/qsts_chart.jl")
 
 # --- adapters: format readers, converters, the registry --------------------
 include("adapters/matpower/MatpowerIO.jl")
 include("adapters/matpower/createnet_powermat.jl")
 include("adapters/dtf/DTFImporter.jl")
 include("adapters/cgmes/CGMESImporter.jl")
-import .CGMESImporter: summarizeCGMES, createNetFromCGMES, importCGMES, compareWithSV, analyzeCGMES, shortCircuitCoverage, printShortCircuitCoverage, writeCGMESFiles, CGMESLineShortCircuit, cgmesLineShortCircuitData
+import .CGMESImporter: summarizeCGMES, createNetFromCGMES, importCGMES, compareWithSV, cgmesMeasurementKeys, generateMeasurementTableFromSV, CGMESSeriesInput, CGMESSeriesClassDiff, CGMESSeriesPair, CGMESSeriesReport, checkCGMESSeries, printCGMESSeriesReport, writeCGMESSeriesReport, CGMESSeriesError, CGMESSnapshotDelta, CGMESSeriesUnion, buildCGMESSeriesUnion, compareSnapshotReproduction, analyzeCGMES, shortCircuitCoverage, printShortCircuitCoverage, writeCGMESFiles, CGMESLineShortCircuit, cgmesLineShortCircuitData, dynamicsReportLines
 include("adapters/cgmes/glue.jl")
+include("adapters/cgmes/qsts_glue.jl")
 include("adapters/matpower/exportMatPower.jl")
 include("adapters/adapters.jl")
 include("import/case_import.jl")

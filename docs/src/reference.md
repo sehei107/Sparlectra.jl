@@ -7,14 +7,17 @@ that directory.
 - [API and Services](reference_api.md): service entry points, run management, Web UI backend
 - [ACPFlow Runner](reference_acpflow.md): the configured power-flow execution path
 - [Core Model](reference_core.md): network, nodes, branches, transformers, prosumers
+- [Results and Output](reference_results.md): result tables, losses, CSV output, run session
 - [Rectangular Power Flow](reference_powerflow_rectangular.md): the Newton-Raphson solver in rectangular coordinates
 - [DC Power Flow](reference_powerflow_dc.md): the linear DC approximation
 - [Short Circuit](reference_shortcircuit.md): IEC 60909 short-circuit calculation
-- [Format Adapters](reference_adapters.md): MATPOWER, CGMES, DTF, and the Sparlectra Case Format
+- [Format Adapters](reference_adapters.md): MATPOWER, DTF, PowSyBl, PGM, and the Sparlectra Case Format
+- [CGMES Adapter](reference_cgmes.md): CGMES import, export, series check and union
 - [State Estimation and Measurements](reference_stateestimation.md): WLS estimator, measurement model, tap estimation
 - [Configuration Internals](reference_config.md): configuration loading and YAML handling
 - [Controllers](reference_controller.md): the control framework and its controllers
 - [APSLF Bridge](reference_apslf.md): the AnalyticLoadFlow solver bridge
 - [Shared Numerics](reference_numerics.md): condition-number and sparse-inverse utilities
 - [Contingency](reference_contingency.md): N-1/N-k contingency analysis
+- [QSTS](reference_qsts.md): SCF time series and QSTS snapshot runs
 - [Synthetic Grids](reference_synthetic.md): generated tiled test networks

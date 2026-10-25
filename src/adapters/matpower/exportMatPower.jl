@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -82,8 +82,9 @@ function _sparlectra_transformer_loss_rows(net::Net)
       active_no_load_g_pu = g_pu,
       reactive_shunt_b_pu = b_row,
       allocation = "native_branch_pi",
-      tap_ratio = Float64(br.ratio),
-      phase_shift_deg = Float64(br.angle),
+      # the values of the branch row: ratio and shift in effect (#513)
+      tap_ratio = br.ratio == 0.0 ? 0.0 : Float64(br.tap_ratio),
+      phase_shift_deg = Float64(br.ratio == 0.0 ? br.angle : br.phase_shift_deg),
       stage_position = meta !== nothing && hasproperty(meta, :actual_tap_step) && meta.actual_tap_step !== nothing ? Float64(meta.actual_tap_step) : NaN,
     ))
   end
@@ -108,8 +109,13 @@ function _matpower_branch_shunt_rows(net::Net)::Vector{NTuple{4,Float64}}
   rows = NTuple{4,Float64}[]
   for (k, br) in enumerate(net.branchVec)
     br.status == 1 || continue
-    has_symmetric_shunt(br) && continue
-    gsym = _matpower_symmetric_arm(br.g_from_pu, br.g_to_pu)
+    # a line row has no g column and gets no transformer loss row, so the
+    # symmetric g of a line also goes to its two buses; until the line kind
+    # was written correctly such a line was "T" and came back as a
+    # transformer at ratio 1 with its g in the loss row
+    line_g = _matpower_branch_kind(net, k, br) == "L" && (br.g_from_pu != 0.0 || br.g_to_pu != 0.0)
+    has_symmetric_shunt(br) && !line_g && continue
+    gsym = line_g ? 0.0 : _matpower_symmetric_arm(br.g_from_pu, br.g_to_pu)
     bsym = _matpower_symmetric_arm(br.b_from_pu, br.b_to_pu)
     t2 = abs2(calcBranchRatio(br))
     gf = (br.g_from_pu - gsym) / t2
@@ -130,7 +136,7 @@ function _matpower_bus_shunts(net::Net; branch_shunt_rows = _matpower_branch_shu
     gs[sh.busIdx] = get(gs, sh.busIdx, 0.0) + real(sh.y_pu_shunt) * net.baseMVA
     bs[sh.busIdx] = get(bs, sh.busIdx, 0.0) + imag(sh.y_pu_shunt) * net.baseMVA
   end
-  # the terminal excess of asymmetric branch shunts (0.20.0)
+  # the terminal excess of asymmetric branch shunts (0.20.0) and line g
   for r in branch_shunt_rows
     bus = Int(r[2])
     gs[bus] = get(gs, bus, 0.0) + r[3]
@@ -152,21 +158,73 @@ function _matpower_bus_shunts(net::Net; branch_shunt_rows = _matpower_branch_shu
   return gs, bs
 end
 
-function writeBusData(net::Net, file; write_solution::Bool = true, branch_shunt_rows = _matpower_branch_shunt_rows(net))
+# Voltage setpoint of a regulating or slack generator, or nothing. An
+# unsolved net carries the setpoint only here: its node voltage is still
+# the start value (1.0 for a hand-built net), so the export takes Vg and
+# the PV and slack bus Vm from the unit, as the solver does.
+function _matpower_generator_setpoint(ps::ProSumer)::Union{Nothing,Float64}
+  isGenerator(ps.proSumptionType) || return nothing
+  (isRegulating(ps) || isSlack(ps)) || return nothing
+  return ps.vm_pu === nothing ? nothing : Float64(ps.vm_pu)
+end
+
+# bus index -> setpoint of the first regulating generator at that bus (the
+# solver keeps the first one as well, see _bus_voltage_setpoints_from_prosumers)
+function _matpower_bus_setpoints(net::Net)::Dict{Int,Float64}
+  vset = Dict{Int,Float64}()
+  for ps in net.prosumpsVec
+    v = _matpower_generator_setpoint(ps)
+    v === nothing && continue
+    haskey(vset, ps.comp.cFrom_bus) || (vset[ps.comp.cFrom_bus] = v)
+  end
+  return vset
+end
+
+# The flat state of a model-only export (write_solution = false) at the PQ
+# buses that do not start at 1.0 pu and 0 degrees: the start the solver's
+# default flat start gives them, keyed by busIdx as (vm_pu, va_deg).
+# Auxiliary buses (three-winding star points) start at the ratio of their
+# stiffest winding (_aux_bus_flat_start!), every bus at the slack angle
+# (initialVrect). The turn behind phase shifters
+# (power_flow.start_mode.rotate_behind_pst) is not written: the export has no
+# run configuration. A reader with the switch on takes the re-read start
+# (every bus at 0 degrees or at the slack angle) as a start without angles
+# and turns it in the same way (initialVrect). The file VM/VA is the start of a
+# reader that does not flat-start (Sparlectra's default, MATPOWER); with
+# 1.0 pu at the star points the CGMES MiniGrid did not converge after the
+# round trip. At a PV bus of an unsolved net the writer takes only a nonzero
+# angle (the magnitude stays the setpoint); slack entries are not read. Empty
+# for a net without auxiliary buses at the slack angle 0, or without a slack.
+function _matpower_flat_start(net::Net)::Dict{Int,Tuple{Float64,Float64}}
+  out = Dict{Int,Tuple{Float64,Float64}}()
+  slack_idx = findfirst(n -> getNodeType(n) == Slack, net.nodeVec)
+  slack_idx === nothing && return out
+  V0, _ = initialVrect(net; flatstart = true)
+  _aux_bus_flat_start!(V0, net, slack_idx)
+  for k in eachindex(V0)
+    V0[k] == ComplexF64(1.0, 0.0) && continue
+    out[net.nodeVec[k].busIdx] = (abs(V0[k]), rad2deg(angle(V0[k])))
+  end
+  return out
+end
+
+function writeBusData(net::Net, file; write_solution::Bool = true, solved::Bool = true, branch_shunt_rows = _matpower_branch_shunt_rows(net))
   for r in branch_shunt_rows
     br = net.branchVec[Int(r[1])]
-    write(file, "% branch-derived shunt of branch $(Int(r[1])) ($(br.comp.cName)) at bus $(Int(r[2])): Gs=$(r[3]) MW, Bs=$(r[4]) MVar (asymmetric branch shunt, see mpc.sparlectra.branch_shunts)\n")
+    write(file, "% branch-derived shunt of branch $(Int(r[1])) ($(br.comp.cName)) at bus $(Int(r[2])): Gs=$(r[3]) MW, Bs=$(r[4]) MVar (asymmetric branch shunt or line conductance, see mpc.sparlectra.branch_shunts)\n")
   end
   NodeVec = net.nodeVec
   shunt_gs, shunt_bs = _matpower_bus_shunts(net; branch_shunt_rows = branch_shunt_rows)
   write(file, "%% bus data\n")
   write(file, "mpc.bus = [\n")
   write(file, "%bus\ttype\tPd\tQd\tGs\tBs\tarea\tVm\tVa\tbaseKV\tzone\tVmax\tVmin\n")
+  vset = solved ? Dict{Int,Float64}() : _matpower_bus_setpoints(net)
 
   rows = 0
   hasPVBus = false
   slackIdx = 0
   vgSlack = 1.0
+  flat_start = write_solution ? Dict{Int,Tuple{Float64,Float64}}() : _matpower_flat_start(net)
   for node in NodeVec
     rows += 1
     bus_i = node.busIdx
@@ -186,7 +244,6 @@ function writeBusData(net::Net, file; write_solution::Bool = true, branch_shunt_
       num = 3
       Name = Name * " (slack)"
       slackIdx = bus_i
-      vgSlack = node._vm_pu
     elseif val == 4
       num = 4
       Name = Name * " (isolated)"
@@ -202,13 +259,23 @@ function writeBusData(net::Net, file; write_solution::Bool = true, branch_shunt_
 
     # write_solution = false: the export is a pure model file, so non-slack/
     # non-PV buses do not carry a (possibly solved) voltage state. Slack and
-    # PV setpoints are meaningful pre-solve input and are preserved.
+    # PV setpoints are meaningful pre-solve input and are preserved; the
+    # other buses get their flat-start value (_matpower_flat_start). An
+    # unsolved net writes the generator setpoint there (vset is empty when
+    # the net is solved, then the solved voltage is the setpoint).
     if write_solution || num in (2, 3)
-      vm_pu = (node._vm_pu === nothing) ? 1.0 : node._vm_pu
+      vm_pu = get(vset, bus_i, (node._vm_pu === nothing) ? 1.0 : node._vm_pu)
       va_deg = (node._va_deg === nothing) ? 0.0 : node._va_deg
+      # an unsolved PV bus: the flat-start angle (the slack angle), not its
+      # stored start angle (0 on a hand-built net), so the file start has no
+      # angle step between the PV bus and the PQ buses next to it. A PV bus
+      # with flat-start angle 0 keeps its stored angle.
+      if !write_solution && !solved && num == 2
+        fs = get(flat_start, bus_i, nothing)
+        (fs !== nothing && fs[2] != 0.0) && (va_deg = fs[2])
+      end
     else
-      vm_pu = 1.0
-      va_deg = 0.0
+      vm_pu, va_deg = get(flat_start, node.busIdx, (1.0, 0.0))
     end
     if isnothing(node.comp.cVN)
       @warn "Base Voltage not defined for node $(node.comp.cID) -> set to 1.0"
@@ -217,6 +284,7 @@ function writeBusData(net::Net, file; write_solution::Bool = true, branch_shunt_
       baseKV = node.comp.cVN
     end
 
+    num == 3 && (vgSlack = vm_pu)
     lZone = (node._lZone === nothing) ? 1 : node._lZone
 
     Vmax = 1.1
@@ -230,7 +298,14 @@ function writeBusData(net::Net, file; write_solution::Bool = true, branch_shunt_
   return hasPVBus, slackIdx, vgSlack
 end # writeBusData
 
-function writeGeneratorData(sb_mva::Float64, NodeDict::Dict{Int,Node}, ProSumVec::Vector{ProSumer}, file, hasPVBus::Bool, slackIdx::Int, vgSlack::Float64)
+# Pmax and Pmin written for a unit without an active-power limit: the
+# MATPOWER convention for "unlimited" (case files carry 9999). Before, such a
+# unit got +-baseMVA, which binds a unit that produces more than baseMVA. The
+# CGMES import reads 9999 MW and above as no limit (SC_PMAX_PLACEHOLDER_MW),
+# so a round trip keeps "no limit".
+const _MATPOWER_UNLIMITED_P_MW = 9999.0
+
+function writeGeneratorData(sb_mva::Float64, NodeDict::Dict{Int,Node}, ProSumVec::Vector{ProSumer}, file, hasPVBus::Bool, slackIdx::Int, vgSlack::Float64; solved::Bool = true)
   #! format: off
   write(file, "%% generator data\n")
   write(file, "mpc.gen = [\n")
@@ -248,7 +323,10 @@ function writeGeneratorData(sb_mva::Float64, NodeDict::Dict{Int,Node}, ProSumVec
 
     bus_i = node.busIdx
 
-    Vg = (node._vm_pu === nothing) ? 1.0 : node._vm_pu
+    # unsolved: the unit's own setpoint, a non-regulating unit keeps the
+    # node voltage as before
+    vg_set = solved ? nothing : _matpower_generator_setpoint(prosum)
+    Vg = vg_set !== nothing ? vg_set : (node._vm_pu === nothing) ? 1.0 : node._vm_pu
 
     p = (prosum.pVal === nothing) ? 0 : prosum.pVal
     q = (prosum.qVal === nothing) ? 0 : prosum.qVal
@@ -257,8 +335,8 @@ function writeGeneratorData(sb_mva::Float64, NodeDict::Dict{Int,Node}, ProSumVec
     qmin = (prosum.minQ === nothing) ? -1.0 * sb_mva : prosum.minQ
     mbase = (prosum.ratedS === nothing) ? sb_mva : prosum.ratedS
     status = 1
-    pmax = (prosum.maxP === nothing) ? sb_mva : prosum.maxP
-    pmin = (prosum.minP === nothing) ? -1.0 * sb_mva : prosum.minP
+    pmax = (prosum.maxP === nothing) ? _MATPOWER_UNLIMITED_P_MW : prosum.maxP
+    pmin = (prosum.minP === nothing) ? -_MATPOWER_UNLIMITED_P_MW : prosum.minP
     #! format: off
     line = string( bus_i, "\t", p, "\t", q, "\t", qmax,"\t", qmin, "\t", Vg, "\t",  mbase, "\t", status, "\t",  pmax, "\t", pmin, "\t",  pc1, "\t", pc2, 
                           "\t", qc1min, "\t", qc1max, "\t", qc2min, "\t", qc2max,  "\t",   ramp_agc, "\t", ramp_10,"\t",  ramp_30, "\t",  ramp_q, "\t",  apf, "; %Gen: ",  cTypStr, "_",  name, ")\n", )
@@ -272,8 +350,8 @@ function writeGeneratorData(sb_mva::Float64, NodeDict::Dict{Int,Node}, ProSumVec
     qmin = -1.0 * sb_mva
     mbase = sb_mva
     status = 1
-    pmax = sb_mva
-    pmin = -1.0 * sb_mva
+    pmax = _MATPOWER_UNLIMITED_P_MW
+    pmin = -_MATPOWER_UNLIMITED_P_MW
     pc1 = pc2 = qc1min = qc1max = qc2min = qc2max = ramp_agc = ramp_10 = ramp_30 = ramp_q = apf = 0.0
     #! format: off
     line = string(slackIdx, "\t",  p,"\t", q,"\t", qmax,"\t", qmin,"\t", vgSlack,"\t", mbase,"\t", status, "\t", pmax, "\t",  pmin, "\t", pc1, "\t", pc2, "\t", qc1min, "\t", qc1max, "\t",  qc2min, "\t", qc2max, 
@@ -364,15 +442,35 @@ function writeCostData(file, gens::Vector{Union{Nothing,ProSumer}})
 end
 
 
+# "T" or "L" for mpc.branch_kind and the TAP column (a line writes TAP 0).
+# An imported kind wins; a MATPOWER import without apply_branch_kind stores
+# :unknown, which says nothing and falls through. The fallback is the Branch
+# convention: a line carries ratio 0, a transformer a non-zero ratio, also
+# 1.0 (the 380 kV legs of a three-winding star). Judging by ratio != 1 wrote
+# every line as "T" and the star legs as lines with TAP 0.
 function _matpower_branch_kind(net::Net, i::Int, br::Branch)
   meta = get(net.matpower_branch_metadata, i, nothing)
   if meta !== nothing && hasproperty(meta, :dtf_kind)
     return uppercase(string(meta.dtf_kind)) == "T" ? "T" : "L"
   elseif meta !== nothing && hasproperty(meta, :orig_kind)
     k = uppercase(String(meta.orig_kind))
-    return k in ("T", "TRAFO", "TRANSFORMER") ? "T" : "L"
+    k in ("T", "TRAFO", "TRANSFORMER", "2WT") && return "T"
+    k in ("L", "LINE", "ACL") && return "L"
   end
-  return (br.ratio != 1.0 || br.angle != 0.0) ? "T" : "L"
+  return br.ratio != 0.0 ? "T" : "L"
+end
+
+# TAP and SHIFT of a branch row (#513): a transformer writes the values
+# calcBranchRatio stamps (the live tap_ratio and phase_shift_deg), because
+# MATPOWER has no tap changer and a foreign reader must solve the network
+# Sparlectra solves; the neutral position travels in columns 13 and 14 of
+# mpc.sparlectra.tap_changers. Before 0.50.0 the neutral ratio stood here, so
+# a transformer off neutral (sp_case14 Wehrden: neutral 1.025, 1.0 in
+# effect) solved differently outside Sparlectra. A line row writes TAP 0 and
+# keeps its stored angle, which the Y-bus ignores (ratio 0).
+function _matpower_branch_tap_in_effect(br::Branch, kind::AbstractString)::Tuple{Float64,Float64}
+  br.ratio == 0.0 && return (0.0, br.angle)
+  return (kind == "T" ? br.tap_ratio : 0.0, br.phase_shift_deg)
 end
 
 function writeBranchData(net::Net, file; write_solution::Bool = true)
@@ -398,7 +496,7 @@ function writeBranchData(net::Net, file; write_solution::Bool = true)
     b = has_symmetric_shunt(br) ? br.b_pu : 2.0 * _matpower_symmetric_arm(br.b_from_pu, br.b_to_pu)
     g = has_symmetric_shunt(br) ? br.g_pu : 2.0 * _matpower_symmetric_arm(br.g_from_pu, br.g_to_pu)
     if abs(g) > 1e-6
-      @info "Branch shunt conductance g is not directly represented by standard MATPOWER branch rows; export preserves Sparlectra branch g_pu in proprietary metadata for round trips" g
+      @info "Branch shunt conductance g is not directly represented by standard MATPOWER branch rows; export carries it in the transformer loss metadata, for a line as a branch-derived bus shunt" g
     end
     rateA = 0 # 0 for unlimited
     if !isnothing(br.sn_MVA)
@@ -408,8 +506,7 @@ function writeBranchData(net::Net, file; write_solution::Bool = true)
     rateC = 0 # 0 for unlimited
 
     kind = _matpower_branch_kind(net, i, br)
-    ratio = kind == "T" ? br.ratio : 0.0
-    angle = br.angle
+    ratio, angle = _matpower_branch_tap_in_effect(br, kind)
     status = Int(br.status)
     angmin = -360 #br.angmin
     angmax = 360 #br.angmax
@@ -498,8 +595,8 @@ end
 # emitted once whenever any extension content is present (transformer-loss
 # metadata, the tap-changer-model roundtrip marker, or the solution-written
 # marker); each sub-field is otherwise independently optional.
-function writeSparlectraExtensionBlock(file; loss_rows, tap_changer_model_marker::Union{Nothing,Symbol}, solution_written::Bool, link_rows = Tuple{Int,Int,Int}[], tap_changer_rows = NTuple{11,Float64}[], branch_shunt_rows = NTuple{4,Float64}[])
-  isempty(loss_rows) && tap_changer_model_marker === nothing && !solution_written && isempty(link_rows) && isempty(tap_changer_rows) && isempty(branch_shunt_rows) && return nothing
+function writeSparlectraExtensionBlock(file; loss_rows, tap_changer_model_marker::Union{Nothing,Symbol}, solution_written::Bool, link_rows = Tuple{Int,Int,Int}[], tap_changer_rows = NTuple{14,Float64}[], branch_shunt_rows = NTuple{4,Float64}[], aux_bus_rows = Int[])
+  isempty(loss_rows) && tap_changer_model_marker === nothing && !solution_written && isempty(link_rows) && isempty(tap_changer_rows) && isempty(branch_shunt_rows) && isempty(aux_bus_rows) && return nothing
   write(file, "mpc.sparlectra = struct();\n")
   write(file, "mpc.sparlectra.format_version = 1;\n")
   !isempty(loss_rows) && writeSparlectraTransformerLossMetadata(file, loss_rows)
@@ -513,19 +610,33 @@ function writeSparlectraExtensionBlock(file; loss_rows, tap_changer_model_marker
     write(file, "];\n")
   end
   if !isempty(branch_shunt_rows)
-    write(file, "%% branch-derived bus shunts (branch bus Gs_MW Bs_MVar): the terminal excess of an asymmetric branch shunt, contained in the bus GS/BS above; an outage of the branch takes it away\n")
+    write(file, "%% branch-derived bus shunts (branch bus Gs_MW Bs_MVar): the terminal excess of an asymmetric branch shunt or the conductance of a line, contained in the bus GS/BS above; an outage of the branch takes it away\n")
     write(file, "mpc.sparlectra.branch_shunts = [\n")
     for r in branch_shunt_rows
       write(file, "\t", string(Int(r[1])), "\t", string(Int(r[2])), "\t", string(r[3]), "\t", string(r[4]), ";\n")
     end
     write(file, "];\n")
   end
+  if !isempty(aux_bus_rows)
+    # the auxiliary role (_is_aux_node) by bus number: a bus keeps its own
+    # name, so the name no longer says that it is a star point
+    write(file, "%% auxiliary buses (bus): three-winding star points and other internal nodes, flat start at the ratio of the stiffest winding\n")
+    write(file, "mpc.sparlectra.aux_buses = [\n")
+    for b in aux_bus_rows
+      write(file, "\t", string(b), ";\n")
+    end
+    write(file, "];\n")
+  end
   if !isempty(tap_changer_rows)
-    write(file, "%% tap-changer nameplate data (branch tap_step tap_min_step tap_max_step tap_current_step phase_step_deg phase_min_step phase_max_step phase_current_step psi_deg phase_du_step)\n")
+    # always 14 columns (#513): 13 neutral_ratio and 14 neutral_shift_deg
+    # mark that TAP/SHIFT of mpc.branch carry the position in effect; a
+    # reader before 0.50.0 rejects the width instead of applying the
+    # position a second time
+    write(file, "%% tap-changer nameplate data (branch tap_step tap_min_step tap_max_step tap_current_step phase_step_deg phase_min_step phase_max_step phase_current_step psi_deg phase_du_step ratio_grid neutral_ratio neutral_shift_deg); TAP/SHIFT in mpc.branch are the ratio and shift in effect\n")
     write(file, "mpc.sparlectra.tap_changers = [\n")
     for r in tap_changer_rows
       write(file, "\t", string(Int(r[1])))
-      for v in r[2:end]
+      for v in r[2:14]
         write(file, "\t", string(v))
       end
       write(file, ";\n")
@@ -535,42 +646,100 @@ function writeSparlectraExtensionBlock(file; loss_rows, tap_changer_model_marker
   return nothing
 end
 
+# whole position when `p` is one up to the rounding of its computation
+_matpower_snap_position(p::Float64)::Float64 = (r = round(p); abs(p - r) <= 1e-9 ? r : p)
+
 # Tap-changer nameplate rows for the extension block, in mpc.branch row
-# numbering (11 columns incl. psi_deg and phase_du_step). Emitted only for
+# numbering (14 columns incl. psi_deg, phase_du_step, ratio_grid and the
+# neutral position neutral_ratio, neutral_shift_deg, while mpc.branch
+# carries the position in effect, #513). Emitted only for
 # transformer branches whose LIVE position sits off neutral or whose grid
 # deviates from the constructor defaults, so legacy exports stay
 # byte-identical. Steps may be fractional (a controller can leave a tap
 # between mechanical positions). Delta-u PSTs export their position in
-# additional-voltage steps; degree-grid changers use relative degrees.
-function _sparlectra_tap_changer_rows(net::Net)::Vector{NTuple{11,Float64}}
-  rows = NTuple{11,Float64}[]
+# additional-voltage steps; degree-grid changers use relative degrees. A
+# line (ratio 0) gets no row; a transformer always writes its ratio as TAP,
+# also 1.0, so the reader builds a transformer and accepts the changer.
+# A CGMES ratio changer (tap_ratio_grid :linear) writes its positions on its
+# own grid, counted from `ratio` (_tap_r1_position, as the SCF writer), with
+# ratio_grid 1; on the fraction grid the file gave the wrong position
+# (-7.41 for 8 steps of 1 %) and the reimport lost the grid. A tabular
+# changer stays on the fraction grid: MATPOWER does not carry the table, so
+# only the fraction position brings its ratio back.
+function _sparlectra_tap_changer_rows(net::Net)::Vector{NTuple{14,Float64}}
+  rows = NTuple{14,Float64}[]
   for (k, br) in enumerate(net.branchVec)
     br.ratio != 0.0 || continue
     base = br.ratio
     grid_default = br.tap_step == 0.00625 && br.tap_min == 0.9 && br.tap_max == 1.1 && br.phase_step_deg == 1.25 && br.phase_min_deg == -30.0 && br.phase_max_deg == 30.0 && br.phase_du_step == 0.0
     on_neutral = br.tap_ratio == base && br.phase_shift_deg == br.angle
-    (grid_default && on_neutral) && continue
+    # a declared changer keeps its row even at neutral on the default grid:
+    # the declaration is what releases it for the tap estimation
+    declared = br.ratio_tap_declared || br.phase_tap_declared
+    (grid_default && on_neutral && !declared) && continue
     tstep = br.has_ratio_tap ? br.tap_step : 0.0
-    tminS = tstep > 0.0 ? (base / br.tap_max - 1.0) / tstep : 0.0
-    tmaxS = tstep > 0.0 ? (base / br.tap_min - 1.0) / tstep : 0.0
-    tcur = tstep > 0.0 ? (base / br.tap_ratio - 1.0) / tstep : 0.0
     psi = br.tap_est_alpha_deg
     du = br.phase_du_step
+    # a Delta-u changer divides the live ratio, so with one present the
+    # ratio position and the Delta-u position come from the split. A single
+    # changer reads psi 0 as 90 like the reader; a pair passes psi as it is,
+    # so a pair whose psi a caller set to 0 is split exactly at Delta-u
+    # position 0 and refused off it (_du_tap_split), not split along a
+    # guessed 90 (setTapEstimation! keeps the stored psi)
+    du_split = du > 0.0 ? _du_tap_split(br, (psi == 0.0 && tstep == 0.0) ? 90.0 : psi) : nothing
+    # A single changer whose model lies along psi 0 (an SCF file that states
+    # alpha_deg 0) has its Delta-u part on the real axis. The projection on
+    # 90 gives position 0 for it, and the psi 0 written here reads back as
+    # 90, so the row would be wrong either way: refuse it. A 90 model whose
+    # psi a caller set to 0 has no real part and passes.
+    if du > 0.0 && psi == 0.0 && tstep == 0.0
+      rpar = _du_tap_split(br, 0.0)[2]
+      abs(rpar) > 1e-9 && throw(ArgumentError("branch $(br.fromBus)-$(br.toBus): a Delta-u changer along psi 0 off position 0 ($(rpar / du) steps): MATPOWER reads psi 0 as 90 and cannot carry it; write the case as SCF."))
+    end
+    # The psi column knows only 0 = not given, which the reader takes as 90.
+    # At Delta-u position 0 a stated psi 0 and a psi set to 0 cannot be told
+    # apart (t is the neutral tap either way), so the row goes out with t
+    # right but the direction comes back as 90: warn. A pair gets here only
+    # at position 0 (_du_tap_split throws otherwise). A single changer off
+    # position 0 that gets here is a 90 model whose psi a caller set to 0:
+    # split along 90 and read back at 90, nothing is lost.
+    if du > 0.0 && psi == 0.0 && abs(du_split[2]) <= 1e-9
+      @warn "MATPOWER export: Delta-u changer with psi 0 at Delta-u position 0 on branch $(br.fromBus)-$(br.toBus) is written as psi 0, which the reader takes as not given and builds at 90 deg; a stated psi 0 is lost, write the case as SCF to keep it" branch = k
+    end
+    rlive = du_split !== nothing ? du_split[1] : br.tap_ratio
+    linear = tstep > 0.0 && br.tap_ratio_grid === :linear && _tap_r1_model(br) === nothing && br.tap_ratio_points === nothing
+    if linear
+      lo, hi = _tap_r1_band(br)
+      tminS = _matpower_snap_position(lo)
+      tmaxS = _matpower_snap_position(hi)
+      tcur = _matpower_snap_position(_tap_r1_position(br, base / rlive - 1.0))
+    else
+      tminS = tstep > 0.0 ? (base / br.tap_max - 1.0) / tstep : 0.0
+      tmaxS = tstep > 0.0 ? (base / br.tap_min - 1.0) / tstep : 0.0
+      tcur = tstep > 0.0 ? (base / rlive - 1.0) / tstep : 0.0
+    end
     if du > 0.0
-      ψ = deg2rad(psi == 0.0 ? 90.0 : psi)
-      tbase = base * cis(deg2rad(br.angle))
-      tlive = (br.tap_ratio == 0.0 ? base : br.tap_ratio) * cis(deg2rad(br.phase_shift_deg))
       pstep = 0.0
       pminS = br.phase_du_min_step
       pmaxS = br.phase_du_max_step
-      pcur = real((tbase / tlive - 1.0) * cis(-ψ)) / du
+      pcur = du_split[2] / du
+      if tstep > 0.0
+        # the split leaves rounding noise on both positions, and the band
+        # ends of the fraction grid carry their own: a ratio step at the band
+        # end came out above or below the band and the reader refused it.
+        # Snap the band ends with the position (the linear grid does above).
+        tminS = _matpower_snap_position(tminS)
+        tmaxS = _matpower_snap_position(tmaxS)
+        tcur = _matpower_snap_position(tcur)
+        pcur = _matpower_snap_position(pcur)
+      end
     else
       pstep = br.has_phase_tap ? br.phase_step_deg : 0.0
       pminS = pstep > 0.0 ? br.phase_min_deg / pstep : 0.0
       pmaxS = pstep > 0.0 ? br.phase_max_deg / pstep : 0.0
       pcur = pstep > 0.0 ? (br.phase_shift_deg - br.angle) / pstep : 0.0
     end
-    push!(rows, (Float64(k), tstep, tminS, tmaxS, tcur, pstep, pminS, pmaxS, pcur, psi, du))
+    push!(rows, (Float64(k), tstep, tminS, tmaxS, tcur, pstep, pminS, pmaxS, pcur, psi, du, linear ? 1.0 : 0.0, base, br.angle))
   end
   return rows
 end
@@ -615,13 +784,18 @@ function writeSparlectraMetadata(net::Net, file; solution_written::Bool = false,
     end
     write(file, "};\n")
   end
-  writeSparlectraExtensionBlock(file; loss_rows = _sparlectra_transformer_loss_rows(net), tap_changer_model_marker = _matpower_export_tap_changer_model_marker(net), solution_written = solution_written, link_rows = _sparlectra_link_rows(net), tap_changer_rows = _sparlectra_tap_changer_rows(net), branch_shunt_rows = branch_shunt_rows)
+  writeSparlectraExtensionBlock(file; loss_rows = _sparlectra_transformer_loss_rows(net), tap_changer_model_marker = _matpower_export_tap_changer_model_marker(net), solution_written = solution_written, link_rows = _sparlectra_link_rows(net), tap_changer_rows = _sparlectra_tap_changer_rows(net), branch_shunt_rows = branch_shunt_rows, aux_bus_rows = Int[n.busIdx for n in net.nodeVec if _is_aux_node(n)])
 end
 
 """
     writeMatpowerCasefile(net::Net, pathfilename::String; write_solution::Union{Nothing,Bool} = nothing, source_case = nothing)
 
 Write Matpower case files.
+
+A transformer row carries the ratio and shift in effect in `TAP`/`SHIFT`,
+so every MATPOWER reader solves the same network. Tap-changer nameplates
+and the neutral position go to `mpc.sparlectra.tap_changers` (14 columns),
+which Sparlectra reads back; see the MATPOWER page of the documentation.
 
 # Arguments
 - `net::Net`: Network object.
@@ -636,7 +810,7 @@ Write Matpower case files.
   input. The input file itself is never written by this function.
 - `write_solution::Union{Nothing,Bool}`: Whether to write the solved AC
   power-flow state back into the export: `mpc.bus` `VM`/`VA` reflect the
-  solved node state, and `mpc.branch` gains the MATPOWER result columns 14–17
+  solved node state, and `mpc.branch` gains the MATPOWER result columns 14-17
   (`PF`, `QF`, `PT`, `QT`) sourced from the existing branch-flow report path
   (no flow recomputation in the exporter). `nothing` (default) reads
   `matpower_export.write_solution` from the active configuration
@@ -645,7 +819,15 @@ Write Matpower case files.
   the historical 13-column model-only `mpc.branch` export instead of writing
   empty result columns. When `false`, the export is a pure model file:
   `mpc.branch` keeps 13 columns and `VM = 1.0`/`VA = 0.0` for all
-  non-slack/non-PV buses (slack and PV setpoints are preserved).
+  non-slack/non-PV buses (slack and PV setpoints are preserved), except an
+  auxiliary bus (three-winding star point), which gets the start the
+  solver's flat start gives it: the voltage at which its stiffest winding
+  carries no current. With a slack angle other than 0 every bus is written
+  at the slack angle, the angle of the flat start. The auxiliary buses are listed in
+  `mpc.sparlectra.aux_buses`, so the reader keeps them auxiliary. A
+  network without solved branch flows writes the generator voltage setpoint
+  as `Vg` and as `VM` of its PV and slack bus, and the flat-start angle at a
+  PV bus.
 
 # Example
 ```julia
@@ -662,11 +844,16 @@ function writeMatpowerCasefile(net::Net, pathfilename::String; write_solution::U
   # keyword exists so a later :drop or :error can join without a new call
   asymmetric_shunts === :bus_shunt || throw(ArgumentError("writeMatpowerCasefile: asymmetric_shunts must be :bus_shunt (the only rule in this release), got $(repr(asymmetric_shunts))"))
   branch_shunt_rows = _matpower_branch_shunt_rows(net)
+  # MATPOWER has no mark for a step that was not transferred: the assumed
+  # middle position goes out as the step, one warning per transformer
+  for (k, br) in enumerate(net.branchVec)
+    which = _tap_step_assumed_text(br)
+    which === nothing || @warn "MATPOWER export: " * _tap_step_assumed_export_text(br.comp.cName, which) branch = k
+  end
   base, ext = splitext(pathfilename)
 
   case = basename(base)
   base = base * ".m"
-  @info "convertion to Matpower CASE-Files, Testcase: ($case)"
   transformer_loss_rows = _sparlectra_transformer_loss_rows(net)
   NodeDict = Dict{Int,Node}()
   for n in net.nodeVec
@@ -682,9 +869,9 @@ function writeMatpowerCasefile(net::Net, pathfilename::String; write_solution::U
 
   file = open(pathfilename, "w")
   writeHeader(net.baseMVA, file, case; has_transformer_loss_metadata = !isempty(transformer_loss_rows), source_case = source_case, solution_written = write_result_columns)
-  hasPVBus, slackIdx, vgSlack = writeBusData(net, file; write_solution = requested_write_solution, branch_shunt_rows = branch_shunt_rows)
+  hasPVBus, slackIdx, vgSlack = writeBusData(net, file; write_solution = requested_write_solution, solved = has_solution, branch_shunt_rows = branch_shunt_rows)
 
-  exported_gens = writeGeneratorData(net.baseMVA, NodeDict, net.prosumpsVec, file, hasPVBus, slackIdx, vgSlack)
+  exported_gens = writeGeneratorData(net.baseMVA, NodeDict, net.prosumpsVec, file, hasPVBus, slackIdx, vgSlack; solved = has_solution)
 
   writeBranchData(net, file; write_solution = write_result_columns)
   # generator costs (#471): carried from the import, written back unchanged

@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -163,6 +163,95 @@ function calcSkewAngleTap(; tap_fraction::Real, skew_angle_deg::Real, convention
   )
 end
 
+# Tap estimation (0.60.0): the factor of the tapped winding of one changer at
+# the continuous step s (relative to neutral), as magnitude m and angle a in
+# degrees, and its slope (dm/ds, da/ds). The set evaluation
+# (_tap_set_ratio_shift) multiplies or divides the branch ratio by m and
+# adds or subtracts a, as the import does. The formulas are the importers':
+# :asymmetrical is calcSkewAngleTap with :direct_regulating_vector (the
+# CGMES path, cgmes_mapping.jl _phaseTapRatioShift), :symmetrical is
+# calcPhaseTapAngleRatio's 2 atan(f/2), :linear the degree grid. m is
+# exactly 1.0 for :symmetrical and :linear, so a pure angle changer leaves
+# the branch ratio untouched bitwise. An additive changer has no factor; the
+# set evaluation adds its step itself.
+function _tap_changer_factor(ch::SETapChanger, s::Real)::Tuple{Float64,Float64}
+  ch.additive && throw(ArgumentError("_tap_changer_factor: changer $(ch.name) is additive and has no factor; use the set evaluation."))
+  k = ch.kind
+  k === :ratio && return (1.0 + s * ch.du, 0.0)
+  if k === :asymmetrical
+    r = calcSkewAngleTap(; tap_fraction = s * ch.du, skew_angle_deg = ch.alpha_deg, convention = :direct_regulating_vector)
+    return (r.effective_ratio, r.effective_shift_deg)
+  end
+  k === :symmetrical && return (1.0, 2.0 * atand(s * ch.du / 2.0))
+  k === :linear && return (1.0, s * ch.dphi_deg)
+  ratio, angle_deg, _, _ = _tap_table_eval(ch, s)
+  return (ratio, angle_deg)
+end
+
+function _tap_changer_slope(ch::SETapChanger, s::Real)::Tuple{Float64,Float64}
+  ch.additive && throw(ArgumentError("_tap_changer_slope: changer $(ch.name) is additive and has no factor; use the set tangent."))
+  k = ch.kind
+  k === :ratio && return (ch.du, 0.0)
+  if k === :asymmetrical
+    # v = 1 + s du e^(j alpha): d|v|/ds = Re(conj(v) v') / |v| and
+    # d arg(v)/ds = Im(conj(v) v') / |v|^2
+    dv = ch.du * cis(deg2rad(ch.alpha_deg))
+    v = 1.0 + s * dv
+    w = conj(v) * dv
+    return (real(w) / abs(v), rad2deg(imag(w) / abs2(v)))
+  end
+  k === :symmetrical && return (0.0, rad2deg(ch.du / (1.0 + (s * ch.du / 2.0)^2)))
+  k === :linear && return (0.0, ch.dphi_deg)
+  _, _, dratio, dangle = _tap_table_eval(ch, s)
+  return (dratio, dangle)
+end
+
+# Table changer at the absolute position p = neutral + s: (ratio, angle_deg,
+# dratio/ds, dangle/ds), linear between the points (magnitude and angle
+# separately). The slope is that of the current interval, the one to the
+# right on a point. A ratio table (outside_du set, CGMES
+# RatioTapChangerTable) continues with the import's formula 1 + s outside_du
+# from the next whole step beyond its end points on, linear between the end
+# point and that step, so the curve is continuous and still equals the
+# import at every whole step. A phase table continues its end interval
+# (for the Jacobian only; its fixation band is the table range).
+function _tap_table_eval(ch::SETapChanger, s::Real)::NTuple{4,Float64}
+  pts = ch.table
+  n = length(pts)
+  p = ch.neutral + Float64(s)
+  if ch.outside_du !== nothing && (p >= pts[end].step || p < pts[1].step)
+    upper = p >= pts[end].step
+    e = upper ? pts[end] : pts[1]
+    q = upper ? e.step + 1 : e.step - 1
+    if upper ? p < q : p >= q
+      # linear from the end point to the formula value at the next whole step
+      fq = 1.0 + (q - ch.neutral) * ch.outside_du
+      w = (p - e.step) / (q - e.step)
+      dw = 1.0 / (q - e.step)
+      return (e.ratio + (fq - e.ratio) * w, e.angle_deg * (1.0 - w), (fq - e.ratio) * dw, -e.angle_deg * dw)
+    end
+    return (1.0 + s * ch.outside_du, 0.0, ch.outside_du, 0.0)
+  end
+  n == 1 && return (pts[1].ratio, pts[1].angle_deg, 0.0, 0.0)
+  k = _tap_table_interval(pts, p)
+  a, b = pts[k], pts[k + 1]
+  h = Float64(b.step - a.step)
+  dr = (b.ratio - a.ratio) / h
+  da = (b.angle_deg - a.angle_deg) / h
+  return (a.ratio + dr * (p - a.step), a.angle_deg + da * (p - a.step), dr, da)
+end
+
+# index k of the interval [pts[k], pts[k+1]) that holds p, the one to the
+# right on a point; below the table the first, from the last point on the
+# last interval
+function _tap_table_interval(pts::Vector{SETapPoint}, p::Float64)::Int
+  n = length(pts)
+  for k in 1:n - 1
+    p < pts[k + 1].step && return k
+  end
+  return n - 1
+end
+
 """
     calcTapImpedanceCorrectionFactor(; tap_changer_model::Symbol, tap_fraction::Union{Nothing,Real} = nothing, skew_angle_deg::Real = 0.0, ratio::Union{Nothing,Real} = nothing)::Float64
 
@@ -170,9 +259,9 @@ Return the multiplicative correction factor applied to the transformer series
 impedance (R and X) for the selected tap-changer model.
 
 Sparlectra distinguishes two tap-changer models:
-- `:ideal` — the tap changer only changes the complex winding ratio; the
+- `:ideal`: the tap changer only changes the complex winding ratio; the
   short-circuit impedance keeps its neutral-position value (factor `1.0`).
-- `:impedance_correction` — the tap changer acts on a physical winding, so the
+- `:impedance_correction`: the tap changer acts on a physical winding, so the
   short-circuit impedance is re-referred through the tapped winding. R and X
   are scaled with ``|1 + f e^{j\\varphi}|^2``, where `f` is the
   additional-voltage fraction (`tap_fraction`) and ``\\varphi`` the skew angle
@@ -275,7 +364,7 @@ end
 
 # Failure behavior
 Errors if `m.voltage_step_increment` is `nothing`. Always throws
-`ArgumentError` for `kind == :tabular` — a tabular model has no linear tap
+`ArgumentError` for `kind == :tabular`: a tabular model has no linear tap
 fraction, only discrete `(ratio, angle_deg)` rows (see
 [`calcPhaseTapTable`](@ref)).
 """
@@ -289,9 +378,9 @@ end
     calcPhaseTapTable(m::PhaseTapChangerModel; step::Int = m.step) -> NamedTuple
 
 Exact lookup of the `m.table` row for `step` (no interpolation between table
-steps — taps are discrete; continuous interpolation is deferred to a later,
+steps: taps are discrete; continuous interpolation is deferred to a later,
 outer-loop-facing stage). Implemented as a linear `findfirst` scan over the
-already-validated, strictly ascending table — no `Dict` caching in this
+already-validated, strictly ascending table, no `Dict` caching in this
 stage.
 
 # Returns
@@ -335,7 +424,7 @@ Effective ratio/shift/regulating-vector of a CGMES phase-tap-changer model
 - `kind == :asymmetrical` (ch. 6.2, quadrature booster = `ψ = 90°`):
   delegates to `calcSkewAngleTap(tap_fraction = f, skew_angle_deg =
   winding_connection_angle_deg, convention = m.convention)` unchanged.
-- `kind == :tabular`: table OVERRIDES the formula path — delegates to
+- `kind == :tabular`: table OVERRIDES the formula path, delegates to
   [`calcPhaseTapTable`](@ref) for `(effective_ratio, effective_shift_deg)`
   and reconstructs `regulating_vector` as the exact inverse of
   `calcSkewAngleTap`'s regulating-vector-to-(ratio,shift) mapping for
@@ -386,7 +475,7 @@ of [`calcPhaseTapAngleRatio`](@ref) at some step):
 - `:symmetrical`:  `X(α) = x_min + (x_max - x_min) * (sind(α/2) / sind(αmax/2))^2`
 - `:asymmetrical`: `X(α) = x_min + (x_max - x_min) * (tand(α) / tand(αmax))^2`
 - `:tabular`: returns the `x_pu` of the `m.table` row at `m.step` (may be
-  `nothing`); `alpha_deg` is ignored — the table is the single source of
+  `nothing`); `alpha_deg` is ignored: the table is the single source of
   truth and carries no continuous angle dependence.
 
 where (for the formula kinds) `αmax` is
@@ -591,10 +680,11 @@ this referral must not rely on it. Impedances scale with `(U2/U1)²`,
 admittances with the inverse. The series values are summed (`r`, `x`); the
 shunt admittance is returned per end on the end-2 base (`g_from`, `b_from`
 for end 1, `g_to`, `b_to` for end 2, both in siemens) next to the totals
-`g`, `b`, so the branch keeps each end's magnetizing admittance on its own
-terminal. The end-2 (to-side) base matches the branch-model convention of
-`calcAdmittance` (series/shunt admittance on the to side, complex ratio at
-the from side, the from arm behind it).
+`g`, `b`. The CGMES import uses the totals and puts half of them on each
+terminal arm (since 0.41.0), the placement the SV of the ENTSO-E test
+configurations is computed with. The end-2 (to-side) base matches the
+branch-model convention of `calcAdmittance` (series/shunt admittance on the
+to side, complex ratio at the from side, the from arm behind it).
 """
 function calc2WTEndsReferredRXGB(; r1::Float64, x1::Float64, g1::Float64, b1::Float64, r2::Float64, x2::Float64, g2::Float64, b2::Float64, U1::Float64, U2::Float64)
   k = (U2 / U1)^2

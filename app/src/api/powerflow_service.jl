@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -221,7 +221,7 @@ function _service_effective_csv_format(config_overrides::AbstractDict, config_fi
       nothing
     end
   end
-  return _resolve_detailed_csv_format(name === nothing ? "technical" : String(name))
+  return _resolve_detailed_csv_format(name === nothing ? "auto" : String(name))
 end
 
 """
@@ -365,6 +365,16 @@ function start_powerflow_run(request::AbstractDict; case_directory::Union{Nothin
     se_start_run_id isa AbstractString || return _service_failure("invalid_request", "se_start_run_id must be a string.")
     (se_mode || diagnose_mode || short_circuit_mode || import_analysis_mode) && return _service_failure("invalid_request", "se_start_run_id combines only with a plain power flow or contingency_mode.")
   end
+  # QSTS (26a): the request names the mode of the series run
+  # (sequential or snapshots); the run sets qsts.mode for itself, the
+  # configuration file keeps its value. Its own run kind, exclusive with
+  # the others (pattern contingency_mode)
+  qsts_mode = _service_request_value(request, "qsts_mode", nothing)
+  if qsts_mode !== nothing
+    (qsts_mode isa AbstractString && qsts_mode in _QSTS_SERVICE_MODES) || return _service_failure("invalid_request", "qsts_mode must be one of $(join(_QSTS_SERVICE_MODES, ", ")).")
+    (diagnose_mode || short_circuit_mode || import_analysis_mode || contingency_mode || se_mode || se_start_run_id !== nothing) &&
+      return _service_failure("invalid_request", "qsts_mode excludes diagnose_mode, short_circuit_mode, import_analysis_mode, contingency_mode, se_mode and se_start_run_id.")
+  end
   detailed_result_csv = _service_request_value(request, "detailed_result_csv", false)
   detailed_result_csv isa Bool || return _service_failure("invalid_request", "detailed_result_csv must be boolean.")
   export_cgmes = _service_request_value(request, "export_cgmes", false)
@@ -415,7 +425,7 @@ function start_powerflow_run(request::AbstractDict; case_directory::Union{Nothin
   end
   # Import-analysis runs stop even earlier than short-circuit runs: only the
   # CGMES delivery files are parsed (no mapping, no solve) and the
-  # importFailureAnalysis report becomes the run's product — a fast pre-check
+  # importFailureAnalysis report becomes the run's product, a fast pre-check
   # before a slow full import (see _run_import_analysis_service).
   if import_analysis_mode
     ia_result = try
@@ -483,7 +493,7 @@ function start_powerflow_run(request::AbstractDict; case_directory::Union{Nothin
       ct_se_state = art.path
     end
     ct_result = try
-      _run_contingency_service(casefile, config_file, output_dir, run_id, contingency_kind; config_overrides = config_overrides, weights_path = ct_weights_path, se_state_file = ct_se_state, se_run_id = se_start_run_id === nothing ? nothing : String(se_start_run_id), se_start_mode = String(se_start_mode), scenario_source = contingency_scenario_source, scenario_file = contingency_scenario_file, screening_mode = contingency_screening_mode, screening_margin_pct = contingency_screening_margin, progress = progress_callback)
+      _run_contingency_service(casefile, config_file, output_dir, run_id, contingency_kind; config_overrides = config_overrides, weights_path = ct_weights_path, se_state_file = ct_se_state, se_run_id = se_start_run_id === nothing ? nothing : String(se_start_run_id), se_start_mode = String(se_start_mode), scenario_source = contingency_scenario_source, scenario_file = contingency_scenario_file, screening_mode = contingency_screening_mode, screening_margin_pct = contingency_screening_margin, progress = progress_callback, phase_callback = phase_callback)
     catch err
       err isa PowerFlowAborted && rethrow()
       return _service_failure("execution_error", sprint(showerror, err, catch_backtrace()); run_id = run_id)
@@ -500,6 +510,30 @@ function start_powerflow_run(request::AbstractDict; case_directory::Union{Nothin
       return _service_failure("run_index_error", sprint(showerror, err, catch_backtrace()); run_id = run_id)
     end
     return to_dict(ct_result)
+  end
+  # QSTS runs (26a) bypass the single power-flow pipeline like N-1: read
+  # the series, run it with the companion controllers, write the result
+  # files, the element view and the charts (see _run_qsts_service). Same
+  # result and registry conventions.
+  if qsts_mode !== nothing
+    qs_result = try
+      _run_qsts_service(casefile, config_file, output_dir, run_id, String(qsts_mode); config_overrides = config_overrides, progress = progress_callback, phase_callback = phase_callback)
+    catch err
+      err isa PowerFlowAborted && rethrow()
+      return _service_failure("execution_error", sprint(showerror, err, catch_backtrace()); run_id = run_id)
+    end
+    try
+      lock(_POWERFLOW_SERVICE_LOCK) do
+        _POWERFLOW_SERVICE_RUNS[qs_result.run_id] = qs_result
+        _write_powerflow_run_index!(root, qs_result)
+      end
+    catch err
+      lock(_POWERFLOW_SERVICE_LOCK) do
+        delete!(_POWERFLOW_SERVICE_RUNS, qs_result.run_id)
+      end
+      return _service_failure("run_index_error", sprint(showerror, err, catch_backtrace()); run_id = run_id)
+    end
+    return to_dict(qs_result)
   end
   if se_mode
     # state estimation run (SE phase 5): measurement file resolved against the
@@ -528,7 +562,6 @@ function start_powerflow_run(request::AbstractDict; case_directory::Union{Nothin
         max_eliminations = _se_optional_int(request, "se_max_eliminations"),
         update_shunts = Bool(_service_request_value(request, "se_update_shunts", false)),
         report_correlation = _se_optional_bool(request, "se_report_correlation"),
-        tap_estimation = Bool(_service_request_value(request, "se_tap_estimation", false)),
         k_eliminate = _se_optional_float(request, "se_k_eliminate"),
         robust_mode = _se_optional_symbol(request, "se_robust_mode"),
         robust_k1 = _se_optional_float(request, "se_robust_k1"),
@@ -628,7 +661,7 @@ function start_powerflow_run(request::AbstractDict; case_directory::Union{Nothin
     end
     # Same self-check summary the programmatic run_fixed_reference_self_check
     # writes: which start machinery was forced off, the start-state residual,
-    # and the CGMES SV-coverage caveat — next to diagnose.log.
+    # and the CGMES SV-coverage caveat, next to diagnose.log.
     try
       _write_self_check_summary(result, result.output_dir)
     catch err

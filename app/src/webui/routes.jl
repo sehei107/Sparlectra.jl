@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -105,7 +105,7 @@ function _webui_settings_show_case_profile(query::AbstractDict, casefile::Abstra
 end
 
 # Fails open (notice stays visible) on any load error, matching
-# _powerflow_config_notice's fail-safe pattern — a broken/missing config file
+# _powerflow_config_notice's fail-safe pattern: a broken/missing config file
 # should not silently suppress an otherwise-informative notice.
 function _powerflow_show_case_settings_notice(config_file::AbstractString)::Bool
   isempty(strip(config_file)) && return true
@@ -122,7 +122,7 @@ end
 # (a nested-dict merge, so other keys/comments in the file are left as-is by
 # the merge itself; only the final YAML dump loses comments, same tradeoff as
 # the existing "Configuration refresh" writer). Requires a server-local,
-# already-existing config file — the same guard the config editor uses.
+# already-existing config file, the same guard the config editor uses.
 function _powerflow_dismiss_case_settings_notice!(config_file::AbstractString)
   isempty(strip(config_file)) && throw(ArgumentError("No configuration file was provided."))
   isfile(config_file) || throw(ArgumentError("Configuration refresh writes require a server-local file. Use a server-local selected configuration file."))
@@ -148,8 +148,8 @@ function route_sparlectra_webui(method::AbstractString, target::AbstractString, 
     # the case remembered by the Case page (plain nav links carry no query)
     selected_casefile = get(query, "casefile", "")
     selected_casefile = isempty(selected_casefile) ? _webui_recall_selected_case(output_root) : _webui_remember_selected_case!(output_root, selected_casefile)
-    case_profile = isempty(selected_casefile) ? nothing : _webui_load_case_settings(output_root, selected_casefile; case_directory = runtime === nothing ? nothing : runtime.case_directory)
     selected_config_file = get(query, "config_file", runtime === nothing ? "" : runtime.config_file)
+    case_profile = isempty(selected_casefile) ? nothing : _webui_load_case_settings(output_root, selected_casefile; config_file = selected_config_file, case_directory = runtime === nothing ? nothing : runtime.case_directory)
     return _webui_html(render_powerflow_form(;
       output_root,
       case_directory = runtime === nothing ? nothing : runtime.case_directory,
@@ -173,7 +173,7 @@ function route_sparlectra_webui(method::AbstractString, target::AbstractString, 
     # one the page reopens on the remembered case
     case_page_casefile = get(query, "casefile", "")
     case_page_casefile = isempty(case_page_casefile) ? _webui_recall_selected_case(output_root) : _webui_remember_selected_case!(output_root, case_page_casefile)
-    case_page_profile = isempty(case_page_casefile) ? nothing : _webui_load_case_settings(output_root, case_page_casefile; case_directory = runtime === nothing ? nothing : runtime.case_directory)
+    case_page_profile = isempty(case_page_casefile) ? nothing : _webui_load_case_settings(output_root, case_page_casefile; config_file = get(query, "config_file", runtime === nothing ? "" : runtime.config_file), case_directory = runtime === nothing ? nothing : runtime.case_directory)
     return _webui_html(render_case_page(;
       output_root,
       case_directory = runtime === nothing ? nothing : runtime.case_directory,
@@ -189,7 +189,7 @@ function route_sparlectra_webui(method::AbstractString, target::AbstractString, 
     _webui_log_route!(log_root, "settings_page_opened", verb, path; status = "opened")
     settings_casefile = get(query, "casefile", "")
     settings_casefile = isempty(settings_casefile) ? _webui_recall_selected_case(output_root) : _webui_remember_selected_case!(output_root, settings_casefile)
-    settings_profile = isempty(settings_casefile) ? nothing : _webui_load_case_settings(output_root, settings_casefile; case_directory = runtime === nothing ? nothing : runtime.case_directory)
+    settings_profile = isempty(settings_casefile) ? nothing : _webui_load_case_settings(output_root, settings_casefile; config_file = get(query, "config_file", runtime === nothing ? "" : runtime.config_file), case_directory = runtime === nothing ? nothing : runtime.case_directory)
     return _webui_html(render_settings_page(;
       output_root,
       case_directory = runtime === nothing ? nothing : runtime.case_directory,
@@ -320,6 +320,11 @@ function route_sparlectra_webui(method::AbstractString, target::AbstractString, 
     # dismiss button) renders there
     redirect_target = isempty(casefile) ? "/powerflow/settings" : "/powerflow/settings?casefile=$(_webui_urlencode(casefile))"
     return _webui_redirect(redirect_target)
+  elseif verb == "GET" && startswith(path, "/powerflow/result/") && endswith(path, "/qsts-chart")
+    # one chart of a QSTS run as SVG, from the run's element view (the
+    # element and quantity choice of the result page)
+    encoded_run_id = path[(lastindex("/powerflow/result/") + 1):(lastindex(path) - lastindex("/qsts-chart"))]
+    return handle_qsts_chart(_webui_urldecode(encoded_run_id), get(query, "element", ""), get(query, "quantity", ""))
   elseif verb == "GET" && startswith(path, "/powerflow/result/")
     run_id = _webui_urldecode(path[(lastindex("/powerflow/result/") + 1):end])
     get(query, "autorefresh", "") == "1" || _webui_log_route!(log_root, "powerflow_status_opened", verb, path; status = "opened", run_id)
@@ -368,7 +373,12 @@ function route_sparlectra_webui(method::AbstractString, target::AbstractString, 
     download = get(query, "download", "") == "1"
     # raw=1 shows a CSV or Markdown artifact as text instead of the rendered view
     raw = get(query, "raw", "") == "1"
-    response = download ? handle_powerflow_artifact_download(run_id, artifact_name) : handle_powerflow_artifact(run_id, artifact_name; raw)
+    # page=1 wraps an SVG chart in a Web UI page; without it the bare SVG is sent (embedding)
+    page = get(query, "page", "") == "1"
+    # digits=, power=, sort=, order= and hide= set the display of a CSV table
+    # (display only, the file stays as written)
+    csv_display = _webui_csv_display(query)
+    response = download ? handle_powerflow_artifact_download(run_id, artifact_name) : handle_powerflow_artifact(run_id, artifact_name; raw, page, csv_display)
     _webui_log_route!(log_root, download ? "artifact_downloaded" : "artifact_opened", verb, path; status = response.status, run_id, artifact = artifact_name)
     return response
   elseif verb == "GET" && path == "/powerflow/history"
@@ -429,11 +439,24 @@ function route_sparlectra_webui(method::AbstractString, target::AbstractString, 
   elseif verb == "POST" && path == "/webui/shutdown"
     _webui_log_route!(log_root, "webui_shutdown_requested", verb, path; status = runtime === nothing ? "unavailable" : "accepted")
     runtime === nothing && return _webui_html(render_webui_error(503, "Web UI shutdown is unavailable outside a running server."); status = 503)
+    # the Stop click carries the window geometry; saved so the next start
+    # opens the window where it was (one log line, with the reason when
+    # nothing was saved)
+    geometry = _webui_save_window_geometry!(runtime.config_file, form)
+    _webui_log_route!(log_root, "webui_window_geometry", verb, path; status = geometry.status, (k => v for (k, v) in pairs(geometry) if k != :status)...)
     @async begin
       sleep(0.05)
       _webui_request_shutdown!(runtime; reason = :explicit_shutdown)
     end
     return _webui_html(render_webui_shutdown())
+  elseif verb == "POST" && path == "/webui/update/check"
+    # POST, not GET: the check goes out to GitHub, and no prefetch, page
+    # refresh or link may trigger that; it runs on the button only
+    return handle_webui_update_check(; operation_log = log_root, output_root)
+  elseif verb == "POST" && path == "/webui/update/install"
+    # the server stops through the same call as Stop Web UI
+    update_shutdown = runtime === nothing ? nothing : () -> _webui_request_shutdown!(runtime; reason = :update_install)
+    return handle_webui_update_install(form; operation_log = log_root, shutdown = update_shutdown, output_root)
   elseif verb == "GET" && path == "/static/sparlectra.css"
     return SparlectraWebUIResponse(200, read(joinpath(@__DIR__, "static", "sparlectra.css"), String); content_type = "text/css; charset=utf-8")
   end

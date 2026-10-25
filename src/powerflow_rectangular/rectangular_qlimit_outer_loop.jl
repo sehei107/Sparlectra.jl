@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Udo Schmitz
+# Copyright 2023-2026 Udo Schmitz
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,12 +39,12 @@ function _matpower_q_limit_violations(net::Net, qreq_pu::AbstractVector, bus_typ
     # Only regulating, not-yet-clamped units are switchable candidates. Every
     # other generator-type unit at the bus runs at a FIXED reactive operating
     # point: loop-clamped units (qVal was set to their limit), and units that
-    # never regulate at all — Stage-0 HVDC converter injections, kept boundary
+    # never regulate at all: Stage-0 HVDC converter injections, kept boundary
     # equivalents, PQ-degraded SVCs. Their Q is part of the bus requirement but
     # not of the switchable pool. The previous code shared the FULL bus
     # requirement equally among all non-clamped units: fixed units became
     # "violators" of their own zero-width limits, and after clamping them the
-    # remaining regulators inherited the fixed units' Q on top of their own —
+    # remaining regulators inherited the fixed units' Q on top of their own:
     # false violations, wrong clamps, and on the ReliCapGrid CGM a case driven
     # infeasible (vm → 1e157 in the re-solve). Not CGMES-specific: any network
     # with a fixed and a regulating unit on one bus hits this.
@@ -56,7 +56,7 @@ function _matpower_q_limit_violations(net::Net, qreq_pu::AbstractVector, bus_typ
       qv = net.prosumpsVec[idx].qVal
       fixed_q_pu += (isnothing(qv) ? 0.0 : qv) / net.baseMVA
     end
-    # distribute_bus_generation! stores solved per-generator Q when possible —
+    # distribute_bus_generation! stores solved per-generator Q when possible:
     # note that nothing on the solver path calls it, so qRes is normally
     # `nothing` and the fallback below decides. It shares only the REMAINDER
     # (bus requirement minus the fixed units' scheduled Q) among the switchable
@@ -173,8 +173,6 @@ function _run_q_limits_matpower_outer_loop!(
   trust_region_expand_threshold::Float64 = 0.75,
   trust_region_step_mode::Symbol = :scaled,
   opt_flatstart::Bool,
-  opt_cooldown_iters::Union{Nothing,Int} = nothing,
-  opt_q_hyst_pu::Union{Nothing,Float64} = nothing,
   pv_table_rows::Int,
   qlimit_max_outer::Int,
   start_projection::Bool,
@@ -188,6 +186,7 @@ function _run_q_limits_matpower_outer_loop!(
   start_projection_requested_angle_mode::Symbol,
   start_projection_requested_voltage_mode::Symbol,
   start_projection_ratio_profile::Bool,
+  start_rotate_behind_pst::Bool,
   start_current_iteration_enabled::Bool,
   start_current_iteration_max_iter::Int,
   start_current_iteration_tol::Float64,
@@ -282,8 +281,6 @@ function _run_q_limits_matpower_outer_loop!(
         trust_region_expand_threshold = trust_region_expand_threshold,
         trust_region_step_mode = trust_region_step_mode,
         opt_flatstart = outer == 0 ? opt_flatstart : false,
-        opt_cooldown_iters = opt_cooldown_iters,
-        opt_q_hyst_pu = opt_q_hyst_pu,
         pv_table_rows = pv_table_rows,
         qlimit_max_outer = qlimit_max_outer,
         start_projection = outer == 0 ? start_projection : false,
@@ -297,6 +294,7 @@ function _run_q_limits_matpower_outer_loop!(
         start_projection_requested_angle_mode = start_projection_requested_angle_mode,
         start_projection_requested_voltage_mode = start_projection_requested_voltage_mode,
         start_projection_ratio_profile = start_projection_ratio_profile,
+        start_rotate_behind_pst = start_rotate_behind_pst,
         start_current_iteration_enabled = outer == 0 ? start_current_iteration_enabled : false,
         start_current_iteration_max_iter = start_current_iteration_max_iter,
         start_current_iteration_tol = start_current_iteration_tol,
